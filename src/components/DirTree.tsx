@@ -82,7 +82,7 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
   return (
     <>
       <button
-        onClick={() => hasChildren ? setExpanded(!expanded) : onSelectDir(node.path)}
+        onClick={() => { onSelectDir(node.path); if (hasChildren) setExpanded(!expanded); }}
         className={`w-full text-left px-2 py-1 rounded text-sm flex items-center gap-1 ${isSelected ? "bg-blue-600" : "hover:bg-gray-700"}`}
         style={{ paddingLeft: `${8 + depth * 16}px` }}
       >
