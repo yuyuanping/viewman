@@ -1,5 +1,6 @@
 pub mod models;
 pub mod db;
+pub mod scanner;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
