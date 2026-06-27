@@ -20,3 +20,9 @@ export interface VideoWithProgress {
   video: Video;
   position: number | null;
 }
+
+export interface RecentlyPlayed {
+  video: Video;
+  position: number;
+  updated_at: string;
+}

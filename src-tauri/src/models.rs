@@ -25,3 +25,10 @@ pub struct VideoProgress {
     pub video: Video,
     pub position: Option<f64>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentlyPlayed {
+    pub video: Video,
+    pub position: f64,
+    pub updated_at: String,
+}

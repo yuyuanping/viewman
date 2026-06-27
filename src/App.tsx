@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { VideoGrid } from "./components/VideoGrid";
 import { PlayerView } from "./components/PlayerView";
@@ -8,7 +8,7 @@ import { usePlayer } from "./hooks/usePlayer";
 import type { Video } from "./types";
 
 function App() {
-  const { videos, progressMap, loading, scanDirectory, saveProgress } = useVideos();
+  const { videos, progressMap, recentlyPlayed, loading, scanDirectory, saveProgress } = useVideos();
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer(saveProgress);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedDir, setSelectedDir] = useState<string | null>(null);
@@ -24,18 +24,25 @@ function App() {
     return list;
   }, [videos, selectedDir, searchQuery]);
 
-  const handlePlayVideo = (video: Video) => {
+  const handlePlayVideo = useCallback((video: Video) => {
     const pos = progressMap[video.id] ?? 0;
     openPlayer(video, pos);
-  };
+  }, [progressMap, openPlayer]);
+
+  const handlePlayById = useCallback((videoId: string, position: number) => {
+    const video = videos.find(v => v.id === videoId);
+    if (video) openPlayer(video, position);
+  }, [videos, openPlayer]);
 
   return (
     <div className="h-screen w-screen flex bg-gray-950 text-white overflow-hidden">
       <Sidebar
         videos={videos}
+        recentlyPlayed={recentlyPlayed}
         selectedDir={selectedDir}
         onSelectDir={setSelectedDir}
         onScanDirectory={scanDirectory}
+        onPlayVideo={handlePlayById}
         loading={loading}
       />
       <main className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">

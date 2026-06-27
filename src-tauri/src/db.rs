@@ -1,5 +1,5 @@
 use rusqlite::{Connection, Result, params};
-use crate::models::{Video, VideoProgress, WatchProgress};
+use crate::models::{RecentlyPlayed, Video, VideoProgress, WatchProgress};
 
 pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -93,6 +93,33 @@ pub fn get_progress(conn: &Connection, video_id: &str) -> Result<Option<WatchPro
         Some(Err(e)) => Err(e.into()),
         None => Ok(None),
     }
+}
+
+pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<RecentlyPlayed>> {
+    let mut stmt = conn.prepare(
+        "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, wp.position, wp.updated_at
+         FROM watch_progress wp
+         JOIN videos v ON v.id = wp.video_id
+         ORDER BY wp.updated_at DESC
+         LIMIT ?1"
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(RecentlyPlayed {
+            video: Video {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                filename: row.get(2)?,
+                duration: row.get(3)?,
+                width: row.get(4)?,
+                height: row.get(5)?,
+                file_size: row.get(6)?,
+                created_at: row.get(7)?,
+            },
+            position: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    })?.collect::<Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>> {

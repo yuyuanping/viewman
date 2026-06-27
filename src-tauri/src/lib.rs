@@ -33,6 +33,7 @@ pub fn run() {
             commands::save_progress,
             commands::get_progress,
             commands::get_videos_with_progress,
+            commands::get_recently_played,
             commands::check_ffprobe,
         ])
         .run(tauri::generate_context!())

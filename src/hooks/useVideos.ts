@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Video } from "../types";
+import type { Video, RecentlyPlayed } from "../types";
 
 export function useVideos() {
   const [videos, setVideos] = useState<Video[]>([]);
   const [loading, setLoading] = useState(false);
   const [progressMap, setProgressMap] = useState<Record<string, number | null>>({});
+  const [recentlyPlayed, setRecentlyPlayed] = useState<RecentlyPlayed[]>([]);
 
   const loadVideos = useCallback(async () => {
     setLoading(true);
@@ -22,17 +23,27 @@ export function useVideos() {
     }
   }, []);
 
+  const loadRecentlyPlayed = useCallback(async () => {
+    try {
+      const result = await invoke<RecentlyPlayed[]>("get_recently_played");
+      setRecentlyPlayed(result);
+    } catch (e) {
+      console.error("Failed to load recently played:", e);
+    }
+  }, []);
+
   const scanDirectory = useCallback(async (dir: string) => {
     setLoading(true);
     try {
       await invoke<Video[]>("scan_directory", { dir });
       await loadVideos();
+      await loadRecentlyPlayed();
     } catch (e) {
       console.error("Failed to scan directory:", e);
     } finally {
       setLoading(false);
     }
-  }, [loadVideos]);
+  }, [loadVideos, loadRecentlyPlayed]);
 
   const saveProgress = useCallback(async (videoId: string, position: number) => {
     try {
@@ -45,7 +56,8 @@ export function useVideos() {
 
   useEffect(() => {
     loadVideos();
-  }, [loadVideos]);
+    loadRecentlyPlayed();
+  }, [loadVideos, loadRecentlyPlayed]);
 
-  return { videos, progressMap, loading, scanDirectory, saveProgress, loadVideos };
+  return { videos, progressMap, recentlyPlayed, loading, scanDirectory, saveProgress, loadVideos, loadRecentlyPlayed };
 }

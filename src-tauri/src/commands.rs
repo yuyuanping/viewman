@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::db;
-use crate::models::{Video, VideoProgress, WatchProgress};
+use crate::models::{RecentlyPlayed, Video, VideoProgress, WatchProgress};
 use crate::scanner;
 use std::sync::Mutex;
 
@@ -52,6 +52,12 @@ pub fn get_progress(state: State<AppState>, video_id: String) -> Result<Option<W
 pub fn get_videos_with_progress(state: State<AppState>) -> Result<Vec<VideoProgress>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::get_videos_with_progress(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_recently_played(state: State<AppState>) -> Result<Vec<RecentlyPlayed>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_recently_played(&conn, 30).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

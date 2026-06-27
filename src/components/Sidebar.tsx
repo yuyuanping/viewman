@@ -2,17 +2,20 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { DirTree } from "./DirTree";
-import type { Video } from "../types";
+import { RecentlyPlayedList } from "./RecentlyPlayedList";
+import type { Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
 
 interface SidebarProps {
   videos: Video[];
+  recentlyPlayed: RecentlyPlayedType[];
   selectedDir: string | null;
   onSelectDir: (dir: string | null) => void;
   onScanDirectory: (dir: string) => Promise<void>;
+  onPlayVideo: (videoId: string, position: number) => void;
   loading: boolean;
 }
 
-export function Sidebar({ videos, selectedDir, onSelectDir, onScanDirectory, loading }: SidebarProps) {
+export function Sidebar({ videos, recentlyPlayed, selectedDir, onSelectDir, onScanDirectory, onPlayVideo, loading }: SidebarProps) {
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
 
   const handleScan = async () => {
@@ -48,6 +51,7 @@ export function Sidebar({ videos, selectedDir, onSelectDir, onScanDirectory, loa
       <div className="border-t border-gray-700 my-1" />
       <span className="text-xs text-gray-400 font-medium">目录</span>
       <DirTree videos={videos} selectedDir={selectedDir} onSelectDir={onSelectDir} />
+      <RecentlyPlayedList items={recentlyPlayed} onPlay={onPlayVideo} />
     </aside>
   );
 }
