@@ -1,13 +1,18 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { DirTree } from "./DirTree";
+import type { Video } from "../types";
 
 interface SidebarProps {
+  videos: Video[];
+  selectedDir: string | null;
+  onSelectDir: (dir: string | null) => void;
   onScanDirectory: (dir: string) => Promise<void>;
   loading: boolean;
 }
 
-export function Sidebar({ onScanDirectory, loading }: SidebarProps) {
+export function Sidebar({ videos, selectedDir, onSelectDir, onScanDirectory, loading }: SidebarProps) {
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
 
   const handleScan = async () => {
@@ -24,22 +29,25 @@ export function Sidebar({ onScanDirectory, loading }: SidebarProps) {
 
   return (
     <aside className="w-60 h-full bg-gray-900 text-white flex flex-col p-4 gap-3">
-      <h1 className="text-lg font-bold mb-2">ViewMan</h1>
+      <h1 className="text-lg font-bold mb-1">ViewMan</h1>
       <button
         onClick={handleScan}
         disabled={loading}
-        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 py-2 px-4 rounded"
+        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 py-2 px-4 rounded text-sm"
       >
         {loading ? "扫描中..." : "扫描目录"}
       </button>
       <button
         onClick={handleCheckFfprobe}
-        className="bg-gray-700 hover:bg-gray-600 py-2 px-4 rounded text-sm"
+        className="bg-gray-700 hover:bg-gray-600 py-1.5 px-4 rounded text-xs"
       >
         检测 ffprobe
       </button>
-      {ffprobeOk === true && <span className="text-green-400 text-sm">✓ ffprobe 可用</span>}
-      {ffprobeOk === false && <span className="text-red-400 text-sm">✗ ffprobe 未安装</span>}
+      {ffprobeOk === true && <span className="text-green-400 text-xs">✓ ffprobe 可用</span>}
+      {ffprobeOk === false && <span className="text-red-400 text-xs">✗ ffprobe 未安装</span>}
+      <div className="border-t border-gray-700 my-1" />
+      <span className="text-xs text-gray-400 font-medium">目录</span>
+      <DirTree videos={videos} selectedDir={selectedDir} onSelectDir={onSelectDir} />
     </aside>
   );
 }
