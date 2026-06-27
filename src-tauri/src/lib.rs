@@ -17,6 +17,7 @@ fn get_db_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let db_path = get_db_path(&app.handle());
             let conn = init_db(&db_path.to_string_lossy())
