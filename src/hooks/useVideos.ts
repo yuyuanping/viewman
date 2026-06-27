@@ -49,10 +49,11 @@ export function useVideos() {
     try {
       await invoke("save_progress", { videoId, position });
       setProgressMap(prev => ({ ...prev, [videoId]: position }));
+      loadRecentlyPlayed();
     } catch (e) {
       console.error("Failed to save progress:", e);
     }
-  }, []);
+  }, [loadRecentlyPlayed]);
 
   useEffect(() => {
     loadVideos();
