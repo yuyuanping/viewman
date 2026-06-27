@@ -26,6 +26,7 @@ export function useVideos() {
   const loadRecentlyPlayed = useCallback(async () => {
     try {
       const result = await invoke<RecentlyPlayed[]>("get_recently_played");
+      console.log("[loadRecentlyPlayed] got", result.length, "records:", result.map(r => r.video.filename));
       setRecentlyPlayed(result);
     } catch (e) {
       console.error("Failed to load recently played:", e);

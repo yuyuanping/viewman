@@ -193,4 +193,28 @@ mod tests {
         let p = get_progress(&conn, "v1").unwrap().unwrap();
         assert!((p.position - 60.0).abs() < 0.001);
     }
+
+    #[test]
+    fn test_get_recently_played_returns_multiple() {
+        let conn = setup_test_db();
+        let v1 = Video {
+            id: "a".into(), path: "C:\\a.mp4".into(), filename: "a.mp4".into(),
+            duration: None, width: None, height: None, file_size: 100, created_at: "".into(),
+        };
+        let v2 = Video {
+            id: "b".into(), path: "C:\\b.mp4".into(), filename: "b.mp4".into(),
+            duration: None, width: None, height: None, file_size: 200, created_at: "".into(),
+        };
+        insert_video(&conn, &v1).unwrap();
+        insert_video(&conn, &v2).unwrap();
+
+        upsert_progress(&conn, "a", 10.0).unwrap();
+        upsert_progress(&conn, "b", 20.0).unwrap();
+
+        let result = get_recently_played(&conn, 30).unwrap();
+        assert_eq!(result.len(), 2);
+        let ids: Vec<&str> = result.iter().map(|r| r.video.id.as_str()).collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"b"));
+    }
 }
