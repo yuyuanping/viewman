@@ -1,8 +1,7 @@
 use rusqlite::{Connection, Result, params};
-use crate::models::{Video, WatchProgress};
+use crate::models::{Video, VideoProgress, WatchProgress};
 
-pub fn init_db(db_path: &str) -> Result<Connection> {
-    let conn = Connection::open(db_path)?;
+pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS videos (
             id TEXT PRIMARY KEY,
@@ -21,7 +20,12 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
         );"
-    )?;
+    )
+}
+
+pub fn init_db(db_path: &str) -> Result<Connection> {
+    let conn = Connection::open(db_path)?;
+    create_tables(&conn)?;
     Ok(conn)
 }
 
@@ -86,19 +90,20 @@ pub fn get_progress(conn: &Connection, video_id: &str) -> Result<Option<WatchPro
     })?;
     match rows.next() {
         Some(Ok(progress)) => Ok(Some(progress)),
-        _ => Ok(None),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
     }
 }
 
-pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<(Video, Option<f64>)>> {
+pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>> {
     let mut stmt = conn.prepare(
         "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, wp.position
          FROM videos v LEFT JOIN watch_progress wp ON v.id = wp.video_id
          ORDER BY v.filename"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((
-            Video {
+        Ok(VideoProgress {
+            video: Video {
                 id: row.get(0)?,
                 path: row.get(1)?,
                 filename: row.get(2)?,
@@ -108,8 +113,8 @@ pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<(Video, Option<
                 file_size: row.get(6)?,
                 created_at: row.get(7)?,
             },
-            row.get::<_, Option<f64>>(8)?,
-        ))
+            position: row.get::<_, Option<f64>>(8)?,
+        })
     })?.collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -121,18 +126,7 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS videos (
-                id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL,
-                duration REAL, width INTEGER, height INTEGER, file_size INTEGER NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE TABLE IF NOT EXISTS watch_progress (
-                id TEXT PRIMARY KEY, video_id TEXT NOT NULL UNIQUE, position REAL NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
-            );"
-        ).unwrap();
+        create_tables(&conn).unwrap();
         conn
     }
 
