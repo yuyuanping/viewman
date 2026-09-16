@@ -76,6 +76,17 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     setCurrentTime(el.currentTime);
   };
 
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+  const [rateIdx, setRateIdx] = useState(2);
+
+  const cycleRate = () => {
+    const next = (rateIdx + 1) % RATES.length;
+    setRateIdx(next);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = RATES[next];
+    }
+  };
+
   const formatTime = (s: number) => {
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
@@ -139,6 +150,14 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
           <span className="text-white text-sm tabular-nums">
             {formatTime(currentTime)} / {formatTime(duration)}
           </span>
+
+          <button
+            onClick={cycleRate}
+            className={`text-xs px-2 py-1 rounded tabular-nums ${rateIdx === 2 ? "bg-gray-700 hover:bg-gray-600 text-gray-300" : "bg-blue-600 hover:bg-blue-500 text-white"}`}
+            title="倍速"
+          >
+            {RATES[rateIdx]}×
+          </button>
         </div>
       </div>
     </div>
