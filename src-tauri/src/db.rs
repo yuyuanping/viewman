@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 use crate::models::{RecentlyPlayed, Video, VideoProgress, WatchProgress};
 
 pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
@@ -25,6 +25,7 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
 
 pub fn init_db(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     create_tables(&conn)?;
     Ok(conn)
 }
@@ -60,11 +61,17 @@ pub fn insert_video(conn: &Connection, video: &Video) -> Result<()> {
     Ok(())
 }
 
-pub fn get_existing_paths(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT path FROM videos")?;
-    let paths = stmt.query_map([], |row| row.get::<_, String>(0))?
+pub fn get_video_paths(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT id, path FROM videos")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>>>()?;
-    Ok(paths)
+    Ok(rows)
+}
+
+pub fn get_video_path(conn: &Connection, video_id: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT path FROM videos WHERE id = ?1", params![video_id], |row| row.get(0))
+        .optional()
 }
 
 pub fn upsert_progress(conn: &Connection, video_id: &str, position: f64) -> Result<()> {
@@ -120,6 +127,19 @@ pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<Recently
         })
     })?.collect::<Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+pub fn delete_video(conn: &Connection, video_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM watch_progress WHERE video_id = ?1", params![video_id])?;
+    conn.execute("DELETE FROM videos WHERE id = ?1", params![video_id])?;
+    Ok(())
+}
+
+pub fn delete_videos_by_ids(conn: &Connection, ids: &[String]) -> Result<()> {
+    for id in ids {
+        delete_video(conn, id)?;
+    }
+    Ok(())
 }
 
 pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>> {
@@ -192,6 +212,19 @@ mod tests {
         upsert_progress(&conn, "v1", 60.0).unwrap();
         let p = get_progress(&conn, "v1").unwrap().unwrap();
         assert!((p.position - 60.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_get_video_path() {
+        let conn = setup_test_db();
+        let video = Video {
+            id: "v1".into(), path: "C:\\v.mp4".into(), filename: "v.mp4".into(),
+            duration: None, width: None, height: None, file_size: 100, created_at: "".into(),
+        };
+        insert_video(&conn, &video).unwrap();
+
+        assert_eq!(get_video_path(&conn, "v1").unwrap(), Some("C:\\v.mp4".to_string()));
+        assert_eq!(get_video_path(&conn, "missing").unwrap(), None);
     }
 
     #[test]

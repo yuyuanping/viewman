@@ -5,9 +5,10 @@ interface VideoGridProps {
   videos: Video[];
   progressMap: Record<string, number | null>;
   onPlay: (video: Video) => void;
+  onDeleted: () => void;
 }
 
-export function VideoGrid({ videos, progressMap, onPlay }: VideoGridProps) {
+export function VideoGrid({ videos, progressMap, onPlay, onDeleted }: VideoGridProps) {
   if (videos.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -28,6 +29,7 @@ export function VideoGrid({ videos, progressMap, onPlay }: VideoGridProps) {
             video={video}
             progress={progressMap[video.id] ?? null}
             onPlay={onPlay}
+            onDeleted={onDeleted}
           />
         ))}
       </div>

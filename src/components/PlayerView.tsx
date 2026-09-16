@@ -7,15 +7,22 @@ interface PlayerViewProps {
   initialPosition: number;
   onClose: () => void;
   onProgress: (videoId: string, position: number) => Promise<void>;
+  onFallback?: (video: Video) => void;
 }
 
-export function PlayerView({ video, initialPosition, onClose, onProgress }: PlayerViewProps) {
+export function PlayerView({ video, initialPosition, onClose, onProgress, onFallback }: PlayerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const currentTimeRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [playbackError, setPlaybackError] = useState(false);
 
   const src = convertFileSrc(video.path);
+
+  useEffect(() => {
+    setPlaybackError(false);
+  }, [video.id, src]);
 
   useEffect(() => {
     const el = videoRef.current;
@@ -28,14 +35,15 @@ export function PlayerView({ video, initialPosition, onClose, onProgress }: Play
   const handleTimeUpdate = useCallback(() => {
     const el = videoRef.current;
     if (!el) return;
+    currentTimeRef.current = el.currentTime;
     setCurrentTime(el.currentTime);
     setDuration(el.duration || 0);
   }, []);
 
   const handleSave = useCallback(() => {
-    const el = videoRef.current;
-    if (el) {
-      onProgress(video.id, el.currentTime);
+    const position = videoRef.current?.currentTime ?? currentTimeRef.current;
+    if (position > 0) {
+      onProgress(video.id, position);
     }
   }, [video.id, onProgress]);
 
@@ -92,9 +100,24 @@ export function PlayerView({ video, initialPosition, onClose, onProgress }: Play
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={handleSave}
+          onError={() => setPlaybackError(true)}
           className="w-full max-h-[80vh] bg-black"
           controls={false}
         />
+
+        {playbackError && (
+          <div className="bg-red-900/80 text-red-200 px-4 py-3 rounded mt-3 text-sm flex flex-col gap-2">
+            <span>无法播放此文件，可能是不支持的格式（如 MKV / AVI / WMV / FLV）。</span>
+            {onFallback && (
+              <button
+                onClick={() => onFallback(video)}
+                className="self-start bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-white"
+              >
+                用 PotPlayer 打开
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center gap-3 mt-3 px-2">
           <button onClick={togglePlay} className="text-white text-xl">

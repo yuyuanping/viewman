@@ -26,3 +26,8 @@ export interface RecentlyPlayed {
   position: number;
   updated_at: string;
 }
+
+export interface PotPlayerStatus {
+  running: boolean;
+  position: number | null;
+}

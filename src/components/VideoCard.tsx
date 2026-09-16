@@ -1,9 +1,12 @@
+import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { Video } from "../types";
 
 interface VideoCardProps {
   video: Video;
   progress: number | null;
   onPlay: (video: Video) => void;
+  onDeleted: () => void;
 }
 
 function formatDuration(seconds: number | null): string {
@@ -23,15 +26,30 @@ function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
-export function VideoCard({ video, progress, onPlay }: VideoCardProps) {
+export function VideoCard({ video, progress, onPlay, onDeleted }: VideoCardProps) {
+  const [deleting, setDeleting] = useState(false);
+
   const progressPct = progress !== null && video.duration && video.duration > 0
     ? Math.min(100, (progress / video.duration) * 100)
     : 0;
 
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(`确定要删除 "${video.filename}" 到回收站？`)) return;
+    setDeleting(true);
+    try {
+      await invoke("delete_video", { videoId: video.id });
+      onDeleted();
+    } catch (err) {
+      alert("删除失败: " + err);
+      setDeleting(false);
+    }
+  };
+
   return (
     <div
       onClick={() => onPlay(video)}
-      className="bg-gray-800 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500 transition-all group"
+      className="bg-gray-800 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500 transition-all group relative"
     >
       <div className="aspect-video bg-gray-700 flex items-center justify-center text-gray-500">
         <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -39,6 +57,14 @@ export function VideoCard({ video, progress, onPlay }: VideoCardProps) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       </div>
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        className="absolute top-1 right-1 bg-black/50 hover:bg-red-600/80 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+        title="删除到回收站"
+      >
+        {deleting ? "..." : "✕"}
+      </button>
       <div className="p-3">
         <p className="text-sm truncate" title={video.filename}>{video.filename}</p>
         <div className="flex justify-between text-xs text-gray-400 mt-1">
