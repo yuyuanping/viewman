@@ -24,12 +24,14 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     setPlaybackError(false);
   }, [video.id, src]);
 
-  useEffect(() => {
+  // 元数据就绪后跳到上次进度并自动播放；被自动播放策略拦截时退回手动状态
+  const handleLoadedMetadata = useCallback(() => {
     const el = videoRef.current;
     if (!el) return;
-    if (initialPosition > 0) {
+    if (initialPosition > 0 && el.currentTime < initialPosition) {
       el.currentTime = initialPosition;
     }
+    el.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
   }, [initialPosition]);
 
   const handleTimeUpdate = useCallback(() => {
@@ -96,7 +98,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
           ref={videoRef}
           src={src}
           onTimeUpdate={handleTimeUpdate}
-          onLoadedMetadata={handleTimeUpdate}
+          onLoadedMetadata={handleLoadedMetadata}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={handleSave}
