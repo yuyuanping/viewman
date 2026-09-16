@@ -76,7 +76,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     setCurrentTime(el.currentTime);
   };
 
-  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+  const RATES = [0.75, 1, 1.25, 1.5, 2] as const;
   const [rateIdx, setRateIdx] = useState(2);
 
   const cycleRate = () => {
