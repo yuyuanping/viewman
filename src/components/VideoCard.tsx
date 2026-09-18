@@ -1,40 +1,24 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import type { Video } from "../types";
+import { formatDuration, formatFileSize } from "../utils";
 
 interface VideoCardProps {
   video: Video;
   progress: number | null;
+  missing?: boolean;
   onPlay: (video: Video) => void;
   onDeleted: () => void;
 }
 
-function formatDuration(seconds: number | null): string {
-  if (seconds === null || seconds === undefined) return "--:--";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
-}
-
-export function VideoCard({ video, progress, onPlay, onDeleted }: VideoCardProps) {
+export function VideoCard({ video, progress, missing = false, onPlay, onDeleted }: VideoCardProps) {
   const [deleting, setDeleting] = useState(false);
-
   const progressPct = progress !== null && video.duration && video.duration > 0
-    ? Math.min(100, (progress / video.duration) * 100)
-    : 0;
+    ? Math.max(0, Math.min(100, (progress / video.duration) * 100)) : 0;
+  const extension = video.filename.split(".").pop()?.toUpperCase() || "VIDEO";
+  const thumbnailPath = video.thumbnail_path ?? null;
 
-  const handleDelete = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleDelete = async () => {
     if (!confirm(`确定要删除 "${video.filename}" 到回收站？`)) return;
     setDeleting(true);
     try {
@@ -47,39 +31,62 @@ export function VideoCard({ video, progress, onPlay, onDeleted }: VideoCardProps
   };
 
   return (
-    <div
-      onClick={() => onPlay(video)}
-      className="bg-gray-800 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500 transition-all group relative"
-    >
-      <div className="aspect-video bg-gray-700 flex items-center justify-center text-gray-500">
-        <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-      </div>
+    <article className={`media-card${missing ? " media-missing" : ""}`} title={missing ? "文件当前不可读取（可能已被移动、删除或磁盘未连接）" : undefined}>
+      <button
+        onClick={() => onPlay(video)}
+        disabled={deleting}
+        className="block w-full text-left"
+        aria-label={`播放 ${video.filename}`}
+      >
+        <div className="media-preview">
+          {missing && <span className="missing-flag">文件不可读</span>}
+          {/* 缩略图 */}
+          {thumbnailPath ? (
+            <img
+              src={convertFileSrc(thumbnailPath)}
+              alt={video.filename}
+              loading="lazy"
+              className="media-thumbnail"
+            />
+          ) : (
+            <>
+              <span className="media-extension absolute top-3 left-3 text-[10px] font-semibold tracking-widest text-gray-400/90">
+                {extension}
+              </span>
+              <span className="media-play">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M9 5v14l11-7z" />
+                </svg>
+              </span>
+            </>
+          )}
+          <span className="media-badge bottom-3 right-3">{formatDuration(video.duration)}</span>
+          {progressPct > 0 && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white/10">
+              <div className="h-full bg-blue-500" style={{ width: `${progressPct}%` }} />
+            </div>
+          )}
+        </div>
+        <div className="p-3.5">
+          <p className="text-[13px] leading-5 line-clamp-2 min-h-10 text-gray-200 break-all" title={video.filename}>
+            {video.filename}
+          </p>
+          <div className="flex justify-between text-[11px] text-gray-400 mt-3 gap-2 tabular-nums">
+            <span>{video.height ? `${video.height}p` : "本地视频"} · {formatFileSize(video.file_size)}</span>
+            {progress !== null && progress > 0 && <span className="text-blue-400 shrink-0">继续观看</span>}
+          </div>
+        </div>
+      </button>
       <button
         onClick={handleDelete}
         disabled={deleting}
-        className="absolute top-1 right-1 bg-black/50 hover:bg-red-600/80 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+        className="media-remove absolute top-2 right-2 bg-gray-950/80 hover:bg-red-700 text-gray-300 rounded-lg w-7 h-7 grid place-items-center text-sm"
         title="删除到回收站"
+        aria-label={`删除 ${video.filename} 到回收站`}
       >
-        {deleting ? "..." : "✕"}
+        {deleting ? "…" : "×"}
       </button>
-      <div className="p-3">
-        <p className="text-sm truncate" title={video.filename}>{video.filename}</p>
-        <div className="flex justify-between text-xs text-gray-400 mt-1">
-          <span>{formatDuration(video.duration)}</span>
-          <span>{formatFileSize(video.file_size)}</span>
-        </div>
-        {progressPct > 0 && (
-          <div className="w-full bg-gray-600 h-1 rounded mt-2">
-            <div
-              className="bg-blue-500 h-1 rounded transition-all"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-        )}
-      </div>
-    </div>
+    </article>
   );
 }
+

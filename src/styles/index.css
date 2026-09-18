@@ -1,1 +1,96 @@
 @import "tailwindcss";
+
+@theme {
+  --color-gray-950: #0b1019;
+  --color-gray-900: #111925;
+  --color-gray-800: #192435;
+  --color-gray-700: #26354a;
+  --color-gray-600: #43536b;
+  --color-gray-500: #7e91aa;
+  --color-gray-400: #9baac0;
+  --color-blue-600: #5268dc;
+  --color-blue-500: #788cff;
+}
+
+:root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+body { margin: 0; background: #0b1019; color: #e6ecf5; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-offset: 3px; }
+::selection { background: #5268dc70; }
+* { scrollbar-width: thin; scrollbar-color: #34425a transparent; }
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-thumb { background: #34425a; border-radius: 10px; }
+
+.library-shell { background: radial-gradient(ellipse at 90% 0, #1a2245 0, transparent 48%), #0b1019; }
+.library-sidebar { width: 264px; flex-shrink: 0; border-right: 1px solid #ffffff0b; background: #111925e8; }
+.library-main { padding: 28px; min-width: 0; }
+.library-heading { font-size: 24px; font-weight: 650; letter-spacing: -.6px; }
+.library-eyebrow { font-size: 10px; letter-spacing: 2px; color: #91a2c2; font-weight: 600; }
+.search-field { display: flex; align-items: center; gap: 12px; background: #182231b3; border: 1px solid #ffffff10; border-radius: 12px; padding: 0 14px; }
+.search-field:focus-within { border-color: #788cff; box-shadow: 0 0 0 3px #788cff14; }
+.video-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; padding: 3px 3px 20px; }
+.media-card { position: relative; min-width: 0; overflow: hidden; border-radius: 14px; border: 1px solid #ffffff0c; background: #151f2e; transition: border-color .18s, background .18s; }
+.media-card:hover, .media-card:focus-within { border-color: #788cff80; background: #1b293d; }
+.media-preview {
+  aspect-ratio: 16/9;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at 75% 15%, #4b609766, transparent 70%), linear-gradient(135deg,#253449,#141c2b);
+  overflow: hidden;
+}
+.media-thumbnail { width: 100%; height: 100%; object-fit: cover; }
+.media-play { width: 48px; height: 48px; border: 1px solid #ffffff28; border-radius: 50%; display: grid; place-items: center; color: #c4d1e7; background: #ffffff07; transition: background .18s, color .18s; }
+.media-card:hover .media-play { background: #788cff; color: white; }
+.media-badge { position: absolute; font-size: 11px; font-weight: 500; padding: 3px 7px; border-radius: 5px; background: #090f1bcc; color: #d8e3f5; font-variant-numeric: tabular-nums; }
+.media-remove { opacity: 0; transition: opacity .15s; }
+.media-card:hover .media-remove, .media-card:focus-within .media-remove { opacity: 1; }
+@media (hover: none) { .media-remove { opacity: 1; } }
+
+/* 丢失文件标记 */
+.media-missing { border-color: #b45309aa; }
+.media-missing .media-preview { filter: grayscale(.55); }
+.missing-flag {
+  position: absolute; top: 12px; left: 12px; z-index: 2;
+  font-size: 10px; font-weight: 600; letter-spacing: .5px;
+  padding: 3px 7px; border-radius: 5px;
+  background: #78350fee;
+}
+
+/* 工具栏 */
+.library-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: 12px;
+  background: #182231b3; border: 1px solid #ffffff10;
+}
+.toolbar-label { font-size: 11px; color: #9baac0; }
+.toolbar-select {
+  background: #0f1723; color: #dbe4f2; border: 1px solid #ffffff14;
+  border-radius: 8px; padding: 4px 8px; font-size: 12px; outline: none;
+}
+.toolbar-select:hover { border-color: #788cff66; }
+.toolbar-chip {
+  border-radius: 999px; padding: 4px 11px; font-size: 12px;
+  border: 1px solid #ffffff14; background: #ffffff08; color: #b9c6da;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.toolbar-chip:hover { background: #ffffff12; color: #e6ecf5; }
+.toolbar-chip[aria-pressed="true"] { background: #5268dc; border-color: #5268dc; color: #fff; }
+.toolbar-chip:disabled { opacity: .5; }
+.toolbar-spacer { flex: 1 1 auto; }
+
+/* 内置播放器 */
+.player-overlay { background: rgba(4, 7, 13, .94); }
+.player-top { background: linear-gradient(to bottom, rgba(4,7,13,.88), rgba(4,7,13,0)); }
+.player-stage { min-height: 0; }
+.player-bar { background: linear-gradient(to top, rgba(4,7,13,.94), rgba(4,7,13,.5) 65%, rgba(4,7,13,0)); }
+.player-video { background: #000; }
+.player-error { backdrop-filter: blur(4px); }
+.player-progress input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; }
+.player-progress .player-fill { transition: width .12s linear; }
+.player-play { line-height: 1; }
+@media (max-width: 900px) { .library-sidebar { width: 220px; } .library-main { padding: 18px; } .video-tiles { gap: 14px; grid-template-columns: repeat(auto-fill,minmax(170px,1fr)); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
