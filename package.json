@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node --test src/hooks/potPlayerSession.test.mjs src/libraryFilter.test.mjs",
+    "test": "node --test src/hooks/potPlayerSession.test.mjs src/libraryFilter.test.mjs src/scanRoots.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

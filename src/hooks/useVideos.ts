@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Video, RecentlyPlayed, VideoWithProgress } from "../types";
+import { loadScanRoots, rememberScanRoot } from "../scanRoots";
 
 export function useVideos() {
   const [videos, setVideos] = useState<Video[]>([]);
@@ -19,33 +20,58 @@ export function useVideos() {
     setRecentlyPlayed(recent);
   }, []);
 
-  const loadVideos = useCallback(async () => {
-    setLoading(true);
+  /** 执行一次目录扫描并刷新列表；返回错误信息（null = 成功）。loading 由调用方管理 */
+  const runScan = useCallback(async (dir: string): Promise<string | null> => {
+    let scanError: string | null = null;
     try {
-      await refresh();
+      await invoke<Video[]>("scan_directory", { dir });
     } catch (e) {
-      setError(`读取视频库失败：${String(e)}`);
-    } finally {
-      setLoading(false);
+      scanError = `扫描失败，未完成更新：${String(e)}`;
     }
+    if (scanError === null) {
+      try {
+        await refresh();
+      } catch (e) {
+        scanError = `扫描已保存，但刷新列表失败：${String(e)}。请重启应用刷新。`;
+      }
+    }
+    return scanError;
   }, [refresh]);
 
   const scanDirectory = useCallback(async (dir: string) => {
     setLoading(true);
     setError(null);
     try {
-      await invoke<Video[]>("scan_directory", { dir });
-      try {
-        await refresh();
-      } catch (e) {
-        setError(`扫描已保存，但刷新列表失败：${String(e)}。请重启应用刷新。`);
+      const result = await runScan(dir);
+      if (result !== null) {
+        setError(result);
+      } else {
+        rememberScanRoot(dir);
       }
-    } catch (e) {
-      setError(`扫描失败，未完成更新：${String(e)}`);
     } finally {
       setLoading(false);
     }
-  }, [refresh]);
+  }, [runScan]);
+
+  /** 打开应用时自动重新扫描所有已记录的目录；个别目录失败只汇总提示，不影响其余目录 */
+  const rescanAll = useCallback(async () => {
+    const roots = loadScanRoots();
+    if (roots.length === 0) return;
+    setLoading(true);
+    const failed: string[] = [];
+    try {
+      for (const root of roots) {
+        if (await runScan(root) !== null) {
+          failed.push(root);
+        }
+      }
+    } finally {
+      setLoading(false);
+    }
+    if (failed.length > 0) {
+      setError(`部分目录自动扫描失败：${failed.join("、")}（磁盘可能未连接；扫描失败的目录不会被清理）`);
+    }
+  }, [runScan]);
 
   const saveProgress = useCallback(async (videoId: string, position: number) => {
     try {
@@ -62,7 +88,24 @@ export function useVideos() {
     }
   }, []);
 
-  useEffect(() => { void loadVideos(); }, [loadVideos]);
+  const loadVideos = useCallback(async () => {
+    setLoading(true);
+    try {
+      await refresh();
+    } catch (e) {
+      setError(`读取视频库失败：${String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [refresh]);
+
+  useEffect(() => {
+    void (async () => {
+      await loadVideos();
+      await rescanAll();
+    })();
+  }, [loadVideos, rescanAll]);
+
   const clearError = useCallback(() => setError(null), []);
   return { videos, progressMap, recentlyPlayed, loading, error, clearError, scanDirectory, saveProgress, loadVideos };
 }
