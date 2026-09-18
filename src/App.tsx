@@ -11,6 +11,8 @@ import type { Video, VideoFileStatus } from "./types";
 import { filterVideos, filterByWatchState, sortVideos, selectedDirectoryLabel } from "./libraryFilter";
 import type { SortField, SortDirection, WatchState } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
+import { ToastLayer } from "./components/Toast";
+import type { ToastItem } from "./components/Toast";
 import { invoke } from "@tauri-apps/api/core";
 
 const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
@@ -31,7 +33,7 @@ interface ThumbnailProgressPayload {
 }
 
 function App() {
-  const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos } = useVideos();
+  const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus } = useVideos();
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer();
   const { launch: launchInPotPlayer, error: potPlayerError, clearError: clearPotPlayerError } = usePotPlayer(saveProgress);
 
@@ -49,6 +51,15 @@ function App() {
   const checking = checkProgress !== null;
   const [thumbProgress, setThumbProgress] = useState<{ processed: number; total: number } | null>(null);
   const generating = thumbProgress !== null;
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  const notify = useCallback((message: string, tone: ToastItem["tone"] = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message, tone }]);
+  }, []);
+  const dismissToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -73,6 +84,11 @@ function App() {
     }).catch(e => setScanNotice(`扫描进度监听失败：${String(e)}`));
     return () => { disposed = true; unlisten?.(); };
   }, []);
+
+  // 自动重扫切换到新目录时，先清掉上一目录遗留的文件计数
+  useEffect(() => {
+    if (rescanStatus) setScanProgress(null);
+  }, [rescanStatus]);
 
   const handleScan = useCallback(async (dir: string) => {
     setScanProgress(null);
@@ -153,22 +169,22 @@ function App() {
   const handleGenerateThumbnails = useCallback(async () => {
     const pending = videos.filter(v => !v.thumbnail_path).map(v => v.id);
     if (pending.length === 0) {
-      setScanNotice("所有视频都已有封面。");
+      notify("所有视频都已有封面。");
       return;
     }
     setThumbProgress({ processed: 0, total: pending.length });
     try {
       const generated = await invoke<number>("generate_thumbnails", { videoIds: pending });
       await loadVideos();
-      setScanNotice(generated > 0
+      notify(generated > 0
         ? `已生成 ${generated} 个封面。`
         : "没有生成新封面：可能缺少 ffmpeg，或视频抽帧失败。");
     } catch (e) {
-      setScanNotice(`生成封面失败：${String(e)}`);
+      notify(`生成封面失败：${String(e)}`, "error");
     } finally {
       setThumbProgress(null);
     }
-  }, [videos, loadVideos]);
+  }, [videos, loadVideos, notify]);
 
   const clearMissing = useCallback(() => setMissingIds(new Set()), []);
 
@@ -189,6 +205,7 @@ function App() {
         onPlayVideo={handlePlayById}
         loading={loading}
         scanProgress={scanProgress}
+        rescanStatus={rescanStatus}
         usePotPlayer={useExternalPlayer}
         onTogglePotPlayer={togglePotPlayer}
       />
@@ -236,6 +253,7 @@ function App() {
           onFallback={handleFallbackToPotPlayer}
         />
       )}
+      <ToastLayer toasts={toasts} onClose={dismissToast} />
     </div>
   );
 }

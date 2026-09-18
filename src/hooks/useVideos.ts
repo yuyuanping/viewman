@@ -1,7 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Video, RecentlyPlayed, VideoWithProgress } from "../types";
-import { loadScanRoots, rememberScanRoot } from "../scanRoots";
+import { loadScanRoots, migrateLegacyScanRoots, rememberScanRoot } from "../scanRootStore";
+
+/** 自动重扫的目录级进度 */
+export interface RescanStatus {
+  /** 当前是第几个目录（从 1 开始） */
+  current: number;
+  /** 待重扫目录总数 */
+  total: number;
+  dir: string;
+}
 
 export function useVideos() {
   const [videos, setVideos] = useState<Video[]>([]);
@@ -9,6 +18,7 @@ export function useVideos() {
   const [error, setError] = useState<string | null>(null);
   const [progressMap, setProgressMap] = useState<Record<string, number | null>>({});
   const [recentlyPlayed, setRecentlyPlayed] = useState<RecentlyPlayed[]>([]);
+  const [rescanStatus, setRescanStatus] = useState<RescanStatus | null>(null);
 
   const refresh = useCallback(async () => {
     const [result, recent] = await Promise.all([
@@ -46,7 +56,7 @@ export function useVideos() {
       if (result !== null) {
         setError(result);
       } else {
-        rememberScanRoot(dir);
+        await rememberScanRoot(dir);
       }
     } finally {
       setLoading(false);
@@ -55,17 +65,19 @@ export function useVideos() {
 
   /** 打开应用时自动重新扫描所有已记录的目录；个别目录失败只汇总提示，不影响其余目录 */
   const rescanAll = useCallback(async () => {
-    const roots = loadScanRoots();
+    const roots = await loadScanRoots();
     if (roots.length === 0) return;
     setLoading(true);
     const failed: string[] = [];
     try {
-      for (const root of roots) {
-        if (await runScan(root) !== null) {
-          failed.push(root);
+      for (let i = 0; i < roots.length; i++) {
+        setRescanStatus({ current: i + 1, total: roots.length, dir: roots[i] });
+        if (await runScan(roots[i]) !== null) {
+          failed.push(roots[i]);
         }
       }
     } finally {
+      setRescanStatus(null);
       setLoading(false);
     }
     if (failed.length > 0) {
@@ -101,11 +113,12 @@ export function useVideos() {
 
   useEffect(() => {
     void (async () => {
+      await migrateLegacyScanRoots();
       await loadVideos();
       await rescanAll();
     })();
   }, [loadVideos, rescanAll]);
 
   const clearError = useCallback(() => setError(null), []);
-  return { videos, progressMap, recentlyPlayed, loading, error, clearError, scanDirectory, saveProgress, loadVideos };
+  return { videos, progressMap, recentlyPlayed, loading, error, rescanStatus, clearError, scanDirectory, saveProgress, loadVideos };
 }

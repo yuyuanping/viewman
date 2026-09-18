@@ -37,6 +37,8 @@ pub fn run() {
             commands::get_videos_with_progress,
             commands::get_recently_played,
             commands::check_ffprobe,
+            commands::load_scan_roots,
+            commands::save_scan_roots,
             commands::delete_video,
             commands::check_potplayer,
             commands::launch_potplayer,

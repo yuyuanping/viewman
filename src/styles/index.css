@@ -82,6 +82,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 .toolbar-chip:disabled { opacity: .5; }
 .toolbar-spacer { flex: 1 1 auto; }
 
+/* 自动重扫进度 */
+.rescan-progress { display: flex; flex-direction: column; gap: 6px; margin-top: -2px; }
+.rescan-progress-track { height: 4px; border-radius: 999px; background: #ffffff14; overflow: hidden; }
+.rescan-progress-bar { height: 100%; border-radius: 999px; background: #5268dc; transition: width .3s ease; }
+
 /* 内置播放器 */
 .player-overlay { background: rgba(4, 7, 13, .94); }
 .player-top { background: linear-gradient(to bottom, rgba(4,7,13,.88), rgba(4,7,13,0)); }

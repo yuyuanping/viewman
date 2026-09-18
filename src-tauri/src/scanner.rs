@@ -6,6 +6,18 @@ use crate::models::Video;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
 
+/// 启动 ffprobe/ffmpeg 这类控制台程序。Windows 上必须带 CREATE_NO_WINDOW，
+/// 否则 release 版（GUI 子系统）每调用一次就会闪现一个黑色控制台窗口。
+pub(crate) fn hidden_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput {
     streams: Vec<FfprobeStream>,
@@ -31,7 +43,7 @@ pub struct VideoMeta {
 }
 
 pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
-    let output = Command::new("ffprobe")
+    let output = hidden_command("ffprobe")
         .args([
             "-v", "quiet",
             "-print_format", "json",
@@ -121,7 +133,7 @@ pub fn thumbnail_target_time(duration: Option<f64>) -> f64 {
 }
 
 pub fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
+    hidden_command("ffmpeg").arg("-version").output().is_ok()
 }
 
 /// 用 ffmpeg 抽取一帧写入 out_path。先尝试 10% 位置，失败则回退到首帧。
@@ -135,7 +147,7 @@ pub fn extract_thumbnail(
     }
 
     let attempt = |seconds: f64| -> Result<(), String> {
-        let output = Command::new("ffmpeg")
+        let output = hidden_command("ffmpeg")
             .args([
                 "-y",
                 "-ss",

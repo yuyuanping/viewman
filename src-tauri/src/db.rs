@@ -20,8 +20,27 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             position REAL NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );"
     )
+}
+
+/// 读取字符串设置项
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| row.get(0))
+        .optional()
+}
+
+/// 写入（覆盖）字符串设置项
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 /// 老库补列：CREATE TABLE IF NOT EXISTS 不会给已存在的表加字段，必须显式迁移
@@ -399,5 +418,24 @@ mod tests {
         let rows = get_all_videos(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].thumbnail_path, None);
+    }
+
+    #[test]
+    fn test_settings_read_write() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+
+        // 未写入时为 None
+        assert_eq!(get_setting(&conn, "scan_roots").unwrap(), None);
+
+        set_setting(&conn, "scan_roots", r#"["D:\\视频"]"#).unwrap();
+        assert_eq!(
+            get_setting(&conn, "scan_roots").unwrap().as_deref(),
+            Some(r#"["D:\\视频"]"#)
+        );
+
+        // 覆盖写入只保留最新值
+        set_setting(&conn, "scan_roots", "[]").unwrap();
+        assert_eq!(get_setting(&conn, "scan_roots").unwrap().as_deref(), Some("[]"));
     }
 }

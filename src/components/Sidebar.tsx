@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { DirTree } from "./DirTree";
 import { RecentlyPlayedList } from "./RecentlyPlayedList";
+import type { RescanStatus } from "../hooks/useVideos";
 import type { Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
 
 interface SidebarProps {
@@ -14,11 +15,12 @@ interface SidebarProps {
   onPlayVideo: (videoId: string, position: number) => void;
   loading: boolean;
   scanProgress: { processed: number; total: number } | null;
+  rescanStatus: RescanStatus | null;
   usePotPlayer: boolean;
   onTogglePotPlayer: () => void;
 }
 
-export function Sidebar({ videos, recentlyPlayed, selectedDir, onSelectDir, onScanDirectory, onPlayVideo, loading, scanProgress, usePotPlayer, onTogglePotPlayer }: SidebarProps) {
+export function Sidebar({ videos, recentlyPlayed, selectedDir, onSelectDir, onScanDirectory, onPlayVideo, loading, scanProgress, rescanStatus, usePotPlayer, onTogglePotPlayer }: SidebarProps) {
   const [potplayerOk, setPotplayerOk] = useState<boolean | null>(null);
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
 
@@ -65,6 +67,27 @@ export function Sidebar({ videos, recentlyPlayed, selectedDir, onSelectDir, onSc
           ? (scanProgress ? `扫描中 ${scanProgress.processed}/${scanProgress.total}` : "扫描中...")
           : "扫描目录"}
       </button>
+      {rescanStatus && (
+        <div className="rescan-progress" role="status" aria-live="polite">
+          <div className="flex items-center gap-2 text-xs text-gray-300">
+            <svg className="animate-spin shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="4" />
+              <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+            </svg>
+            <span className="shrink-0">自动重扫 {rescanStatus.current}/{rescanStatus.total}</span>
+            <span className="truncate text-gray-400" title={rescanStatus.dir}>{rescanStatus.dir}</span>
+          </div>
+          <div className="rescan-progress-track">
+            <div
+              className="rescan-progress-bar"
+              style={{ width: `${Math.min(100, Math.round((((rescanStatus.current - 1) + (scanProgress && scanProgress.total > 0 ? Math.min(scanProgress.processed / scanProgress.total, 1) : 0)) / rescanStatus.total) * 100))}%` }}
+            />
+          </div>
+          {scanProgress && scanProgress.total > 0 && (
+            <span className="text-[10px] text-gray-400">新文件 {scanProgress.processed}/{scanProgress.total}</span>
+          )}
+        </div>
+      )}
       <button
         onClick={handleTogglePotPlayer}
         className={`py-1.5 px-4 rounded text-xs ${usePotPlayer ? "bg-green-700 hover:bg-green-600" : "bg-gray-700 hover:bg-gray-600"}`}
