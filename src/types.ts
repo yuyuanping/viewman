@@ -7,6 +7,7 @@ export interface Video {
   height: number | null;
   file_size: number;
   created_at: string;
+  thumbnail_path?: string | null;
 }
 
 export interface WatchProgress {
@@ -30,4 +31,11 @@ export interface RecentlyPlayed {
 export interface PotPlayerStatus {
   running: boolean;
   position: number | null;
+  position_source: "live" | "remembered" | null;
+  state: "running" | "unknown" | "stopped";
+}
+
+export interface VideoFileStatus {
+  status: "readable" | "missing" | "unavailable" | "error";
+  message: string | null;
 }

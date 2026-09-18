@@ -60,21 +60,31 @@ pub fn launch(path: &str, seek: Option<f64>) -> Result<(), String> {
 #[derive(Debug, serde::Serialize)]
 pub struct PotPlayerStatus {
     pub running: bool,
+    /// "running"（找到本文件的窗口）| "unknown"（有 PotPlayer 窗口但不匹配本文件）| "stopped"（没有任何 PotPlayer 窗口，可确认播放器已退出）
+    pub state: &'static str,
     pub position: Option<f64>,
+    /// 目前仅可能是 "live"（来自窗口标题），不再回传 ini 记忆值
+    pub position_source: Option<&'static str>,
 }
 
 pub fn get_status(video_path: &str) -> PotPlayerStatus {
     let filename = std::path::Path::new(video_path)
         .file_name()
         .and_then(|n| n.to_str());
-    let title = filename.and_then(find_potplayer_window);
-    let position = title
-        .as_deref()
-        .and_then(parse_time_from_title)
-        .or_else(|| parse_from_ini(video_path));
-    PotPlayerStatus {
-        running: title.is_some(),
-        position,
+    let matched = filename.and_then(find_potplayer_window);
+
+    if let Some(title) = matched {
+        let position = parse_time_from_title(&title);
+        PotPlayerStatus {
+            running: true,
+            state: "running",
+            position,
+            position_source: position.map(|_| "live"),
+        }
+    } else if potplayer_window_exists() {
+        PotPlayerStatus { running: false, state: "unknown", position: None, position_source: None }
+    } else {
+        PotPlayerStatus { running: false, state: "stopped", position: None, position_source: None }
     }
 }
 
@@ -126,12 +136,6 @@ pub fn enable_titlebar_time() -> Result<(), String> {
     std::fs::write(&ini_path, lines.join("\r\n")).map_err(|e| e.to_string())
 }
 
-fn parse_from_ini(video_path: &str) -> Option<f64> {
-    let ini_path = find_ini_file()?;
-    let content = std::fs::read_to_string(ini_path).ok()?;
-    read_remember_position(&content, video_path)
-}
-
 fn find_or_create_ini() -> Result<PathBuf, String> {
     if let Some(p) = find_ini_file() {
         return Ok(p);
@@ -181,42 +185,6 @@ fn find_ini_file() -> Option<PathBuf> {
         }
     }
 
-    None
-}
-
-fn read_remember_position(content: &str, video_path: &str) -> Option<f64> {
-    let sections = ["RememberPosition", "Remember"];
-    for section in &sections {
-        if let Some(pos) = find_in_section(content, section, video_path) {
-            return Some(pos);
-        }
-    }
-    None
-}
-
-fn find_in_section(content: &str, section: &str, video_path: &str) -> Option<f64> {
-    let mut in_section = false;
-    let escaped = video_path.replace("\\", "\\\\");
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_section = trimmed.eq_ignore_ascii_case(&format!("[{}]", section));
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim().trim_matches('"');
-            let val = trimmed[eq_pos + 1..].trim().trim_matches('"');
-            if key == video_path || key == &escaped {
-                return val.parse::<f64>().ok();
-            }
-        }
-    }
     None
 }
 
@@ -272,6 +240,32 @@ fn find_potplayer_window(filename: &str) -> Option<String> {
         );
     }
     ctx.result
+}
+
+/// 只要存在任何可见的 PotPlayer 窗口即返回 true（不区分文件）
+fn potplayer_window_exists() -> bool {
+    let mut found = false;
+    unsafe {
+        EnumWindows(Some(enum_potplayer_proc), &mut found as *mut bool as LPARAM);
+    }
+    found
+}
+
+unsafe extern "system" fn enum_potplayer_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let found = &mut *(lparam as *mut bool);
+    if IsWindowVisible(hwnd) != TRUE {
+        return TRUE;
+    }
+    let mut buf = [0u16; 256];
+    let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+    if len > 0 {
+        let title = String::from_utf16_lossy(&buf[..len as usize]);
+        if title.contains("PotPlayer") {
+            *found = true;
+            return FALSE;
+        }
+    }
+    TRUE
 }
 
 fn parse_time_from_title(title: &str) -> Option<f64> {

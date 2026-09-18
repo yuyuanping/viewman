@@ -105,6 +105,75 @@ pub fn build_video(path: &std::path::PathBuf) -> Video {
         height: metadata.as_ref().and_then(|m| m.height),
         file_size: file_meta.map(|m| m.len() as i64).unwrap_or(0),
         created_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        thumbnail_path: None,
+    }
+}
+
+/// 缩略图目标宽度；高度按原始比例自适应（-2 保证偶数）
+const THUMBNAIL_WIDTH: i32 = 480;
+
+/// 抽帧位置：取 10% 处（跳过片头黑场/台标），最多 10 秒；时长未知则取首帧
+pub fn thumbnail_target_time(duration: Option<f64>) -> f64 {
+    match duration {
+        Some(d) if d.is_finite() && d > 0.0 => (d * 0.1).min(10.0),
+        _ => 0.0,
+    }
+}
+
+pub fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg").arg("-version").output().is_ok()
+}
+
+/// 用 ffmpeg 抽取一帧写入 out_path。先尝试 10% 位置，失败则回退到首帧。
+pub fn extract_thumbnail(
+    video_path: &str,
+    out_path: &Path,
+    duration: Option<f64>,
+) -> Result<(), String> {
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建缩略图目录失败: {}", e))?;
+    }
+
+    let attempt = |seconds: f64| -> Result<(), String> {
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-ss",
+                &seconds.to_string(),
+                "-i",
+                video_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                &format!("scale={}:-2", THUMBNAIL_WIDTH),
+                "-q:v",
+                "4",
+                &out_path.to_string_lossy(),
+            ])
+            .output()
+            .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("ffmpeg 执行失败")
+                .to_string();
+            return Err(detail);
+        }
+
+        // seek 点无帧时 ffmpeg 仍可能以 0 退出，但不会写出有效文件
+        match fs::metadata(out_path) {
+            Ok(m) if m.len() > 0 => Ok(()),
+            _ => Err("ffmpeg 未产生有效帧".to_string()),
+        }
+    };
+
+    let seek = thumbnail_target_time(duration);
+    if seek > 0.0 {
+        attempt(seek).or_else(|_| attempt(0.0))
+    } else {
+        attempt(0.0)
     }
 }
 
@@ -120,6 +189,48 @@ mod tests {
         assert!(is_video_file(&PathBuf::from("test.MKV")));
         assert!(!is_video_file(&PathBuf::from("test.txt")));
         assert!(!is_video_file(&PathBuf::from("test")));
+    }
+
+    #[test]
+    fn test_thumbnail_target_time() {
+        // 10% 但最多 10 秒
+        assert_eq!(thumbnail_target_time(Some(3600.0)), 10.0);
+        assert!((thumbnail_target_time(Some(60.0)) - 6.0).abs() < 0.001);
+        assert!((thumbnail_target_time(Some(120.0)) - 10.0).abs() < 0.001);
+        // 时长未知/非法时退回首帧
+        assert_eq!(thumbnail_target_time(None), 0.0);
+        assert_eq!(thumbnail_target_time(Some(0.0)), 0.0);
+        assert_eq!(thumbnail_target_time(Some(f64::NAN)), 0.0);
+    }
+
+    #[test]
+    fn test_extract_thumbnail_from_generated_video() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：本机未安装 ffmpeg");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("viewman_thumb_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // 用 ffmpeg 造一段 2 秒测试视频，避免依赖任何外部素材
+        let video = dir.join("sample.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "lavfi",
+                "-i", "testsrc=size=320x240:rate=10:duration=2",
+                "-pix_fmt", "yuv420p",
+                &video.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert!(generated.status.success(), "生成测试视频失败");
+
+        let out = dir.join("thumb.jpg");
+        extract_thumbnail(&video.to_string_lossy(), &out, Some(2.0)).unwrap();
+        assert!(fs::metadata(&out).unwrap().len() > 0, "缩略图应为非空文件");
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

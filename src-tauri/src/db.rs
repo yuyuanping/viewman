@@ -11,7 +11,8 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             width INTEGER,
             height INTEGER,
             file_size INTEGER NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            thumbnail_path TEXT
         );
         CREATE TABLE IF NOT EXISTS watch_progress (
             id TEXT PRIMARY KEY,
@@ -23,16 +24,29 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
     )
 }
 
+/// 老库补列：CREATE TABLE IF NOT EXISTS 不会给已存在的表加字段，必须显式迁移
+fn ensure_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(videos)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>>>()?;
+    if !columns.iter().any(|c| c == "thumbnail_path") {
+        conn.execute("ALTER TABLE videos ADD COLUMN thumbnail_path TEXT", [])?;
+    }
+    Ok(())
+}
+
 pub fn init_db(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     create_tables(&conn)?;
+    ensure_columns(&conn)?;
     Ok(conn)
 }
 
 pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, filename, duration, width, height, file_size, created_at FROM videos ORDER BY filename"
+        "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos ORDER BY filename"
     )?;
     let videos = stmt.query_map([], |row| {
         Ok(Video {
@@ -44,6 +58,7 @@ pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
             height: row.get(5)?,
             file_size: row.get(6)?,
             created_at: row.get(7)?,
+            thumbnail_path: row.get(8)?,
         })
     })?.collect::<Result<Vec<_>>>()?;
     Ok(videos)
@@ -51,22 +66,25 @@ pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
 
 pub fn insert_video(conn: &Connection, video: &Video) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO videos (id, path, filename, duration, width, height, file_size, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO videos (id, path, filename, duration, width, height, file_size, created_at, thumbnail_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(path) DO UPDATE SET filename=excluded.filename, duration=COALESCE(excluded.duration,videos.duration),
+         width=COALESCE(excluded.width,videos.width), height=COALESCE(excluded.height,videos.height), file_size=excluded.file_size,
+         thumbnail_path=COALESCE(excluded.thumbnail_path,videos.thumbnail_path)",
         params![
             video.id, video.path, video.filename,
             video.duration, video.width, video.height,
-            video.file_size, video.created_at
+            video.file_size, video.created_at, video.thumbnail_path
         ],
     )?;
     Ok(())
 }
 
-pub fn get_video_paths(conn: &Connection) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare("SELECT id, path FROM videos")?;
-    let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn set_thumbnail(conn: &Connection, video_id: &str, thumbnail_path: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE videos SET thumbnail_path = ?1 WHERE id = ?2",
+        params![thumbnail_path, video_id],
+    )?;
+    Ok(())
 }
 
 pub fn get_video_path(conn: &Connection, video_id: &str) -> Result<Option<String>> {
@@ -104,7 +122,7 @@ pub fn get_progress(conn: &Connection, video_id: &str) -> Result<Option<WatchPro
 
 pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<RecentlyPlayed>> {
     let mut stmt = conn.prepare(
-        "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, wp.position, wp.updated_at
+        "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, wp.position, wp.updated_at, v.thumbnail_path
          FROM watch_progress wp
          JOIN videos v ON v.id = wp.video_id
          ORDER BY wp.updated_at DESC
@@ -121,6 +139,7 @@ pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<Recently
                 height: row.get(5)?,
                 file_size: row.get(6)?,
                 created_at: row.get(7)?,
+                thumbnail_path: row.get(10)?,
             },
             position: row.get(8)?,
             updated_at: row.get(9)?,
@@ -144,7 +163,7 @@ pub fn delete_videos_by_ids(conn: &Connection, ids: &[String]) -> Result<()> {
 
 pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>> {
     let mut stmt = conn.prepare(
-        "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, wp.position
+        "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, wp.position, v.thumbnail_path
          FROM videos v LEFT JOIN watch_progress wp ON v.id = wp.video_id
          ORDER BY v.filename"
     )?;
@@ -159,6 +178,7 @@ pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>>
                 height: row.get(5)?,
                 file_size: row.get(6)?,
                 created_at: row.get(7)?,
+                thumbnail_path: row.get(9)?,
             },
             position: row.get::<_, Option<f64>>(8)?,
         })
@@ -170,6 +190,81 @@ pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>>
 mod tests {
     use super::*;
     use crate::models::Video;
+
+    fn sample_video(id: &str, path: &str) -> Video {
+        Video {
+            id: id.into(),
+            path: path.into(),
+            filename: "v.mp4".into(),
+            duration: Some(60.0),
+            width: Some(1280),
+            height: Some(720),
+            file_size: 100,
+            created_at: "".into(),
+            thumbnail_path: None,
+        }
+    }
+
+    #[test]
+    fn test_transaction_rollback_preserves_library() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("keep", "C:\\keep.mp4")).unwrap();
+
+        // 在事务里删除旧条目并插入新条目，然后故意回滚
+        let tx = conn.unchecked_transaction().unwrap();
+        delete_videos_by_ids(&tx, &["keep".to_string()]).unwrap();
+        insert_video(&tx, &sample_video("new", "C:\\new.mp4")).unwrap();
+        tx.rollback().unwrap();
+
+        assert_eq!(get_all_videos(&conn).unwrap().len(), 1);
+        assert_eq!(get_video_path(&conn, "keep").unwrap().as_deref(), Some("C:\\keep.mp4"));
+    }
+
+    #[test]
+    fn test_metadata_refresh_preserves_identity_and_progress() {
+        let conn = setup_test_db();
+        let old = sample_video("old", "C:/same.mp4");
+        insert_video(&conn, &old).unwrap();
+        upsert_progress(&conn, "old", 22.0).unwrap();
+        let mut refreshed = sample_video("new-id", "C:/same.mp4");
+        refreshed.duration = Some(150.0);
+        insert_video(&conn, &refreshed).unwrap();
+        let rows = get_all_videos(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "old");
+        assert_eq!(rows[0].duration, Some(150.0));
+        assert_eq!(get_progress(&conn, "old").unwrap().unwrap().position, 22.0);
+    }
+
+    #[test]
+    fn test_failed_transaction_restores_deleted_progress() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("keep", "C:/keep.mp4")).unwrap();
+        upsert_progress(&conn, "keep", 12.0).unwrap();
+        insert_video(&conn, &sample_video("conflict", "C:/existing.mp4")).unwrap();
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            delete_videos_by_ids(&tx, &["keep".into()]).unwrap();
+            assert!(insert_video(&tx, &sample_video("conflict", "C:/other.mp4")).is_err());
+        }
+        assert!(get_video_path(&conn, "keep").unwrap().is_some());
+        assert_eq!(get_progress(&conn, "keep").unwrap().unwrap().position, 12.0);
+    }
+
+    #[test]
+    fn test_transaction_commit_applies_all() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("keep", "C:\\keep.mp4")).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        delete_videos_by_ids(&tx, &["keep".to_string()]).unwrap();
+        insert_video(&tx, &sample_video("new", "C:\\new.mp4")).unwrap();
+        tx.commit().unwrap();
+
+        let videos = get_all_videos(&conn).unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].id, "new");
+    }
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -189,6 +284,7 @@ mod tests {
             height: Some(1080),
             file_size: 1024 * 1024 * 50,
             created_at: "2026-01-01T00:00:00".into(),
+            thumbnail_path: None,
         };
         insert_video(&conn, &video).unwrap();
         let videos = get_all_videos(&conn).unwrap();
@@ -202,6 +298,7 @@ mod tests {
         let video = Video {
             id: "v1".into(), path: "C:\\v.mp4".into(), filename: "v.mp4".into(),
             duration: None, width: None, height: None, file_size: 100, created_at: "".into(),
+            thumbnail_path: None,
         };
         insert_video(&conn, &video).unwrap();
 
@@ -220,6 +317,7 @@ mod tests {
         let video = Video {
             id: "v1".into(), path: "C:\\v.mp4".into(), filename: "v.mp4".into(),
             duration: None, width: None, height: None, file_size: 100, created_at: "".into(),
+            thumbnail_path: None,
         };
         insert_video(&conn, &video).unwrap();
 
@@ -233,10 +331,12 @@ mod tests {
         let v1 = Video {
             id: "a".into(), path: "C:\\a.mp4".into(), filename: "a.mp4".into(),
             duration: None, width: None, height: None, file_size: 100, created_at: "".into(),
+            thumbnail_path: None,
         };
         let v2 = Video {
             id: "b".into(), path: "C:\\b.mp4".into(), filename: "b.mp4".into(),
             duration: None, width: None, height: None, file_size: 200, created_at: "".into(),
+            thumbnail_path: None,
         };
         insert_video(&conn, &v1).unwrap();
         insert_video(&conn, &v2).unwrap();
@@ -249,5 +349,55 @@ mod tests {
         let ids: Vec<&str> = result.iter().map(|r| r.video.id.as_str()).collect();
         assert!(ids.contains(&"a"));
         assert!(ids.contains(&"b"));
+    }
+
+    #[test]
+    fn test_set_thumbnail_is_readable_and_survives_rescan() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("v1", "C:/v.mp4")).unwrap();
+
+        set_thumbnail(&conn, "v1", r"C:\cache\v1.jpg").unwrap();
+        let rows = get_all_videos(&conn).unwrap();
+        assert_eq!(rows[0].thumbnail_path.as_deref(), Some(r"C:\cache\v1.jpg"));
+
+        // 重新扫描时 build_video 的 thumbnail_path 为 None，不能把已有封面清掉
+        insert_video(&conn, &sample_video("v1", "C:/v.mp4")).unwrap();
+        let rows = get_all_videos(&conn).unwrap();
+        assert_eq!(rows[0].thumbnail_path.as_deref(), Some(r"C:\cache\v1.jpg"));
+
+        // 但显式传入新路径时应更新
+        let mut updated = sample_video("v1", "C:/v.mp4");
+        updated.thumbnail_path = Some(r"C:\cache\v1-new.jpg".into());
+        insert_video(&conn, &updated).unwrap();
+        assert_eq!(
+            get_all_videos(&conn).unwrap()[0].thumbnail_path.as_deref(),
+            Some(r"C:\cache\v1-new.jpg")
+        );
+    }
+
+    #[test]
+    fn test_migration_adds_thumbnail_column_to_legacy_db() {
+        // 模拟升级前建好的旧表（没有 thumbnail_path 列）
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE videos (
+                id TEXT PRIMARY KEY,
+                path TEXT UNIQUE NOT NULL,
+                filename TEXT NOT NULL,
+                duration REAL,
+                width INTEGER,
+                height INTEGER,
+                file_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );"
+        ).unwrap();
+
+        ensure_columns(&conn).unwrap();
+        ensure_columns(&conn).unwrap(); // 必须幂等，重复启动不能报错
+
+        insert_video(&conn, &sample_video("legacy", "C:/legacy.mp4")).unwrap();
+        let rows = get_all_videos(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].thumbnail_path, None);
     }
 }

@@ -1,64 +1,68 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Video, RecentlyPlayed } from "../types";
+import type { Video, RecentlyPlayed, VideoWithProgress } from "../types";
 
 export function useVideos() {
   const [videos, setVideos] = useState<Video[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [progressMap, setProgressMap] = useState<Record<string, number | null>>({});
   const [recentlyPlayed, setRecentlyPlayed] = useState<RecentlyPlayed[]>([]);
+
+  const refresh = useCallback(async () => {
+    const [result, recent] = await Promise.all([
+      invoke<VideoWithProgress[]>("get_videos_with_progress"),
+      invoke<RecentlyPlayed[]>("get_recently_played"),
+    ]);
+    setVideos(result.map(r => r.video));
+    setProgressMap(Object.fromEntries(result.map(r => [r.video.id, r.position])));
+    setRecentlyPlayed(recent);
+  }, []);
 
   const loadVideos = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await invoke<{ video: Video; position: number | null }[]>("get_videos_with_progress");
-      setVideos(result.map(r => r.video));
-      const pmap: Record<string, number | null> = {};
-      result.forEach(r => { pmap[r.video.id] = r.position; });
-      setProgressMap(pmap);
+      await refresh();
     } catch (e) {
-      console.error("Failed to load videos:", e);
+      setError(`读取视频库失败：${String(e)}`);
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  const loadRecentlyPlayed = useCallback(async () => {
-    try {
-      const result = await invoke<RecentlyPlayed[]>("get_recently_played");
-      setRecentlyPlayed(result);
-    } catch (e) {
-      console.error("Failed to load recently played:", e);
-    }
-  }, []);
+  }, [refresh]);
 
   const scanDirectory = useCallback(async (dir: string) => {
     setLoading(true);
+    setError(null);
     try {
       await invoke<Video[]>("scan_directory", { dir });
-      await loadVideos();
-      await loadRecentlyPlayed();
+      try {
+        await refresh();
+      } catch (e) {
+        setError(`扫描已保存，但刷新列表失败：${String(e)}。请重启应用刷新。`);
+      }
     } catch (e) {
-      console.error("Failed to scan directory:", e);
+      setError(`扫描失败，未完成更新：${String(e)}`);
     } finally {
       setLoading(false);
     }
-  }, [loadVideos, loadRecentlyPlayed]);
+  }, [refresh]);
 
   const saveProgress = useCallback(async (videoId: string, position: number) => {
     try {
       await invoke("save_progress", { videoId, position });
       setProgressMap(prev => ({ ...prev, [videoId]: position }));
-      loadRecentlyPlayed();
     } catch (e) {
-      console.error("Failed to save progress:", e);
+      setError(`播放进度保存失败：${String(e)}`);
+      throw e;
     }
-  }, [loadRecentlyPlayed]);
+    try {
+      setRecentlyPlayed(await invoke<RecentlyPlayed[]>("get_recently_played"));
+    } catch (e) {
+      setError(`进度已保存，但播放记录刷新失败：${String(e)}`);
+    }
+  }, []);
 
-  useEffect(() => {
-    loadVideos();
-    loadRecentlyPlayed();
-  }, [loadVideos, loadRecentlyPlayed]);
-
-  return { videos, progressMap, recentlyPlayed, loading, scanDirectory, saveProgress, loadVideos, loadRecentlyPlayed };
+  useEffect(() => { void loadVideos(); }, [loadVideos]);
+  const clearError = useCallback(() => setError(null), []);
+  return { videos, progressMap, recentlyPlayed, loading, error, clearError, scanDirectory, saveProgress, loadVideos };
 }

@@ -32,6 +32,7 @@ pub fn run() {
             commands::get_videos,
             commands::scan_directory,
             commands::save_progress,
+            commands::check_video_file,
             commands::get_progress,
             commands::get_videos_with_progress,
             commands::get_recently_played,
@@ -41,6 +42,7 @@ pub fn run() {
             commands::launch_potplayer,
             commands::potplayer_status,
             commands::enable_potplayer_titlebar,
+            commands::generate_thumbnails,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
