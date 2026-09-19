@@ -264,29 +264,51 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     setTimeout(() => setRateBadge(false), 900);
   }, [rateIdx]);
 
+  // 画面旋转：每点一次顺时针 90°；90/270 时按旋转后的外接框重新约束视频
+  const [rot, setRot] = useState(0);
+  const rotateFrame = useCallback(() => setRot(r => (r + 90) % 360), []);
+  const fitBoxRef = useRef<HTMLDivElement>(null);
+  const [fitBox, setFitBox] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = fitBoxRef.current;
+    if (!el) return;
+    const measure = () => setFitBox({ w: el.clientWidth, h: el.clientHeight });
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, []);
+  const swapped = rot === 90 || rot === 270;
+  const videoStyle = swapped && fitBox.w > 0
+    ? { transform: `rotate(${rot}deg)`, maxWidth: `${fitBox.h}px`, maxHeight: `${fitBox.w}px` }
+    : { transform: `rotate(${rot}deg)` };
+
   return (
     <div className="player-overlay fixed inset-0 z-50 flex flex-col">
       <div className="flex-1 min-h-0 flex">
         <div className="player-stage flex-1 min-h-0 flex items-center justify-center px-4 pt-14 pb-2">
-          {playSrc ? (
-            <video
-              ref={videoRef}
-              src={playSrc}
-              onTimeUpdate={handleTimeUpdate}
-              onLoadedMetadata={handleLoadedMetadata}
-              onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
-              onEnded={handleEnded}
-              onError={() => { void handlePlaybackError(); }}
-              className="player-video max-h-full max-w-full bg-black object-contain"
-              controls={false}
-              playsInline
-            />
-          ) : (
-            <p className="text-sm text-white/70">
-              {preparing ? "正在准备可播放版本（HEVC 转码可能需稍等）…" : "加载中…"}
-            </p>
-          )}
+          <div ref={fitBoxRef} className="w-full h-full min-w-0 min-h-0 flex items-center justify-center">
+            {playSrc ? (
+              <video
+                ref={videoRef}
+                src={playSrc}
+                onTimeUpdate={handleTimeUpdate}
+                onLoadedMetadata={handleLoadedMetadata}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onEnded={handleEnded}
+                onError={() => { void handlePlaybackError(); }}
+                style={videoStyle}
+                className="player-video max-h-full max-w-full bg-black object-contain transition-transform duration-200"
+                controls={false}
+                playsInline
+              />
+            ) : (
+              <p className="text-sm text-white/70">
+                {preparing ? "正在准备可播放版本（HEVC 转码可能需稍等）…" : "加载中…"}
+              </p>
+            )}
+          </div>
         </div>
 
         {playlist && playlist.length > 0 && onSelect && (
@@ -409,6 +431,17 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
             >
               <span>{RATES[rateIdx]}×</span>
               <span className="text-[10px] opacity-70">倍速</span>
+            </button>
+            <button
+              onClick={rotateFrame}
+              className={`player-rotate-btn inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
+                rot !== 0 ? "bg-blue-600 text-white hover:bg-blue-500" : "bg-white/10 text-white/90 hover:bg-white/15"
+              }`}
+              aria-label="画面顺时针旋转 90 度"
+              title="画面旋转 90°"
+            >
+              <span>{rot === 0 ? "旋转" : `${rot}°`}</span>
+              <span className={`text-[10px] ${rot === 0 ? "opacity-70" : "opacity-80"}`}>画面</span>
             </button>
             {autoMuted && (
               <button
