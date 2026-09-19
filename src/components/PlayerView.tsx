@@ -18,12 +18,12 @@ interface PlayerViewProps {
   onMove?: (video: Video) => void;
 }
 
-export const RATES = [1, 1.5, 2] as const;
-export const RATE_KEY = "viewman.playbackRateIdx";
+export const RATES = [0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5] as const;
+export const RATE_KEY = "viewman.playbackRate";
 
-export function loadRateIdx(): number {
+export function loadRate(): number {
   const saved = Number(localStorage.getItem(RATE_KEY));
-  return Number.isInteger(saved) && saved >= 0 && saved < RATES.length ? saved : 0;
+  return (RATES as readonly number[]).includes(saved) ? saved : 1;
 }
 
 // 系统装了 HEVC 视频扩展时 WebView2 能原生解码，无需请求后端转码
@@ -42,12 +42,11 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [rateIdx, setRateIdx] = useState(loadRateIdx);
+  const [rate, setRate] = useState(loadRate);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [progressError, setProgressError] = useState<string | null>(null);
   const [fileReadable, setFileReadable] = useState(false);
   const [showError, setShowError] = useState(false);
-  const [rateBadge, setRateBadge] = useState(false);
   const [autoMuted, setAutoMuted] = useState(false);
   const alive = useRef(true);
   const lastSaved = useRef(initialPosition);
@@ -136,9 +135,9 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
       el.currentTime = initialPosition;
     }
 
-    el.playbackRate = RATES[rateIdx];
+    el.playbackRate = rate;
     tryPlay(el);
-  }, [initialPosition, rateIdx, video.duration, tryPlay]);
+  }, [initialPosition, rate, video.duration, tryPlay]);
 
   const handleTimeUpdate = useCallback(() => {
     const el = videoRef.current;
@@ -252,17 +251,13 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     if (el.paused) tryPlay(el);
   }, [tryPlay]);
 
-  const cycleRate = useCallback(() => {
-    const next = (rateIdx + 1) % RATES.length;
-    setRateIdx(next);
-    localStorage.setItem(RATE_KEY, String(next));
-    setRateBadge(true);
+  const changeRate = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = Number(e.target.value);
+    setRate(value);
+    localStorage.setItem(RATE_KEY, String(value));
     const el = videoRef.current;
-    if (el) {
-      el.playbackRate = RATES[next];
-    }
-    setTimeout(() => setRateBadge(false), 900);
-  }, [rateIdx]);
+    if (el) el.playbackRate = value;
+  }, []);
 
   // 画面旋转：每点一次顺时针 90°；90/270 时按旋转后的外接框重新约束视频
   const [rot, setRot] = useState(0);
@@ -418,20 +413,17 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
           </div>
 
           <div className="player-rate flex items-center gap-3">
-            <button
-              onClick={cycleRate}
-              className={`player-rate-btn inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
-                rateBadge
-                  ? "bg-blue-600 text-white"
-                  : rateIdx === 0
-                    ? "bg-white/10 text-white/90 hover:bg-white/15"
-                    : "bg-blue-600 text-white hover:bg-blue-500"
-              }`}
-              aria-label="切换倍速"
+            <select
+              value={rate}
+              onChange={changeRate}
+              className={`player-rate-select rounded-full px-3 py-1.5 text-xs font-medium cursor-pointer outline-none transition bg-white/10 text-white/90 hover:bg-white/15 [&>option]:bg-gray-900 [&>option]:text-white ${rate !== 1 ? "!bg-blue-600 text-white hover:!bg-blue-500" : ""}`}
+              aria-label="播放倍速"
+              title="播放倍速"
             >
-              <span>{RATES[rateIdx]}×</span>
-              <span className="text-[10px] opacity-70">倍速</span>
-            </button>
+              {RATES.map(r => (
+                <option key={r} value={r}>{r}× 倍速</option>
+              ))}
+            </select>
             <button
               onClick={rotateFrame}
               className={`player-rotate-btn inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
