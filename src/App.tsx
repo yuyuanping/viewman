@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { VideoGrid } from "./components/VideoGrid";
@@ -35,6 +35,10 @@ function App() {
   const [sortField, setSortField] = useState<SortField>("filename");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [watchState, setWatchState] = useState<WatchState>("all");
+  // 多选批量删除模式
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
   // 播放器打开那一刻的列表快照：播放期间固定不变，不随库/排序/进度刷新而变
   const [playlist, setPlaylist] = useState<Video[] | null>(null);
 
@@ -101,6 +105,50 @@ function App() {
     const byWatchState = filterByWatchState(matched, progressMap, (v) => v.id, watchState);
     return sortVideos(byWatchState, sortField, sortDirection);
   }, [videos, selectedDir, searchQuery, progressMap, watchState, sortField, sortDirection]);
+
+  // 筛选条件一变，之前勾选但已不在视图里的项不再可见，直接清空选择避免"隐形删除"
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [selectedDir, searchQuery, watchState]);
+
+  const toggleSelect = useCallback((video: Video) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(video.id)) next.delete(video.id); else next.add(video.id);
+      return next;
+    });
+  }, []);
+
+  const allSelected = filteredVideos.length > 0 && filteredVideos.every(v => selectedIds.has(v.id));
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds(allSelected ? new Set() : new Set(filteredVideos.map(v => v.id)));
+  }, [allSelected, filteredVideos]);
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleDeleteSelected = useCallback(async () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    if (!confirm(`确定将选中的 ${ids.length} 个视频移入回收站？`)) return;
+    setDeletingSelected(true);
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await api.deleteVideo(id);
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setSelectedIds(new Set());
+    await loadVideos();
+    notify(failed > 0 ? `已删除 ${ok} 个，${failed} 个失败（可能被占用）` : `已将 ${ok} 个视频移入回收站。`, failed > 0 ? "error" : "info");
+    setDeletingSelected(false);
+  }, [selectedIds, loadVideos, notify]);
 
   // 从库/侧栏打开视频：以当前列表为快照固定下来；当前视频不在其中则补到最前
   const openFromLibrary = useCallback((video: Video, position?: number) => {
@@ -258,8 +306,16 @@ function App() {
           onDeleteDuplicates={handleDeleteDuplicates}
           deletingDuplicates={deletingDuplicates}
           onClearDuplicates={clearDuplicates}
+          selectMode={selectMode}
+          selectedCount={selectedIds.size}
+          allSelected={allSelected}
+          onEnterSelect={() => setSelectMode(true)}
+          onToggleSelectAll={toggleSelectAll}
+          onDeleteSelected={handleDeleteSelected}
+          deletingSelected={deletingSelected}
+          onExitSelect={exitSelectMode}
         />
-        <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} />
+        <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} />
       </main>
       {!useExternalPlayer && currentVideo && (
         <PlayerView

@@ -43,6 +43,14 @@ interface LibraryToolbarProps {
   onDeleteDuplicates: () => void;
   deletingDuplicates: boolean;
   onClearDuplicates: () => void;
+  selectMode: boolean;
+  selectedCount: number;
+  allSelected: boolean;
+  onEnterSelect: () => void;
+  onToggleSelectAll: () => void;
+  onDeleteSelected: () => void;
+  deletingSelected: boolean;
+  onExitSelect: () => void;
 }
 
 const SORT_OPTIONS: { value: SortField; label: string }[] = [
@@ -102,6 +110,14 @@ export function LibraryToolbar({
   onDeleteDuplicates,
   deletingDuplicates,
   onClearDuplicates,
+  selectMode,
+  selectedCount,
+  allSelected,
+  onEnterSelect,
+  onToggleSelectAll,
+  onDeleteSelected,
+  deletingSelected,
+  onExitSelect,
 }: LibraryToolbarProps) {
   return (
     <div className="library-toolbar shrink-0">
@@ -258,6 +274,40 @@ export function LibraryToolbar({
             ? "封面已就绪"
             : `生成封面 (${withoutThumbnailCount})`}
       </button>
+      {!selectMode ? (
+        <button
+          type="button"
+          className="toolbar-chip"
+          onClick={onEnterSelect}
+          title="进入多选模式，点选多个视频后批量删除"
+        >
+          多选
+        </button>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={onToggleSelectAll}
+            disabled={deletingSelected}
+            title="全选/取消全选当前列表"
+          >
+            {allSelected ? "取消全选" : "全选"}
+          </button>
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={onDeleteSelected}
+            disabled={deletingSelected || selectedCount === 0}
+            title="将选中的视频移入回收站"
+          >
+            {deletingSelected ? "删除中…" : `删除所选 (${selectedCount})`}
+          </button>
+          <button type="button" className="toolbar-chip" onClick={onExitSelect} disabled={deletingSelected} title="退出多选模式">
+            退出
+          </button>
+        </>
+      )}
       <button
         type="button"
         className="toolbar-chip"

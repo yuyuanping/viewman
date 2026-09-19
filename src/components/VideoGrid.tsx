@@ -8,12 +8,15 @@ interface VideoGridProps {
   fakeIds?: Set<string>;
   shortIds?: Set<string>;
   duplicateIds?: Set<string>;
+  selectMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (video: Video) => void;
   onPlay: (video: Video) => void;
   onDeleted: () => void;
   onMoved: () => void;
 }
 
-export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, duplicateIds, onPlay, onDeleted, onMoved }: VideoGridProps) {
+export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, duplicateIds, selectMode, selectedIds, onToggleSelect, onPlay, onDeleted, onMoved }: VideoGridProps) {
   if (videos.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -38,6 +41,9 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
             fake={fakeIds?.has(video.id) ?? false}
             short={shortIds?.has(video.id) ?? false}
             duplicate={duplicateIds?.has(video.id) ?? false}
+            selectMode={selectMode}
+            selected={selectedIds?.has(video.id) ?? false}
+            onToggleSelect={onToggleSelect}
             onPlay={onPlay}
             onDeleted={onDeleted}
             onMoved={onMoved}

@@ -78,6 +78,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
   background: #991b1bee; color: #fecaca;
 }
 
+/* 多选模式 */
+.media-selected { outline: 2px solid #3b82f6; outline-offset: -2px; }
+.select-check {
+  position: absolute; top: 8px; right: 8px; z-index: 3;
+  width: 26px; height: 26px; border-radius: 9999px;
+  display: grid; place-items: center;
+  border: 2px solid #ffffffb3; background: #00000066;
+  color: #fff; font-size: 14px; font-weight: 700;
+}
+.select-checked { background: #2563eb; border-color: #2563eb; }
+
 /* 卡片右键菜单 */
 .media-context-menu {
   position: fixed; z-index: 50; min-width: 168px;

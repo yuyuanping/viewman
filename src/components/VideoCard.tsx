@@ -13,12 +13,15 @@ interface VideoCardProps {
   fake?: boolean;
   short?: boolean;
   duplicate?: boolean;
+  selectMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (video: Video) => void;
   onPlay: (video: Video) => void;
   onDeleted: () => void;
   onMoved: () => void;
 }
 
-export function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, onPlay, onDeleted, onMoved }: VideoCardProps) {
+export function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, selectMode = false, selected = false, onToggleSelect, onPlay, onDeleted, onMoved }: VideoCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -82,7 +85,7 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
 
   return (
     <article
-      className={`media-card${missing ? " media-missing" : ""}${fake ? " media-fake" : ""}`}
+      className={`media-card${missing ? " media-missing" : ""}${fake ? " media-fake" : ""}${selected ? " media-selected" : ""}`}
       title={fake ? "文件内容实为图片，并非视频（可通过工具栏转换为图片文件）" : missing ? "文件当前不可读取（可能已被移动、删除或磁盘未连接）" : duplicate ? "与库内其他文件内容相同（多余副本，可通过工具栏删除）" : undefined}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -90,15 +93,20 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
       }}
     >
       <button
-        onClick={fake ? undefined : () => onPlay(video)}
-        disabled={deleting || fake}
+        onClick={selectMode ? () => onToggleSelect?.(video) : (fake ? undefined : () => onPlay(video))}
+        disabled={deleting || (!selectMode && fake)}
         className="block w-full text-left"
-        aria-label={fake ? `${video.filename}（图片，无法播放）` : `播放 ${video.filename}`}
+        aria-label={selectMode ? (selected ? `取消选择 ${video.filename}` : `选择 ${video.filename}`) : fake ? `${video.filename}（图片，无法播放）` : `播放 ${video.filename}`}
       >
         <div className="media-preview">
           {missing && <span className="missing-flag">文件不可读</span>}
           {fake && <span className="fake-flag">实为图片</span>}
           {duplicate && !fake && <span className="dup-flag">重复副本</span>}
+          {selectMode && (
+            <span className={`select-check${selected ? " select-checked" : ""}`} aria-hidden="true">
+              {selected ? "✓" : ""}
+            </span>
+          )}
           {/* 封面：假视频直接显示图片本体，其余用抽帧缓存 */}
           {fake ? (
             <img
@@ -144,15 +152,17 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
           </div>
         </div>
       </button>
-      <button
-        onClick={handleDelete}
-        disabled={deleting}
-        className="media-remove absolute top-2 right-2 bg-gray-950/80 hover:bg-red-700 text-gray-300 rounded-lg w-7 h-7 grid place-items-center text-sm"
-        title="删除到回收站"
-        aria-label={`删除 ${video.filename} 到回收站`}
-      >
-        {deleting ? "…" : "×"}
-      </button>
+      {!selectMode && (
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          className="media-remove absolute top-2 right-2 bg-gray-950/80 hover:bg-red-700 text-gray-300 rounded-lg w-7 h-7 grid place-items-center text-sm"
+          title="删除到回收站"
+          aria-label={`删除 ${video.filename} 到回收站`}
+        >
+          {deleting ? "…" : "×"}
+        </button>
+      )}
       {menu && (
         <div
           className="media-context-menu"
