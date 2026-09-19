@@ -36,6 +36,11 @@ export interface PotPlayerStatus {
 }
 
 export interface VideoFileStatus {
-  status: "readable" | "missing" | "unavailable" | "error";
+  status: "readable" | "missing" | "unavailable" | "fake_image" | "error";
   message: string | null;
+}
+
+export interface ConversionResult {
+  converted: number;
+  errors: string[];
 }

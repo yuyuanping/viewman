@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "../api";
 import { DirTree } from "./DirTree";
 import { RecentlyPlayedList } from "./RecentlyPlayedList";
 import type { RescanStatus } from "../hooks/useVideos";
@@ -25,8 +25,8 @@ export function Sidebar({ videos, recentlyPlayed, selectedDir, onSelectDir, onSc
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
 
   useEffect(() => {
-    invoke<boolean>("check_potplayer").then(setPotplayerOk).catch(() => setPotplayerOk(false));
-    invoke<boolean>("check_ffprobe").then(setFfprobeOk).catch(() => setFfprobeOk(false));
+    api.checkPotplayer().then(setPotplayerOk).catch(() => setPotplayerOk(false));
+    api.checkFfprobe().then(setFfprobeOk).catch(() => setFfprobeOk(false));
   }, []);
 
   const [operationError, setOperationError] = useState<string | null>(null);
@@ -47,7 +47,7 @@ export function Sidebar({ videos, recentlyPlayed, selectedDir, onSelectDir, onSc
       return;
     }
     try {
-      const ok = await invoke<boolean>("check_potplayer");
+      const ok = await api.checkPotplayer();
       setPotplayerOk(ok);
       if (ok) onTogglePotPlayer();
     } catch (e) {

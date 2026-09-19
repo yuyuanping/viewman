@@ -1,10 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "./api";
 import { LEGACY_SCAN_ROOTS_KEY, dedupeKey, parseScanRoots } from "./scanRoots";
 
 /** 从数据库读取已记录的扫描目录；读取失败按空处理（只影响自动重扫，不影响手动功能） */
 export async function loadScanRoots(): Promise<string[]> {
   try {
-    return parseScanRoots(await invoke<unknown>("load_scan_roots"));
+    return parseScanRoots(await api.loadScanRoots());
   } catch {
     return [];
   }
@@ -16,7 +16,7 @@ export async function rememberScanRoot(dir: string): Promise<void> {
     const roots = await loadScanRoots();
     const key = dedupeKey(dir);
     if (roots.some(root => dedupeKey(root) === key)) return;
-    await invoke("save_scan_roots", { roots: [...roots, dir] });
+    await api.saveScanRoots([...roots, dir]);
   } catch {
     // 存储失败不影响本次扫描
   }
@@ -29,7 +29,7 @@ export async function migrateLegacyScanRoots(): Promise<void> {
     if (legacy.length === 0) return;
     const existing = await loadScanRoots();
     if (existing.length === 0) {
-      await invoke("save_scan_roots", { roots: legacy });
+      await api.saveScanRoots(legacy);
     }
     localStorage.removeItem(LEGACY_SCAN_ROOTS_KEY);
   } catch {

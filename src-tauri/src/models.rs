@@ -35,9 +35,16 @@ pub struct RecentlyPlayed {
     pub updated_at: String,
 }
 
-/// "readable" 可正常打开 | "missing" 文件或记录不存在 | "unavailable" 被占用/无权限/离线 | "error" 其他错误
+/// "readable" 可正常打开 | "missing" 文件或记录不存在 | "unavailable" 被占用/无权限/离线 | "fake_image" 内容实为图片 | "error" 其他错误
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoFileStatus {
     pub status: String,
     pub message: Option<String>,
+}
+
+/// 假视频转换为图片的结果
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConversionResult {
+    pub converted: usize,
+    pub errors: Vec<String>,
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import type { Video, RecentlyPlayed, VideoWithProgress } from "../types";
+import { api } from "../api";
+import type { RecentlyPlayed, Video } from "../types";
 import { loadScanRoots, migrateLegacyScanRoots, rememberScanRoot } from "../scanRootStore";
 
 /** 自动重扫的目录级进度 */
@@ -22,8 +22,8 @@ export function useVideos() {
 
   const refresh = useCallback(async () => {
     const [result, recent] = await Promise.all([
-      invoke<VideoWithProgress[]>("get_videos_with_progress"),
-      invoke<RecentlyPlayed[]>("get_recently_played"),
+      api.getVideosWithProgress(),
+      api.getRecentlyPlayed(),
     ]);
     setVideos(result.map(r => r.video));
     setProgressMap(Object.fromEntries(result.map(r => [r.video.id, r.position])));
@@ -34,7 +34,7 @@ export function useVideos() {
   const runScan = useCallback(async (dir: string): Promise<string | null> => {
     let scanError: string | null = null;
     try {
-      await invoke<Video[]>("scan_directory", { dir });
+      await api.scanDirectory(dir);
     } catch (e) {
       scanError = `扫描失败，未完成更新：${String(e)}`;
     }
@@ -87,14 +87,14 @@ export function useVideos() {
 
   const saveProgress = useCallback(async (videoId: string, position: number) => {
     try {
-      await invoke("save_progress", { videoId, position });
+      await api.saveProgress(videoId, position);
       setProgressMap(prev => ({ ...prev, [videoId]: position }));
     } catch (e) {
       setError(`播放进度保存失败：${String(e)}`);
       throw e;
     }
     try {
-      setRecentlyPlayed(await invoke<RecentlyPlayed[]>("get_recently_played"));
+      setRecentlyPlayed(await api.getRecentlyPlayed());
     } catch (e) {
       setError(`进度已保存，但播放记录刷新失败：${String(e)}`);
     }

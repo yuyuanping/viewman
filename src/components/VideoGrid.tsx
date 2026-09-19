@@ -5,11 +5,15 @@ interface VideoGridProps {
   videos: Video[];
   progressMap: Record<string, number | null>;
   missingIds?: Set<string>;
+  fakeIds?: Set<string>;
+  shortIds?: Set<string>;
+  duplicateIds?: Set<string>;
   onPlay: (video: Video) => void;
   onDeleted: () => void;
+  onMoved: () => void;
 }
 
-export function VideoGrid({ videos, progressMap, missingIds, onPlay, onDeleted }: VideoGridProps) {
+export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, duplicateIds, onPlay, onDeleted, onMoved }: VideoGridProps) {
   if (videos.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -31,8 +35,12 @@ export function VideoGrid({ videos, progressMap, missingIds, onPlay, onDeleted }
             video={video}
             progress={progressMap[video.id] ?? null}
             missing={missingIds?.has(video.id) ?? false}
+            fake={fakeIds?.has(video.id) ?? false}
+            short={shortIds?.has(video.id) ?? false}
+            duplicate={duplicateIds?.has(video.id) ?? false}
             onPlay={onPlay}
             onDeleted={onDeleted}
+            onMoved={onMoved}
           />
         ))}
       </div>

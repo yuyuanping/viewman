@@ -136,6 +136,136 @@ pub fn ffmpeg_available() -> bool {
     hidden_command("ffmpeg").arg("-version").output().is_ok()
 }
 
+/// 读取视频流编码名（h264/hevc/...），读不出时返回 None
+pub fn video_codec_name(video_path: &str) -> Option<String> {
+    let output = hidden_command("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// 转码为 H.264 + AAC 写入 out_path，供 WebView2 解不了 HEVC 时内置播放使用
+pub fn transcode_to_h264(video_path: &str, out_path: &Path) -> Result<(), String> {
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建转码目录失败: {}", e))?;
+    }
+    let output = hidden_command("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            video_path,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+        ])
+        .arg(out_path)
+        .output()
+        .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+    if !output.status.success() {
+        let _ = fs::remove_file(out_path);
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .unwrap_or("ffmpeg 执行失败")
+            .to_string();
+        return Err(detail);
+    }
+    match fs::metadata(out_path) {
+        Ok(m) if m.len() > 0 => Ok(()),
+        _ => Err("ffmpeg 未产生有效输出".to_string()),
+    }
+}
+
+/// 用 mpdecimate 去除重复帧后统计剩余画面数，判断是否"近似静图"。无法解码时返回 None
+pub fn unique_frame_count(video_path: &str) -> Option<usize> {
+    let output = hidden_command("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-i",
+            video_path,
+            "-vf",
+            "mpdecimate",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stderr);
+    let mut count = None;
+    for line in text.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("frame=") {
+            if let Some(num) = rest.trim().split_whitespace().next() {
+                if let Ok(n) = num.parse::<usize>() {
+                    count = Some(n);
+                }
+            }
+        }
+    }
+    count
+}
+
+/// 抽取原视频的首帧（保持原始分辨率）写入 out_path，用于把 ≤1 秒的"静图视频"转成图片
+pub fn extract_full_frame(video_path: &str, out_path: &Path) -> Result<(), String> {
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    let output = hidden_command("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            &out_path.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .unwrap_or("ffmpeg 执行失败")
+            .to_string();
+        return Err(detail);
+    }
+    match fs::metadata(out_path) {
+        Ok(m) if m.len() > 0 => Ok(()),
+        _ => Err("ffmpeg 未产生有效帧".to_string()),
+    }
+}
+
 /// 用 ffmpeg 抽取一帧写入 out_path。先尝试 10% 位置，失败则回退到首帧。
 pub fn extract_thumbnail(
     video_path: &str,

@@ -1,5 +1,8 @@
-import { useState } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open } from "@tauri-apps/plugin-dialog";
+import { api } from "../api";
 import type { Video } from "../types";
 import { formatDuration, formatFileSize } from "../utils";
 
@@ -7,12 +10,38 @@ interface VideoCardProps {
   video: Video;
   progress: number | null;
   missing?: boolean;
+  fake?: boolean;
+  short?: boolean;
+  duplicate?: boolean;
   onPlay: (video: Video) => void;
   onDeleted: () => void;
+  onMoved: () => void;
 }
 
-export function VideoCard({ video, progress, missing = false, onPlay, onDeleted }: VideoCardProps) {
+export function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, onPlay, onDeleted, onMoved }: VideoCardProps) {
   const [deleting, setDeleting] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  const openContainingFolder = async () => {
+    try {
+      await revealItemInDir(video.path);
+    } catch (err) {
+      alert("打开文件所在位置失败: " + err);
+    }
+  };
   const progressPct = progress !== null && video.duration && video.duration > 0
     ? Math.max(0, Math.min(100, (progress / video.duration) * 100)) : 0;
   const extension = video.filename.split(".").pop()?.toUpperCase() || "VIDEO";
@@ -22,7 +51,7 @@ export function VideoCard({ video, progress, missing = false, onPlay, onDeleted 
     if (!confirm(`确定要删除 "${video.filename}" 到回收站？`)) return;
     setDeleting(true);
     try {
-      await invoke("delete_video", { videoId: video.id });
+      await api.deleteVideo(video.id);
       onDeleted();
     } catch (err) {
       alert("删除失败: " + err);
@@ -30,18 +59,55 @@ export function VideoCard({ video, progress, missing = false, onPlay, onDeleted 
     }
   };
 
+  const handleMove = async () => {
+    let dir: string | null;
+    try {
+      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
+    } catch (err) {
+      alert("打开文件夹选择器失败: " + err);
+      return;
+    }
+    if (!dir) return;
+    if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return;
+    setMoving(true);
+    try {
+      await api.moveVideo(video.id, dir);
+      onMoved();
+    } catch (err) {
+      alert("移动失败: " + err);
+    } finally {
+      setMoving(false);
+    }
+  };
+
   return (
-    <article className={`media-card${missing ? " media-missing" : ""}`} title={missing ? "文件当前不可读取（可能已被移动、删除或磁盘未连接）" : undefined}>
+    <article
+      className={`media-card${missing ? " media-missing" : ""}${fake ? " media-fake" : ""}`}
+      title={fake ? "文件内容实为图片，并非视频（可通过工具栏转换为图片文件）" : missing ? "文件当前不可读取（可能已被移动、删除或磁盘未连接）" : duplicate ? "与库内其他文件内容相同（多余副本，可通过工具栏删除）" : undefined}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
       <button
-        onClick={() => onPlay(video)}
-        disabled={deleting}
+        onClick={fake ? undefined : () => onPlay(video)}
+        disabled={deleting || fake}
         className="block w-full text-left"
-        aria-label={`播放 ${video.filename}`}
+        aria-label={fake ? `${video.filename}（图片，无法播放）` : `播放 ${video.filename}`}
       >
         <div className="media-preview">
           {missing && <span className="missing-flag">文件不可读</span>}
-          {/* 缩略图 */}
-          {thumbnailPath ? (
+          {fake && <span className="fake-flag">实为图片</span>}
+          {duplicate && !fake && <span className="dup-flag">重复副本</span>}
+          {/* 封面：假视频直接显示图片本体，其余用抽帧缓存 */}
+          {fake ? (
+            <img
+              src={convertFileSrc(video.path)}
+              alt={video.filename}
+              loading="lazy"
+              className="media-thumbnail"
+            />
+          ) : thumbnailPath ? (
             <img
               src={convertFileSrc(thumbnailPath)}
               alt={video.filename}
@@ -61,6 +127,7 @@ export function VideoCard({ video, progress, missing = false, onPlay, onDeleted 
             </>
           )}
           <span className="media-badge bottom-3 right-3">{formatDuration(video.duration)}</span>
+          {short && !fake && <span className="media-badge bottom-3 left-3 short-badge">{video.duration !== null && video.duration < 1 ? "0 秒 · 可转图片" : "静图 · 可转图片"}</span>}
           {progressPct > 0 && (
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white/10">
               <div className="h-full bg-blue-500" style={{ width: `${progressPct}%` }} />
@@ -86,6 +153,21 @@ export function VideoCard({ video, progress, missing = false, onPlay, onDeleted 
       >
         {deleting ? "…" : "×"}
       </button>
+      {menu && (
+        <div
+          className="media-context-menu"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button type="button" onClick={() => { setMenu(null); void openContainingFolder(); }}>
+            打开文件所在位置
+          </button>
+          <button type="button" disabled={moving} onClick={() => { setMenu(null); void handleMove(); }}>
+            {moving ? "移动中…" : "移动到…"}
+          </button>
+        </div>
+      )}
     </article>
   );
 }
