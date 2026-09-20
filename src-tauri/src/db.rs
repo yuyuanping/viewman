@@ -20,7 +20,8 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             height INTEGER,
             file_size INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            thumbnail_path TEXT
+            thumbnail_path TEXT,
+            video_codec TEXT
         );
         CREATE TABLE IF NOT EXISTS watch_progress (
             id TEXT PRIMARY KEY,
@@ -44,6 +45,9 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     if !columns.iter().any(|c| c == "thumbnail_path") {
         conn.execute("ALTER TABLE videos ADD COLUMN thumbnail_path TEXT", [])?;
+    }
+    if !columns.iter().any(|c| c == "video_codec") {
+        conn.execute("ALTER TABLE videos ADD COLUMN video_codec TEXT", [])?;
     }
     Ok(())
 }

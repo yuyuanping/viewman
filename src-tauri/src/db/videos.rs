@@ -27,7 +27,8 @@ pub fn insert_video(conn: &Connection, video: &Video) -> Result<()> {
         "INSERT INTO videos (id, path, filename, duration, width, height, file_size, created_at, thumbnail_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(path) DO UPDATE SET filename=excluded.filename, duration=COALESCE(excluded.duration,videos.duration),
          width=COALESCE(excluded.width,videos.width), height=COALESCE(excluded.height,videos.height), file_size=excluded.file_size,
-         thumbnail_path=COALESCE(excluded.thumbnail_path,videos.thumbnail_path)",
+         thumbnail_path=COALESCE(excluded.thumbnail_path,videos.thumbnail_path),
+         video_codec=CASE WHEN videos.file_size != excluded.file_size THEN NULL ELSE videos.video_codec END",
         params![
             video.id, video.path, video.filename,
             video.duration, video.width, video.height,
@@ -66,6 +67,30 @@ pub fn update_video_location(conn: &Connection, video_id: &str, path: &str, file
         params![path, file_size, video_id],
     )?;
     Ok(())
+}
+
+/// 还没探测过编码的视频（id, path），供 HEVC 检测增量探测用
+pub fn videos_without_codec(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, path FROM videos WHERE video_codec IS NULL ORDER BY filename")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn set_video_codec(conn: &Connection, video_id: &str, codec: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE videos SET video_codec = ?1 WHERE id = ?2",
+        params![codec, video_id],
+    )?;
+    Ok(())
+}
+
+pub fn hevc_video_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM videos WHERE video_codec = 'hevc' ORDER BY filename")?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 /// 路径是否已被 video_id 之外的记录占用（Windows 路径大小写不敏感）
@@ -141,6 +166,30 @@ mod tests {
 
         assert_eq!(get_video_path(&conn, "v1").unwrap(), Some("C:\\v.mp4".to_string()));
         assert_eq!(get_video_path(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn test_codec_cache_persists_until_file_size_changes() {
+        let conn = setup_test_db();
+        let mut v = sample_video("v1", "C:/v.mp4");
+        insert_video(&conn, &v).unwrap();
+        insert_video(&conn, &sample_video("v2", "C:/v2.mp4")).unwrap();
+
+        // 新入库的文件都待探测
+        assert_eq!(videos_without_codec(&conn).unwrap().len(), 2);
+
+        set_video_codec(&conn, "v1", "hevc").unwrap();
+        set_video_codec(&conn, "v2", "h264").unwrap();
+        assert_eq!(videos_without_codec(&conn).unwrap().len(), 0);
+        assert_eq!(hevc_video_ids(&conn).unwrap(), vec!["v1".to_string()]);
+
+        // 重新扫描、大小不变：编码结论保留；大小变了（文件被替换）则失效重探
+        insert_video(&conn, &sample_video("v1", "C:/v.mp4")).unwrap();
+        assert_eq!(hevc_video_ids(&conn).unwrap(), vec!["v1".to_string()]);
+        v.file_size += 1024;
+        insert_video(&conn, &v).unwrap();
+        assert_eq!(videos_without_codec(&conn).unwrap().iter().filter(|(id, _)| id == "v1").count(), 1);
+        assert_eq!(hevc_video_ids(&conn).unwrap().len(), 0);
     }
 
     #[test]

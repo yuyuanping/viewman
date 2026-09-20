@@ -406,8 +406,8 @@ pub struct HevcDetectProgress {
     pub done: bool,
 }
 
-/// 检测库中的 HEVC 视频 id（ffprobe 读视频流编码名），文件不存在的跳过。
-/// 逐个检测经 hevc-detect-progress 事件推送进度。
+/// 检测库中的 HEVC 视频 id：ffprobe 逐文件探测编码并写入 video_codec 列，
+/// 结果持久化——重启后只需探测新文件。进度经 hevc-detect-progress 事件推送。
 #[tauri::command]
 pub async fn find_hevc_videos(
     app: tauri::AppHandle,
@@ -418,20 +418,21 @@ pub async fn find_hevc_videos(
     }
     let jobs: Vec<(String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_all_videos(&conn)
+        db::videos_without_codec(&conn)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|v| (v.id, v.path))
             .filter(|(_, p)| Path::new(p).exists())
             .collect()
     };
     let total = jobs.len();
     let task_app = app.clone();
-    let ids = tauri::async_runtime::spawn_blocking(move || {
-        let mut found = Vec::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = task_app.state::<AppState>();
         for (index, (id, path)) in jobs.into_iter().enumerate() {
-            if scanner::video_codec_name(&path).as_deref() == Some("hevc") {
-                found.push(id);
+            let codec = scanner::video_codec_name(&path).unwrap_or_else(|| "unknown".into());
+            if let Ok(conn) = state.db.lock() {
+                let _ = db::set_video_codec(&conn, &id, &codec);
             }
             let _ = task_app.emit(
                 "hevc-detect-progress",
@@ -442,10 +443,13 @@ pub async fn find_hevc_videos(
             "hevc-detect-progress",
             HevcDetectProgress { processed: total, total, done: true },
         );
-        found
     })
     .await
     .map_err(|e| e.to_string())?;
+    let ids = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::hevc_video_ids(&conn).map_err(|e| e.to_string())?
+    };
     Ok(ids)
 }
 
@@ -541,6 +545,7 @@ pub async fn convert_hevc_videos(
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         for (id, path, size) in &done {
             db::update_video_location(&conn, id, path, *size).map_err(|e| e.to_string())?;
+            db::set_video_codec(&conn, id, "h264").map_err(|e| e.to_string())?;
         }
     }
     let _ = app.emit(

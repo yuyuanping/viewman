@@ -23,7 +23,7 @@ fn thumbnails_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> 
 }
 
 /// 为指定视频生成封面（ffmpeg 抽帧），已有有效缓存文件的会跳过。
-/// 抽帧过程不持有数据库锁：先在后台线程生成文件，再统一写库。
+/// 抽帧过程不持有数据库锁；每张成功后立即写库，中途关闭应用进度不丢。
 #[tauri::command]
 pub async fn generate_thumbnails(
     app: tauri::AppHandle,
@@ -58,14 +58,30 @@ pub async fn generate_thumbnails(
     }
 
     let task_app = app.clone();
-    let (done, failed) = tauri::async_runtime::spawn_blocking(move || {
-        let mut done: Vec<(String, String)> = Vec::new();
+    let (generated, failed) = tauri::async_runtime::spawn_blocking(move || -> (usize, usize) {
+        use tauri::Manager;
+        let state = task_app.state::<AppState>();
+        let mut generated = 0usize;
         let mut failed = 0usize;
         for (index, video) in jobs.iter().enumerate() {
             let out = dir.join(format!("{}.jpg", video.id));
-            match scanner::extract_thumbnail(&video.path, &out, video.duration) {
-                Ok(()) => done.push((video.id.clone(), out.to_string_lossy().to_string())),
-                Err(_) => failed += 1,
+            // 上次中途关闭留下的孤儿文件：直接登记，不重新抽帧
+            let existing_ok = std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
+            let ok = existing_ok || {
+                // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张 jpg
+                let part = dir.join(format!("{}.jpg.part", video.id));
+                let result = scanner::extract_thumbnail(&video.path, &part, video.duration)
+                    .and_then(|()| std::fs::rename(&part, &out).map_err(|e| e.to_string()));
+                let _ = std::fs::remove_file(&part);
+                result.is_ok()
+            };
+            if ok {
+                if let Ok(conn) = state.db.lock() {
+                    let _ = db::set_thumbnail(&conn, &video.id, &out.to_string_lossy());
+                }
+                generated += 1;
+            } else {
+                failed += 1;
             }
             let _ = task_app.emit(
                 "thumbnail-progress",
@@ -73,27 +89,20 @@ pub async fn generate_thumbnails(
                     processed: index + 1,
                     total,
                     done: false,
-                    generated: done.len(),
+                    generated,
                     failed,
                 },
             );
         }
-        (done, failed)
+        (generated, failed)
     })
     .await
     .map_err(|e| e.to_string())?;
 
-    {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        for (id, path) in &done {
-            db::set_thumbnail(&conn, id, path).map_err(|e| e.to_string())?;
-        }
-    }
-
     let _ = app.emit(
         "thumbnail-progress",
-        ThumbnailProgress { processed: total, total, done: true, generated: done.len(), failed },
+        ThumbnailProgress { processed: total, total, done: true, generated, failed },
     );
 
-    Ok(done.len())
+    Ok(generated)
 }
