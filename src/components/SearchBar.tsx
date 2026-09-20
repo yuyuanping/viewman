@@ -22,7 +22,7 @@ export function SearchBar({ value, onChange, total }: SearchBarProps) {
   return (
     <header className="flex flex-col gap-5 shrink-0">
       <div className="flex items-end justify-between gap-3">
-        <div><p className="library-eyebrow mb-1">YOUR PERSONAL LIBRARY</p><h2 className="library-heading">视频库</h2></div>
+        <div><h2 className="library-heading">视频库</h2></div>
         <span className="text-gray-400 text-xs rounded-full border border-white/10 px-3 py-1.5 tabular-nums">{total.toLocaleString()} 个视频</span>
       </div>
       <div className="search-field">

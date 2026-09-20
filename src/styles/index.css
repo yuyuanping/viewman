@@ -27,7 +27,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 .library-sidebar { width: 264px; flex-shrink: 0; border-right: 1px solid #ffffff0b; background: #111925e8; }
 .library-main { padding: 28px; min-width: 0; }
 .library-heading { font-size: 24px; font-weight: 650; letter-spacing: -.6px; }
-.library-eyebrow { font-size: 10px; letter-spacing: 2px; color: #91a2c2; font-weight: 600; }
 .search-field { display: flex; align-items: center; gap: 12px; background: #182231b3; border: 1px solid #ffffff10; border-radius: 12px; padding: 0 14px; }
 .search-field:focus-within { border-color: #788cff; box-shadow: 0 0 0 3px #788cff14; }
 .video-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; padding: 3px 3px 20px; }
