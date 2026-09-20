@@ -259,6 +259,22 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     if (el) el.playbackRate = value;
   }, []);
 
+  // 全屏：对整个播放层请求全屏，自绘控制条在全屏内仍可用；Esc 可退出
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement != null);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+    } else {
+      void overlayRef.current?.requestFullscreen().catch(() => undefined);
+    }
+  }, []);
+
   // 画面旋转：每点一次顺时针 90°；90/270 时按旋转后的外接框重新约束视频
   const [rot, setRot] = useState(0);
   const rotateFrame = useCallback(() => setRot(r => (r + 90) % 360), []);
@@ -279,7 +295,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     : { transform: `rotate(${rot}deg)` };
 
   return (
-    <div className="player-overlay fixed inset-0 z-50 flex flex-col">
+    <div ref={overlayRef} className="player-overlay fixed inset-0 z-50 flex flex-col">
       <div className="flex-1 min-h-0 flex">
         <div className="player-stage flex-1 min-h-0 flex items-center justify-center px-4 pt-14 pb-2">
           <div ref={fitBoxRef} className="w-full h-full min-w-0 min-h-0 flex items-center justify-center">
@@ -293,6 +309,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
                 onPause={() => setPlaying(false)}
                 onEnded={handleEnded}
                 onError={() => { void handlePlaybackError(); }}
+                onDoubleClick={toggleFullscreen}
                 style={videoStyle}
                 className="player-video max-h-full max-w-full bg-black object-contain transition-transform duration-200"
                 controls={false}
@@ -434,6 +451,16 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
             >
               <span>{rot === 0 ? "旋转" : `${rot}°`}</span>
               <span className={`text-[10px] ${rot === 0 ? "opacity-70" : "opacity-80"}`}>画面</span>
+            </button>
+            <button
+              onClick={toggleFullscreen}
+              className={`player-fullscreen-btn inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
+                isFullscreen ? "bg-blue-600 text-white hover:bg-blue-500" : "bg-white/10 text-white/90 hover:bg-white/15"
+              }`}
+              aria-label={isFullscreen ? "退出全屏" : "全屏"}
+              title={isFullscreen ? "退出全屏（Esc）" : "全屏播放（也可双击画面）"}
+            >
+              <span>{isFullscreen ? "⛶ 退出" : "⛶ 全屏"}</span>
             </button>
             {autoMuted && (
               <button
