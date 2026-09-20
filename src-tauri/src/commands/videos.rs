@@ -399,9 +399,20 @@ pub struct HevcProgress {
     pub failed: usize,
 }
 
-/// 检测库中的 HEVC 视频 id（ffprobe 读视频流编码名），文件不存在的跳过
+#[derive(Clone, serde::Serialize)]
+pub struct HevcDetectProgress {
+    pub processed: usize,
+    pub total: usize,
+    pub done: bool,
+}
+
+/// 检测库中的 HEVC 视频 id（ffprobe 读视频流编码名），文件不存在的跳过。
+/// 逐个检测经 hevc-detect-progress 事件推送进度。
 #[tauri::command]
-pub async fn find_hevc_videos(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+pub async fn find_hevc_videos(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
     if !scanner::ffmpeg_available() {
         return Err("未检测到 ffmpeg/ffprobe，无法识别编码。请安装 ffmpeg 并加入 PATH。".into());
     }
@@ -414,11 +425,24 @@ pub async fn find_hevc_videos(state: State<'_, AppState>) -> Result<Vec<String>,
             .filter(|(_, p)| Path::new(p).exists())
             .collect()
     };
+    let total = jobs.len();
+    let task_app = app.clone();
     let ids = tauri::async_runtime::spawn_blocking(move || {
-        jobs.into_iter()
-            .filter(|(_, p)| scanner::video_codec_name(p).as_deref() == Some("hevc"))
-            .map(|(id, _)| id)
-            .collect()
+        let mut found = Vec::new();
+        for (index, (id, path)) in jobs.into_iter().enumerate() {
+            if scanner::video_codec_name(&path).as_deref() == Some("hevc") {
+                found.push(id);
+            }
+            let _ = task_app.emit(
+                "hevc-detect-progress",
+                HevcDetectProgress { processed: index + 1, total, done: false },
+            );
+        }
+        let _ = task_app.emit(
+            "hevc-detect-progress",
+            HevcDetectProgress { processed: total, total, done: true },
+        );
+        found
     })
     .await
     .map_err(|e| e.to_string())?;

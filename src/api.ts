@@ -58,6 +58,13 @@ export interface HevcProgressPayload {
   failed: number;
 }
 
+/** 后端 hevc-detect-progress 事件负载 */
+export interface HevcDetectProgressPayload {
+  processed: number;
+  total: number;
+  done: boolean;
+}
+
 /** 后端 thumbnail-progress 事件负载 */
 export interface ThumbnailProgressPayload {
   processed: number;

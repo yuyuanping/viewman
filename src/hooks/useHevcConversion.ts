@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
-import type { HevcProgressPayload } from "../api";
+import type { HevcDetectProgressPayload, HevcProgressPayload } from "../api";
 import type { Notify } from "./useToasts";
 
 /** HEVC 永久转码：检测库内 HEVC 视频，批量就地重编码为 H.264（原文件进回收站） */
@@ -9,23 +9,31 @@ export function useHevcConversion(loadVideos: () => Promise<void>, notify: Notif
   const [hevcIds, setHevcIds] = useState<string[]>([]);
   const [detected, setDetected] = useState(false);
   const [detecting, setDetecting] = useState(false);
+  const [detectProgress, setDetectProgress] = useState<{ processed: number; total: number } | null>(null);
   const [converting, setConverting] = useState(false);
   const [hevcProgress, setHevcProgress] = useState<{ processed: number; total: number } | null>(null);
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    const unlisteners: (() => void)[] = [];
     listen<HevcProgressPayload>("hevc-progress", (event) => {
       const { processed, total, done } = event.payload;
       setHevcProgress(done ? null : { processed, total });
     }).then((fn) => {
-      if (disposed) fn(); else unlisten = fn;
+      if (disposed) fn(); else unlisteners.push(fn);
     }).catch(() => { /* 事件监听失败不影响手动刷新 */ });
-    return () => { disposed = true; unlisten?.(); };
+    listen<HevcDetectProgressPayload>("hevc-detect-progress", (event) => {
+      const { processed, total, done } = event.payload;
+      setDetectProgress(done ? null : { processed, total });
+    }).then((fn) => {
+      if (disposed) fn(); else unlisteners.push(fn);
+    }).catch(() => { /* 事件监听失败时按钮只显示无计数的检测中 */ });
+    return () => { disposed = true; unlisteners.forEach(fn => fn()); };
   }, []);
 
   const detect = useCallback(async () => {
     setDetecting(true);
+    setDetectProgress(null);
     try {
       const ids = await api.findHevcVideos();
       setHevcIds(ids);
@@ -37,6 +45,7 @@ export function useHevcConversion(loadVideos: () => Promise<void>, notify: Notif
       notify(`检测 HEVC 失败：${String(e)}`, "error");
     } finally {
       setDetecting(false);
+      setDetectProgress(null);
     }
   }, [notify]);
 
@@ -72,6 +81,7 @@ export function useHevcConversion(loadVideos: () => Promise<void>, notify: Notif
     hevcCount: hevcIds.length,
     hevcDetected: detected,
     detecting,
+    detectProgress,
     detect,
     converting,
     convert,

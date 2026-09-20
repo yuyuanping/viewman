@@ -46,7 +46,7 @@ function App() {
   const { scanProgress, resetScanProgress } = useScanProgress(rescanStatus, setNotice);
   const { thumbProgress, generating, generateAll: handleGenerateThumbnails } = useThumbnailGeneration(videos, loadVideos, notify);
   const {
-    hevcCount, hevcDetected, detecting: detectingHevc, detect: handleDetectHevc,
+    hevcCount, hevcDetected, detecting: detectingHevc, detectProgress: hevcDetectProgress, detect: handleDetectHevc,
     converting: convertingHevc, convert: handleConvertHevc, hevcProgress, clearDetected: clearHevc,
   } = useHevcConversion(loadVideos, notify);
   const {
@@ -292,6 +292,7 @@ function App() {
           withoutThumbnailCount={withoutThumbnailCount}
           onDetectHevc={handleDetectHevc}
           detectingHevc={detectingHevc}
+          hevcDetectProgress={hevcDetectProgress}
           hevcDetected={hevcDetected}
           hevcCount={hevcCount}
           onConvertHevc={handleConvertHevc}

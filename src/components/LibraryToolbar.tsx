@@ -29,6 +29,7 @@ interface LibraryToolbarProps {
   withoutThumbnailCount: number;
   onDetectHevc: () => void;
   detectingHevc: boolean;
+  hevcDetectProgress: { processed: number; total: number } | null;
   hevcDetected: boolean;
   hevcCount: number;
   onConvertHevc: () => void;
@@ -96,6 +97,7 @@ export function LibraryToolbar({
   withoutThumbnailCount,
   onDetectHevc,
   detectingHevc,
+  hevcDetectProgress,
   hevcDetected,
   hevcCount,
   onConvertHevc,
@@ -240,7 +242,9 @@ export function LibraryToolbar({
           disabled={detectingHevc || convertingHevc}
           title="扫描 HEVC 编码的视频，可一次性永久转码为 H.264（原文件进回收站）"
         >
-          {detectingHevc ? "检测编码中…" : "检测 HEVC"}
+          {detectingHevc
+            ? `检测编码中 ${hevcDetectProgress ? `${hevcDetectProgress.processed}/${hevcDetectProgress.total}` : "…"}`
+            : "检测 HEVC"}
         </button>
       )}
       {hevcDetected && hevcCount > 0 && (
