@@ -68,8 +68,9 @@ pub async fn generate_thumbnails(
             // 上次中途关闭留下的孤儿文件：直接登记，不重新抽帧
             let existing_ok = std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
             let ok = existing_ok || {
-                // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张 jpg
-                let part = dir.join(format!("{}.jpg.part", video.id));
+                // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张 jpg。
+                // 临时名必须以 .jpg 结尾：ffmpeg 按扩展名选封装格式，`.jpg.part` 会直接失败。
+                let part = dir.join(format!("{}.part.jpg", video.id));
                 let result = scanner::extract_thumbnail(&video.path, &part, video.duration)
                     .and_then(|()| std::fs::rename(&part, &out).map_err(|e| e.to_string()));
                 let _ = std::fs::remove_file(&part);
