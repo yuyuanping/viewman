@@ -3,6 +3,10 @@ name = "viewman"
 version = "0.1.0"
 edition = "2021"
 
+# dev 构建不生成调试信息：debug 目录曾膨胀到 7 GB
+[profile.dev]
+debug = 0
+
 [lib]
 name = "viewman_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
