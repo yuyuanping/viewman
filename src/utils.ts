@@ -20,3 +20,13 @@ export function formatFileSize(bytes: number): string {
   const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
   return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(1))} ${sizes[i]}`;
 }
+
+// 系统装了 HEVC 视频扩展时 WebView2 能原生解码，无需转码兜底
+export const hevcNativeSupported: boolean = (() => {
+  try {
+    return document.createElement("video")
+      .canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') !== "";
+  } catch {
+    return false;
+  }
+})();

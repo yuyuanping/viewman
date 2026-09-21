@@ -1,4 +1,5 @@
 import type { SortField, SortDirection, WatchState } from "../libraryFilter";
+import { hevcNativeSupported } from "../utils";
 
 interface LibraryToolbarProps {
   sortField: SortField;
@@ -234,7 +235,7 @@ export function LibraryToolbar({
           </button>
         </>
       )}
-      {!hevcDetected && (
+      {!hevcNativeSupported && !hevcDetected && (
         <button
           type="button"
           className="toolbar-chip"
@@ -247,7 +248,7 @@ export function LibraryToolbar({
             : "检测 HEVC"}
         </button>
       )}
-      {hevcDetected && hevcCount > 0 && (
+      {!hevcNativeSupported && hevcDetected && hevcCount > 0 && (
         <>
           <button
             type="button"

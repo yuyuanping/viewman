@@ -2,7 +2,7 @@ import { useRef, useEffect, useCallback, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import type { Video } from "../types";
-import { formatTime } from "../utils";
+import { formatTime, hevcNativeSupported } from "../utils";
 import { PlaylistPanel } from "./PlaylistPanel";
 
 interface PlayerViewProps {
@@ -25,16 +25,6 @@ export function loadRate(): number {
   const saved = Number(localStorage.getItem(RATE_KEY));
   return (RATES as readonly number[]).includes(saved) ? saved : 1;
 }
-
-// 系统装了 HEVC 视频扩展时 WebView2 能原生解码，无需请求后端转码
-const hevcNativeSupported: boolean = (() => {
-  try {
-    return document.createElement("video")
-      .canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') !== "";
-  } catch {
-    return false;
-  }
-})();
 
 export function PlayerView({ video, initialPosition, onClose, onProgress, onFallback, playlist, playlistProgress, onSelect, onDelete, onMove }: PlayerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
