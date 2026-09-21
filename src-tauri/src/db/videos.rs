@@ -113,9 +113,10 @@ pub fn get_video_path_and_duration(conn: &Connection, video_id: &str) -> Result<
 }
 
 /// (id, path, duration) of videos with a known duration not exceeding `max` seconds
-pub fn get_videos_with_max_duration(conn: &Connection, max: f64) -> Result<Vec<(String, String, f64)>> {
+/// 时长缺失（可能是图片伪装）或不超过 max 秒的候选，供静图检测使用
+pub fn get_videos_with_max_duration(conn: &Connection, max: f64) -> Result<Vec<(String, String, Option<f64>)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, duration FROM videos WHERE duration IS NOT NULL AND duration <= ?1",
+        "SELECT id, path, duration FROM videos WHERE duration IS NULL OR duration <= ?1",
     )?;
     let rows = stmt.query_map(params![max], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
     rows.collect()

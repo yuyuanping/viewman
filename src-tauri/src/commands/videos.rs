@@ -110,7 +110,10 @@ pub fn delete_video(
             .ok_or_else(|| format!("Video not found: {}", video_id))?
     };
 
-    trash::delete(&path).map_err(|e| format!("删除文件失败: {}", e))?;
+    // 文件已被外部删除时 trash::delete 会失败，但库记录必须能删掉，否则残留显示
+    if Path::new(&path).exists() {
+        trash::delete(&path).map_err(|e| format!("删除文件失败: {}", e))?;
+    }
 
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -188,7 +191,8 @@ pub fn convert_fake_images(
 const SHORT_IMAGE_MAX_SECONDS: f64 = 5.0;
 const SHORT_IMAGE_MAX_UNIQUE_FRAMES: usize = 3;
 
-/// 扫描出"近似静图"的超短视频 id：时长 ≤5 秒，且 <1 秒或 mpdecimate 去重后画面 ≤3 帧
+/// 扫描可转图片的条目：时长 ≤5 秒且 <1 秒或 mpdecimate 去重后 ≤3 帧的静图视频，
+/// 以及时长取不到但魔数是图片的伪装文件
 #[tauri::command]
 pub async fn find_static_videos(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     use crate::scanner;
@@ -197,7 +201,7 @@ pub async fn find_static_videos(state: State<'_, AppState>) -> Result<Vec<String
         return Err("未检测到 ffmpeg，无法检测短视频。请安装 ffmpeg 并加入 PATH。".into());
     }
 
-    let jobs: Vec<(String, String, f64)> = {
+    let jobs: Vec<(String, String, Option<f64>)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_videos_with_max_duration(&conn, SHORT_IMAGE_MAX_SECONDS).map_err(|e| e.to_string())?
     };
@@ -205,15 +209,24 @@ pub async fn find_static_videos(state: State<'_, AppState>) -> Result<Vec<String
     let ids = tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::new();
         for (id, path, duration) in jobs {
-            if !Path::new(&path).exists() {
+            let p = Path::new(&path);
+            if !p.exists() {
                 continue;
             }
-            if duration < 1.0 {
-                out.push(id);
-                continue;
-            }
-            if matches!(scanner::unique_frame_count(&path), Some(n) if n <= SHORT_IMAGE_MAX_UNIQUE_FRAMES) {
-                out.push(id);
+            match duration {
+                None => {
+                    // 无时长：可能是图片伪装成视频，魔数命中即可转图片
+                    let is_image = read_header(p).and_then(|h| sniff_image_format(&h)).is_some();
+                    if is_image {
+                        out.push(id);
+                    }
+                }
+                Some(d) if d < 1.0 => out.push(id),
+                Some(_) => {
+                    if matches!(scanner::unique_frame_count(&path), Some(n) if n <= SHORT_IMAGE_MAX_UNIQUE_FRAMES) {
+                        out.push(id);
+                    }
+                }
             }
         }
         out
@@ -258,6 +271,21 @@ pub async fn convert_short_videos(
             let p = Path::new(&path);
             if !p.exists() {
                 errors.push(format!("文件不存在，已跳过: {}", path));
+                continue;
+            }
+            // 图片伪装成视频：魔数命中则直接按真实格式另存，无需 ffmpeg
+            if let Some((ext, _)) = read_header(p).and_then(|h| sniff_image_format(&h)) {
+                let target = unique_path(&p.with_extension(ext));
+                if let Err(e) = std::fs::copy(p, &target) {
+                    errors.push(format!("复制 {} 失败: {}", p.display(), e));
+                    continue;
+                }
+                if let Err(e) = trash::delete(p) {
+                    let _ = std::fs::remove_file(&target);
+                    errors.push(format!("源文件移入回收站失败，已保留 {}: {}", p.display(), e));
+                    continue;
+                }
+                converted.push(id);
                 continue;
             }
             let need_still_check = !matches!(duration, Some(d) if d < 1.0);

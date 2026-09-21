@@ -77,8 +77,8 @@ export function useFileCheck(
       const ids = await api.findStaticVideos();
       setStaticIds(ids);
       onNotice(ids.length > 0
-        ? `检测完成：${ids.length} 个近似静图的超短视频可抽帧转图片。`
-        : "检测完成：没有发现近似静图的超短视频。");
+        ? `检测完成：${ids.length} 个静图视频/图片伪装可转图片。`
+        : "检测完成：没有发现静图视频或图片伪装文件。");
     } catch (err) {
       onNotice("检测失败: " + err);
     } finally {
@@ -96,7 +96,7 @@ export function useFileCheck(
   const convertShorts = useCallback(async () => {
     if (shortIds.size === 0 || convertingShorts) return;
     if (!confirm(
-      `将对 ${shortIds.size} 个近似静图的超短视频各抽取一帧，在原目录生成同名 .jpg；原视频移入回收站并从库中移除。确定？`,
+      `将对 ${shortIds.size} 个静图视频/图片伪装文件转换为图片（静图视频抽首帧，伪装图片按真实格式另存），在原目录生成同名 .jpg；原文件移入回收站并从库中移除。确定？`,
     )) return;
     setConvertingShorts(true);
     try {

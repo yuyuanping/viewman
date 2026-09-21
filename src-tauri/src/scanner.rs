@@ -72,6 +72,14 @@ pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
 }
 
 pub fn is_video_file(path: &Path) -> bool {
+    // 转码中断可能留下 `.viewman-h264-*.tmp.mp4`，不能当视频入库
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(".viewman-"))
+    {
+        return false;
+    }
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
@@ -92,6 +100,15 @@ pub fn scan_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, S
         let path = entry.path();
 
         if path.is_dir() {
+            // 回收站/系统目录里的 $R*.mp4 是已删除文件的副本，不能重新入库
+            let dir_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if dir_name == "$recycle.bin" || dir_name == "system volume information" {
+                continue;
+            }
             let mut sub = scan_directory_recursive(&path)?;
             files.append(&mut sub);
         } else if is_video_file(&path) {
@@ -331,6 +348,7 @@ mod tests {
         assert!(is_video_file(&PathBuf::from("test.MKV")));
         assert!(!is_video_file(&PathBuf::from("test.txt")));
         assert!(!is_video_file(&PathBuf::from("test")));
+        assert!(!is_video_file(&PathBuf::from(".viewman-h264-abc.tmp.mp4")));
     }
 
     #[test]

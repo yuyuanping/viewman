@@ -187,7 +187,7 @@ export function LibraryToolbar({
           className="toolbar-chip"
           onClick={onDetectShorts}
           disabled={detectingShorts || convertingShorts}
-          title="扫描时长 ≤5 秒且画面近似静图/幻灯片的视频，找出可转图片的候选"
+          title="扫描时长 ≤5 秒且画面近似静图的短视频，以及内容实为图片的伪装文件，找出可转图片的候选"
         >
           {detectingShorts ? "检测短视频中…" : "检测静图短视频"}
         </button>
