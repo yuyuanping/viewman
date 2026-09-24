@@ -22,6 +22,7 @@ import type { MediaKind, Video } from "./types";
 import type { SortField, SortDirection, WatchState } from "./libraryFilter";
 import { filterMedia, filterByWatchState, filterByMedia, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
+import { PlayHistoryPanel } from "./components/PlayHistoryPanel";
 import { ToastLayer } from "./components/Toast";
 
 const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
@@ -65,6 +66,8 @@ function App() {
   const [deletingSelected, setDeletingSelected] = useState(false);
   // 播放器打开那一刻的列表快照：播放期间固定不变，不随库/排序/进度刷新而变
   const [playlist, setPlaylist] = useState<Video[] | null>(null);
+  // 完整播放历史覆盖层
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const { toasts, notify, dismiss } = useToasts();
   const { scanProgress, resetScanProgress } = useScanProgress(rescanStatus, setNotice);
@@ -478,6 +481,7 @@ function App() {
               movingSelected={movingSelected}
               onExitSelect={exitSelectMode}
               onRandomPick={handleRandomPick}
+              onOpenHistory={() => setHistoryOpen(true)}
             />
             <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} />
           </>
@@ -496,6 +500,15 @@ function App() {
           onSelect={handlePlaylistSelect}
           onDelete={handlePlaylistDelete}
           onMove={handlePlaylistMove}
+        />
+      )}
+      {historyOpen && (
+        <PlayHistoryPanel
+          onClose={() => setHistoryOpen(false)}
+          onPlay={(videoId, position) => {
+            setHistoryOpen(false);
+            handlePlayById(videoId, position);
+          }}
         />
       )}
       <ToastLayer toasts={toasts} onClose={dismiss} />

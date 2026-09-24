@@ -211,6 +211,74 @@ pub fn ffmpeg_available() -> bool {
     hidden_command("ffmpeg").arg("-version").output().is_ok()
 }
 
+/// 感知哈希（pHash）：ffmpeg 缩到 32×32 灰度 → 8×8 DCT-II 低频块 → 均值阈值化成 64 位。
+/// 与字节级指纹互补：找"相似但不同"的连拍/截图系列；汉明距离 ≤ 阈值视为相似。
+pub fn image_phash(path: &str) -> Option<u64> {
+    const N: usize = 32;
+    let output = hidden_command("ffmpeg")
+        .args([
+            "-i", path,
+            "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", N, N),
+            "-f", "rawvideo",
+            "-pix_fmt", "gray",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() < N * N {
+        return None;
+    }
+    let mut pixels = [0f64; N * N];
+    for (i, b) in output.stdout.iter().take(N * N).enumerate() {
+        pixels[i] = *b as f64;
+    }
+
+    // 8×8 DCT-II：只取低频左上块
+    const B: usize = 8;
+    let mut dct = [[0f64; B]; B];
+    for u in 0..B {
+        let cu = if u == 0 { (1.0 / 2.0f64).sqrt() } else { 1.0 };
+        for v in 0..B {
+            let mut sum = 0.0;
+            for x in 0..N {
+                for y in 0..N {
+                    let px = pixels[x * N + y];
+                    let arg_x = std::f64::consts::PI * (2 * x + 1) as f64 * u as f64 / (2 * N) as f64;
+                    let arg_y = std::f64::consts::PI * (2 * y + 1) as f64 * v as f64 / (2 * N) as f64;
+                    sum += px * arg_x.cos() * arg_y.cos();
+                }
+            }
+            dct[v][u] = 0.5 * cu * sum;
+        }
+    }
+
+    // 均值阈值化（跳过 DC 分量 dct[0][0]，它只反映整体亮度）
+    let mut total = 0.0;
+    for v in 0..B {
+        for u in 0..B {
+            if !(u == 0 && v == 0) {
+                total += dct[v][u];
+            }
+        }
+    }
+    let mean = total / ((B * B - 1) as f64);
+    let mut hash: u64 = 0;
+    for v in 0..B {
+        for u in 0..B {
+            if u == 0 && v == 0 {
+                continue;
+            }
+            hash = (hash << 1) | if dct[v][u] > mean { 1 } else { 0 };
+        }
+    }
+    Some(hash)
+}
+
+/// 64 位哈希的汉明距离
+pub fn hamming_distance(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
 /// 读取视频流编码名（h264/hevc/...），读不出时返回 None
 pub fn video_codec_name(video_path: &str) -> Option<String> {
     let output = hidden_command("ffprobe")

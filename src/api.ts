@@ -15,6 +15,8 @@ export const api = {
   getVideos: () => invoke<Video[]>("get_videos"),
   getVideosWithProgress: () => invoke<VideoWithProgress[]>("get_videos_with_progress"),
   getRecentlyPlayed: () => invoke<RecentlyPlayed[]>("get_recently_played"),
+  /** 完整播放历史（无条数上限） */
+  getPlayHistory: () => invoke<RecentlyPlayed[]>("get_play_history"),
   scanDirectory: (dir: string) => invoke<Video[]>("scan_directory", { dir }),
   saveProgress: (videoId: string, position: number) =>
     invoke<void>("save_progress", { videoId, position }),
@@ -55,6 +57,8 @@ export const api = {
   generateImageThumbnails: (imageIds: string[]) =>
     invoke<number>("generate_image_thumbnails", { imageIds }),
   findDuplicateImages: () => invoke<string[][]>("find_duplicate_images"),
+  /** 相似图检测（pHash）：找视觉近似但不完全相同的连拍/截图系列 */
+  findSimilarImages: () => invoke<string[][]>("find_similar_images"),
 };
 
 /** 后端 scan-progress / image-scan-progress 事件负载（两套库共用同一形状） */

@@ -43,6 +43,34 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
   } = useDuplicates(reloadImages, notify, { detect: api.findDuplicateImages, remove: api.deleteImage, unit: "图片" });
 
+  // 相似图检测（pHash）：只检测+高亮，不提供一键删（保留哪张是人的判断）
+  const [similarGroups, setSimilarGroups] = useState<string[][]>([]);
+  const [similarDetected, setSimilarDetected] = useState(false);
+  const [detectingSimilar, setDetectingSimilar] = useState(false);
+  const handleDetectSimilar = useCallback(async () => {
+    setDetectingSimilar(true);
+    try {
+      const found = await api.findSimilarImages();
+      setSimilarGroups(found);
+      setSimilarDetected(true);
+      if (found.length === 0) {
+        notify("没有发现相似的图片系列。");
+        setSimilarDetected(false);
+      } else {
+        notify(`发现 ${found.length} 组相似图片，高亮显示中。`);
+      }
+    } catch (e) {
+      notify(`相似检测失败：${String(e)}`, "error");
+    } finally {
+      setDetectingSimilar(false);
+    }
+  }, [notify]);
+  const clearSimilar = useCallback(() => {
+    setSimilarGroups([]);
+    setSimilarDetected(false);
+  }, []);
+  const similarIds = useMemo(() => new Set(similarGroups.flat()), [similarGroups]);
+
   const filteredImages = useMemo(
     () => sortMedia(filterMedia(images, selectedDir, searchQuery), sortField, sortDirection),
     [images, selectedDir, searchQuery, sortField, sortDirection],
@@ -192,6 +220,11 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
         onDeleteDuplicates={handleDeleteDuplicates}
         deletingDuplicates={deletingDuplicates}
         onClearDuplicates={clearDuplicates}
+        onDetectSimilar={handleDetectSimilar}
+        detectingSimilar={detectingSimilar}
+        similarDetected={similarDetected}
+        similarGroupCount={similarGroups.length}
+        onClearSimilar={clearSimilar}
         selectMode={selectMode}
         selectedCount={selectedIds.size}
         allSelected={allSelected}
@@ -207,6 +240,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
       <ImageGrid
         images={filteredImages}
         duplicateIds={duplicateIds}
+        similarIds={similarIds}
         selectMode={selectMode}
         selectedIds={selectedIds}
         onToggleSelect={toggleSelect}

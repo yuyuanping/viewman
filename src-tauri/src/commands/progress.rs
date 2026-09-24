@@ -31,3 +31,10 @@ pub fn get_recently_played(state: State<AppState>) -> Result<Vec<RecentlyPlayed>
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::get_recently_played(&conn, 30).map_err(|e| e.to_string())
 }
+
+/// 完整播放历史：watch_progress 全表按时间倒序（侧栏"播放记录"只有最近 30 条）
+#[tauri::command]
+pub fn get_play_history(state: State<AppState>) -> Result<Vec<RecentlyPlayed>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_recently_played(&conn, i64::MAX).map_err(|e| e.to_string())
+}

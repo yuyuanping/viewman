@@ -4,6 +4,8 @@ import { ImageCard } from "./ImageCard";
 interface ImageGridProps {
   images: Image[];
   duplicateIds?: Set<string>;
+  /** 相似图检测命中的条目（pHash）：琥珀色高亮 */
+  similarIds?: Set<string>;
   selectMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (image: Image) => void;
@@ -13,7 +15,7 @@ interface ImageGridProps {
   onMoved: () => void;
 }
 
-export function ImageGrid({ images, duplicateIds, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved }: ImageGridProps) {
+export function ImageGrid({ images, duplicateIds, similarIds, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved }: ImageGridProps) {
   if (images.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -43,6 +45,7 @@ export function ImageGrid({ images, duplicateIds, selectMode, selectedIds, onTog
             key={image.id}
             image={image}
             duplicate={duplicateIds?.has(image.id) ?? false}
+            similar={similarIds?.has(image.id) ?? false}
             selectMode={selectMode}
             selected={selectedIds?.has(image.id) ?? false}
             onToggleSelect={onToggleSelect}

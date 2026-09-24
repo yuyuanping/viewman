@@ -20,6 +20,12 @@ interface ImageToolbarProps {
   onDeleteDuplicates: () => void;
   deletingDuplicates: boolean;
   onClearDuplicates: () => void;
+  /** 相似图检测（pHash）：只高亮不删除 */
+  onDetectSimilar: () => void;
+  detectingSimilar: boolean;
+  similarDetected: boolean;
+  similarGroupCount: number;
+  onClearSimilar: () => void;
   selectMode: boolean;
   selectedCount: number;
   allSelected: boolean;
@@ -58,6 +64,11 @@ export function ImageToolbar({
   onDeleteDuplicates,
   deletingDuplicates,
   onClearDuplicates,
+  onDetectSimilar,
+  detectingSimilar,
+  similarDetected,
+  similarGroupCount,
+  onClearSimilar,
   selectMode,
   selectedCount,
   allSelected,
@@ -113,6 +124,25 @@ export function ImageToolbar({
         >
           {detectingDuplicates ? "比对中…" : "检测重复图片"}
         </button>
+      )}
+      {!similarDetected && (
+        <button
+          type="button"
+          className="toolbar-chip"
+          onClick={onDetectSimilar}
+          disabled={detectingSimilar}
+          title="感知哈希比对，找出相似但不相同的连拍/截图系列（只高亮不删除）"
+        >
+          {detectingSimilar ? "比对中…" : "检测相似图片"}
+        </button>
+      )}
+      {similarDetected && similarGroupCount > 0 && (
+        <>
+          <span className="toolbar-label">{similarGroupCount} 组相似</span>
+          <button type="button" className="toolbar-chip" onClick={onClearSimilar} title="清除相似检测结果">
+            ✕
+          </button>
+        </>
       )}
       {duplicatesDetected && duplicateGroupCount > 0 && (
         <>

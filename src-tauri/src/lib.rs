@@ -43,6 +43,7 @@ pub fn run() {
             commands::get_progress,
             commands::get_videos_with_progress,
             commands::get_recently_played,
+            commands::get_play_history,
             commands::check_ffprobe,
             commands::load_scan_roots,
             commands::save_scan_roots,
@@ -59,6 +60,7 @@ pub fn run() {
             commands::move_image,
             commands::generate_image_thumbnails,
             commands::find_duplicate_images,
+            commands::find_similar_images,
             commands::remove_media_directory,
             commands::capture_frame,
         ])

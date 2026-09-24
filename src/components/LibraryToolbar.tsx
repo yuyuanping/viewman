@@ -64,6 +64,8 @@ interface LibraryToolbarProps {
   onExitSelect: () => void;
   /** 从当前过滤结果里随机打开一个 */
   onRandomPick: () => void;
+  /** 打开完整播放历史覆盖层 */
+  onOpenHistory: () => void;
 }
 
 const SORT_OPTIONS: { value: SortField; label: string }[] = [
@@ -141,6 +143,7 @@ export function LibraryToolbar({
   movingSelected,
   onExitSelect,
   onRandomPick,
+  onOpenHistory,
 }: LibraryToolbarProps) {
   return (
     <div className="library-toolbar shrink-0">
@@ -171,6 +174,14 @@ export function LibraryToolbar({
         title="从当前列表随机播放一个"
       >
         随机播放
+      </button>
+      <button
+        type="button"
+        className="toolbar-chip"
+        onClick={onOpenHistory}
+        title="查看完整播放历史"
+      >
+        历史
       </button>
 
       <span className="toolbar-label" style={{ marginLeft: 8 }}>观看状态</span>

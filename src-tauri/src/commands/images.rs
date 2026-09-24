@@ -373,6 +373,80 @@ pub async fn find_duplicate_images(state: State<'_, AppState>) -> Result<Vec<Vec
     Ok(groups)
 }
 
+/// 找出"相似但不相同"的图片组（连拍/截图系列）：pHash 感知哈希 + 汉明距离 ≤10 聚类。
+/// 与 find_duplicate_images 互补：字节级去重只认完全相同，这里抓视觉近似。
+/// 个人库数量级下直接两两比对；组内按添加时间升序（第一个视为最佳保留候选）
+#[tauri::command]
+pub async fn find_similar_images(state: State<'_, AppState>) -> Result<Vec<Vec<String>>, String> {
+    /// 汉明距离阈值：≤10 / 64 位视为相似（业界常用 8–12）
+    const SIMILAR_THRESHOLD: u32 = 10;
+
+    if !crate::scanner::ffmpeg_available() {
+        return Err("未检测到 ffmpeg，无法计算图片指纹。请安装 ffmpeg 并加入 PATH。".into());
+    }
+
+    let jobs: Vec<(String, String, String)> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_all_images(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|i| (i.id, i.path, i.created_at))
+            .filter(|(_, p, _)| Path::new(p).exists())
+            .collect()
+    };
+
+    let groups = tauri::async_runtime::spawn_blocking(move || {
+        let mut hashed: Vec<(String, String, u64)> = Vec::new();
+        for (id, path, _) in &jobs {
+            if let Some(h) = crate::scanner::image_phash(path) {
+                hashed.push((id.clone(), path.clone(), h));
+            }
+        }
+        // 并查集聚类：距离 ≤ 阈值即并成一组
+        let mut parent: Vec<usize> = (0..hashed.len()).collect();
+        fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+            if parent[i] != i {
+                let root = find(parent, i);
+                parent[i] = root;
+            }
+            parent[i]
+        }
+        for i in 0..hashed.len() {
+            for j in (i + 1)..hashed.len() {
+                if crate::scanner::hamming_distance(hashed[i].2, hashed[j].2) <= SIMILAR_THRESHOLD {
+                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                    if ri != rj {
+                        parent[ri] = rj;
+                    }
+                }
+            }
+        }
+        // 收组；加入时间映射回原表排序
+        let created: HashMap<String, String> = jobs.iter().map(|(id, _, created)| (id.clone(), created.clone())).collect();
+        let mut by_root: HashMap<usize, Vec<String>> = HashMap::new();
+        for (i, item) in hashed.iter().enumerate() {
+            by_root.entry(find(&mut parent, i)).or_default().push(item.0.clone());
+        }
+        let mut out: Vec<Vec<String>> = by_root
+            .into_values()
+            .filter(|g| g.len() > 1)
+            .map(|mut g| {
+                g.sort_by(|a, b| {
+                    created.get(a).unwrap_or(&String::new()).cmp(created.get(b).unwrap_or(&String::new()))
+                        .then_with(|| a.cmp(b))
+                });
+                g
+            })
+            .collect();
+        out.sort_by_key(|g| std::cmp::Reverse(g.len()));
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(groups)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

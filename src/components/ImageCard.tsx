@@ -11,13 +11,15 @@ interface ImageCardProps {
   selectMode?: boolean;
   selected?: boolean;
   duplicate?: boolean;
+  /** 相似图检测命中（pHash）：琥珀色边框提示，区别于红色重复 */
+  similar?: boolean;
   onToggleSelect?: (image: Image) => void;
   onOpen: (image: Image) => void;
   onDeleted: () => void;
   onMoved: () => void;
 }
 
-export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
+export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -80,8 +82,8 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
 
   return (
     <article
-      className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}`}
-      title={duplicate ? "与库内其他图片内容相同（多余副本，可通过工具栏删除）" : undefined}
+      className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${similar ? " image-similar" : ""}`}
+      title={duplicate ? "与库内其他图片内容相同（多余副本，可通过工具栏删除）" : similar ? "与库内其他图片视觉相似（连拍/截图系列）" : undefined}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenu({ x: e.clientX, y: e.clientY });
