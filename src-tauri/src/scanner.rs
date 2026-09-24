@@ -45,8 +45,25 @@ pub struct VideoMeta {
     pub height: Option<i32>,
 }
 
+/// image2 解封装器会把文件名里的 `%` 当序号模板（QQ/微信存下来的图常见
+/// `$xx%yy.jpg` 这类名字），不关掉序列匹配就报 "No such file or directory"，
+/// 尺寸、封面、pHash 全都读不到。
+///
+/// 条件收得很紧，两个都不能省：
+/// - 名字里没有 `%` 时不能加——那时 ffmpeg 走的不是 image2 序列路径，
+///   这个私有选项会导致 "Option not found"，连输入都打不开（实测）；
+/// - 视频不能加——mov/matroska 不认识该选项，同样 "Option not found"。
+fn image_input_opts(path: &str) -> &'static [&'static str] {
+    if path.contains('%') && is_image_file(Path::new(path)) {
+        &["-pattern_type", "none"]
+    } else {
+        &[]
+    }
+}
+
 pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
     let output = hidden_command("ffprobe")
+        .args(image_input_opts(path))
         .args([
             "-v", "quiet",
             "-print_format", "json",
@@ -216,6 +233,7 @@ pub fn ffmpeg_available() -> bool {
 pub fn image_phash(path: &str) -> Option<u64> {
     const N: usize = 32;
     let output = hidden_command("ffmpeg")
+        .args(image_input_opts(path))
         .args([
             "-i", path,
             "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", N, N),
@@ -422,6 +440,7 @@ pub fn extract_thumbnail(
 
     let attempt = |seconds: f64| -> Result<(), String> {
         let output = hidden_command("ffmpeg")
+            .args(image_input_opts(video_path))
             .args([
                 "-y",
                 "-ss",
@@ -580,6 +599,44 @@ mod tests {
         let probe = get_metadata(&png.to_string_lossy()).unwrap();
         assert_eq!(probe.width, Some(1200));
         assert_eq!(probe.height, Some(800));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 回归：文件名里的 `%` 会被 image2 当成序号模板，图片的尺寸/封面/哈希全部读不到
+    /// （库里 8820 张 QQ 转存图就是这么丢尺寸的），同时确认视频不受该选项影响
+    #[test]
+    fn test_percent_in_filename_reads_image_and_video() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：本机未安装 ffmpeg");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("viewman_pct_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let png = dir.join("$$%BL9DM1T{PSA~77JD@YN7.png");
+        assert!(Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=640x480:rate=1:duration=1", "-frames:v", "1", &png.to_string_lossy()])
+            .output().unwrap().status.success(), "生成测试图片失败");
+
+        let meta = get_metadata(&png.to_string_lossy()).unwrap();
+        assert_eq!((meta.width, meta.height), (Some(640), Some(480)), "带 % 的图片应读到尺寸");
+        let thumb = dir.join("pct-thumb.jpg");
+        extract_thumbnail(&png.to_string_lossy(), &thumb, None).unwrap();
+        assert!(fs::metadata(&thumb).unwrap().len() > 0, "带 % 的图片应能出封面");
+        assert!(image_phash(&png.to_string_lossy()).is_some(), "带 % 的图片应能算 pHash");
+
+        // 视频名里带 % 也照常工作（pattern_type 是 image2 专有选项，不能无条件塞给 ffmpeg）
+        let video = dir.join("sample 100%.mp4");
+        assert!(Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2", "-pix_fmt", "yuv420p", &video.to_string_lossy()])
+            .output().unwrap().status.success(), "生成测试视频失败");
+        let vmeta = get_metadata(&video.to_string_lossy()).unwrap();
+        assert_eq!((vmeta.width, vmeta.height), (Some(320), Some(240)));
+        assert!(vmeta.duration.unwrap_or(0.0) > 1.0, "应读到视频时长");
+        let vthumb = dir.join("pct-video-thumb.jpg");
+        extract_thumbnail(&video.to_string_lossy(), &vthumb, Some(2.0)).unwrap();
+        assert!(fs::metadata(&vthumb).unwrap().len() > 0);
 
         fs::remove_dir_all(&dir).unwrap();
     }
