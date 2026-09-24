@@ -9,7 +9,7 @@ interface ImageGridProps {
   similarIds?: Set<string>;
   selectMode?: boolean;
   selectedIds?: Set<string>;
-  onToggleSelect?: (image: Image) => void;
+  onToggleSelect?: (index: number, shiftKey: boolean) => void;
   onOpen: (image: Image) => void;
   onScanDirectory: () => void;
   onDeleted: (imageId: string) => void;
@@ -49,7 +49,7 @@ export function ImageGrid({ images, duplicateIds, similarIds, selectMode, select
     <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
       <div className="image-tiles" ref={gridRef}>
         {padTop > 0 && <div data-pad="top" style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
-        {images.slice(start, end).map(image => (
+        {images.slice(start, end).map((image, at) => (
           <ImageCard
             key={image.id}
             image={image}
@@ -57,7 +57,7 @@ export function ImageGrid({ images, duplicateIds, similarIds, selectMode, select
             similar={similarIds?.has(image.id) ?? false}
             selectMode={selectMode}
             selected={selectedIds?.has(image.id) ?? false}
-            onToggleSelect={onToggleSelect}
+            onToggleSelect={shiftKey => onToggleSelect?.(start + at, shiftKey)}
             onOpen={onOpen}
             onDeleted={onDeleted}
             onMoved={onMoved}

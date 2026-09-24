@@ -188,7 +188,7 @@ export function ImageToolbar({
           type="button"
           className="toolbar-chip"
           onClick={onEnterSelect}
-          title="进入多选模式，点选多张图片后批量删除"
+          title="进入多选模式：点选单张，Shift 点选连一段，Del 删除所选"
         >
           多选
         </button>

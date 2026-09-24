@@ -11,7 +11,7 @@ interface VideoGridProps {
   duplicateIds?: Set<string>;
   selectMode?: boolean;
   selectedIds?: Set<string>;
-  onToggleSelect?: (video: Video) => void;
+  onToggleSelect?: (index: number, shiftKey: boolean) => void;
   onPlay: (video: Video) => void;
   onDeleted: (videoId: string) => void;
   onMoved: (videoId: string, newPath: string) => void;
@@ -41,7 +41,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
     <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
       <div className="video-tiles" ref={gridRef}>
         {padTop > 0 && <div data-pad="top" style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
-        {videos.slice(start, end).map(video => (
+        {videos.slice(start, end).map((video, at) => (
           <VideoCard
             key={video.id}
             video={video}
@@ -52,7 +52,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
             duplicate={duplicateIds?.has(video.id) ?? false}
             selectMode={selectMode}
             selected={selectedIds?.has(video.id) ?? false}
-            onToggleSelect={onToggleSelect}
+            onToggleSelect={shiftKey => onToggleSelect?.(start + at, shiftKey)}
             onPlay={onPlay}
             onDeleted={onDeleted}
             onMoved={onMoved}

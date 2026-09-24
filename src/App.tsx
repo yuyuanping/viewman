@@ -17,6 +17,7 @@ import { useHevcConversion } from "./hooks/useHevcConversion";
 import { useDuplicates } from "./hooks/useDuplicates";
 import { useFileCheck } from "./hooks/useFileCheck";
 import { useDeleteShortcut } from "./hooks/useDeleteShortcut";
+import { useRangeSelect } from "./hooks/useRangeSelect";
 import { api } from "./api";
 import { loadScanRoots } from "./scanRootStore";
 import { countUnderDir, isUnderDir } from "./scanRoots";
@@ -229,13 +230,7 @@ function App() {
     setSelectedIds(new Set());
   }, [selectedDir, searchQuery, watchState, minSizeGb, minDurationMin, minHeight]);
 
-  const toggleSelect = useCallback((video: Video) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(video.id)) next.delete(video.id); else next.add(video.id);
-      return next;
-    });
-  }, []);
+  const { selectAt: selectVideoAt } = useRangeSelect(filteredVideos, setSelectedIds);
 
   const allSelected = filteredVideos.length > 0 && filteredVideos.every(v => selectedIds.has(v.id));
   const toggleSelectAll = useCallback(() => {
@@ -512,7 +507,7 @@ function App() {
               onRandomPick={handleRandomPick}
               onOpenHistory={() => setHistoryOpen(true)}
             />
-            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={(videoId) => dropVideosLocally([videoId])} onMoved={(videoId, newPath) => retargetVideosLocally([[videoId, newPath]])} resetKey={selectedDir} />
+            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={selectVideoAt} onPlay={handlePlayVideo} onDeleted={(videoId) => dropVideosLocally([videoId])} onMoved={(videoId, newPath) => retargetVideosLocally([[videoId, newPath]])} resetKey={selectedDir} />
           </>
         )}
       </main>

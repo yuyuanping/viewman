@@ -15,7 +15,7 @@ interface VideoCardProps {
   duplicate?: boolean;
   selectMode?: boolean;
   selected?: boolean;
-  onToggleSelect?: (video: Video) => void;
+  onToggleSelect?: (shiftKey: boolean) => void;
   onPlay: (video: Video) => void;
   onDeleted: (videoId: string) => void;
   onMoved: (videoId: string, newPath: string) => void;
@@ -93,7 +93,7 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
       }}
     >
       <button
-        onClick={selectMode ? () => onToggleSelect?.(video) : (fake ? undefined : () => onPlay(video))}
+        onClick={selectMode ? (e) => onToggleSelect?.(e.shiftKey) : (fake ? undefined : () => onPlay(video))}
         disabled={deleting || (!selectMode && fake)}
         className="block w-full text-left"
         aria-label={selectMode ? (selected ? `取消选择 ${video.filename}` : `选择 ${video.filename}`) : fake ? `${video.filename}（图片，无法播放）` : `播放 ${video.filename}`}

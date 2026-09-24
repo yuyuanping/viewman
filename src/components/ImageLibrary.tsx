@@ -12,6 +12,7 @@ import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicates } from "../hooks/useDuplicates";
 import { useDeleteShortcut } from "../hooks/useDeleteShortcut";
+import { useRangeSelect } from "../hooks/useRangeSelect";
 import { filterMedia, selectedDirectoryLabel, sortMedia } from "../libraryFilter";
 import { extrasOfGroups, liveGroups, selectGroupExtras } from "../similarGroups";
 import type { SortDirection } from "../libraryFilter";
@@ -153,13 +154,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     setSortDirection(prev => (prev === "asc" ? "desc" : "asc"));
   }, []);
 
-  const toggleSelect = useCallback((image: Image) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(image.id)) next.delete(image.id); else next.add(image.id);
-      return next;
-    });
-  }, []);
+  const { toggleSelect, selectAt } = useRangeSelect(filteredImages, setSelectedIds);
 
   const allSelected = filteredImages.length > 0 && filteredImages.every(i => selectedIds.has(i.id));
   const toggleSelectAll = useCallback(() => {
@@ -321,7 +316,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         similarIds={similarIds}
         selectMode={selectMode}
         selectedIds={selectedIds}
-        onToggleSelect={toggleSelect}
+        onToggleSelect={selectAt}
         onOpen={openViewer}
         onScanDirectory={onScanDirectory}
         onDeleted={(imageId) => dropLocally([imageId])}

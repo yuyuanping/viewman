@@ -13,7 +13,7 @@ interface ImageCardProps {
   duplicate?: boolean;
   /** 相似图检测命中（pHash）：琥珀色边框提示，区别于红色重复 */
   similar?: boolean;
-  onToggleSelect?: (image: Image) => void;
+  onToggleSelect?: (shiftKey: boolean) => void;
   onOpen: (image: Image) => void;
   /** 删除成功后回报 id，父层据此就地剔除，不再重拉整库 */
   onDeleted: (imageId: string) => void;
@@ -91,7 +91,7 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
       }}
     >
       <button
-        onClick={selectMode ? () => onToggleSelect?.(image) : () => onOpen(image)}
+        onClick={selectMode ? (e) => onToggleSelect?.(e.shiftKey) : () => onOpen(image)}
         disabled={deleting}
         className="block w-full text-left"
         aria-label={selectMode ? (selected ? `取消选择 ${image.filename}` : `选择 ${image.filename}`) : `查看 ${image.filename}`}
