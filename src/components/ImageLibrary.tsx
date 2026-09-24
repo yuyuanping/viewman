@@ -5,12 +5,14 @@ import { ImageGrid } from "./ImageGrid";
 import { ImageToolbar } from "./ImageToolbar";
 import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
+import { SimilarGroupsPanel } from "./SimilarGroupsPanel";
 import { api } from "../api";
 import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicates } from "../hooks/useDuplicates";
 import { filterMedia, selectedDirectoryLabel, sortMedia } from "../libraryFilter";
+import { extrasOfGroups, liveGroups, selectGroupExtras } from "../similarGroups";
 import type { SortDirection } from "../libraryFilter";
 
 interface ImageLibraryProps {
@@ -56,33 +58,79 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
   } = useDuplicates(notify, { detect: api.findDuplicateImages, remove: trashImages, unit: "图片" });
 
-  // 相似图检测（pHash）：只检测+高亮，不提供一键删（保留哪张是人的判断）
+  // 相似图检测（pHash）：结果单独成面板按组审阅，检测完自动进多选并勾上各组副本
   const [similarGroups, setSimilarGroups] = useState<string[][]>([]);
+  const [similarKeeps, setSimilarKeeps] = useState<Record<number, string>>({});
   const [similarDetected, setSimilarDetected] = useState(false);
+  const [similarPanelOpen, setSimilarPanelOpen] = useState(false);
   const [detectingSimilar, setDetectingSimilar] = useState(false);
+
+  /** 只索引相似组里那几百张，避免为 19 万条清单建一张全库 Map */
+  const similarIndex = useMemo(() => {
+    const wanted = new Set(similarGroups.flat());
+    if (wanted.size === 0) return new Map<string, Image>();
+    const byId = new Map<string, Image>();
+    for (const image of images) if (wanted.has(image.id)) byId.set(image.id, image);
+    return byId;
+  }, [images, similarGroups]);
+
+  const aliveSimilarGroups = useMemo(
+    () => liveGroups(similarGroups, new Set(similarIndex.keys()), similarKeeps),
+    [similarGroups, similarIndex, similarKeeps],
+  );
+  const similarExtras = useMemo(() => extrasOfGroups(aliveSimilarGroups), [aliveSimilarGroups]);
+
+  /** 每组保留首张（最早入库那张），其余勾上 */
+  const autoSelectSimilar = useCallback(() => {
+    setSelectMode(true);
+    setSelectedIds(new Set(similarExtras));
+  }, [similarExtras]);
+
   const handleDetectSimilar = useCallback(async () => {
     setDetectingSimilar(true);
     try {
       const found = await api.findSimilarImages();
-      setSimilarGroups(found);
-      setSimilarDetected(true);
       if (found.length === 0) {
-        notify("没有发现相似的图片系列。");
         setSimilarDetected(false);
-      } else {
-        notify(`发现 ${found.length} 组相似图片，高亮显示中。`);
+        notify("没有发现相似的图片系列。");
+        return;
       }
+      const alive = new Set<string>();
+      for (const image of images) alive.add(image.id);
+      const extras = extrasOfGroups(liveGroups(found, alive, {}));
+      setSimilarGroups(found);
+      setSimilarKeeps({});
+      setSimilarDetected(true);
+      setSelectMode(true);
+      setSelectedIds(new Set(extras));
+      setSimilarPanelOpen(true);
+      notify(`发现 ${found.length} 组相似图片，已自动勾上 ${extras.length} 个副本。`);
     } catch (e) {
       notify(`相似检测失败：${String(e)}`, "error");
     } finally {
       setDetectingSimilar(false);
     }
-  }, [notify]);
+  }, [images, notify]);
+
   const clearSimilar = useCallback(() => {
     setSimilarGroups([]);
+    setSimilarKeeps({});
     setSimilarDetected(false);
+    setSimilarPanelOpen(false);
   }, []);
-  const similarIds = useMemo(() => new Set(similarGroups.flat()), [similarGroups]);
+
+  /** 换某组的保留项：该组勾选跟着翻转，其他组的勾选不动 */
+  const keepSimilar = useCallback((at: number, keepId: string) => {
+    const group = aliveSimilarGroups.find(item => item.at === at);
+    if (!group) return;
+    setSimilarKeeps(prev => ({ ...prev, [at]: keepId }));
+    setSelectedIds(prev => selectGroupExtras(prev, group, keepId));
+  }, [aliveSimilarGroups]);
+
+  const similarIds = useMemo(
+    () => new Set(aliveSimilarGroups.flatMap(group => group.ids)),
+    [aliveSimilarGroups],
+  );
 
   // 排一次、筛多次：切目录和打字只是从排好的清单里线性筛（19 万条 ≈30ms），
   // 不再每次条件一变就重排整库。Array.filter 保序，结果与"先筛后排"一致。
@@ -175,6 +223,15 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     setViewerIndex(index >= 0 ? index : 0);
   }, [filteredImages]);
 
+  /** 从分组面板放大：翻页范围就是这一组，逐张比对着决定删谁 */
+  const openSimilarGroup = useCallback((image: Image, groupIds: string[]) => {
+    const list = groupIds.map(id => similarIndex.get(id)).filter((item): item is Image => item !== undefined);
+    if (list.length === 0) return;
+    const at = list.findIndex(item => item.id === image.id);
+    setViewerList(list);
+    setViewerIndex(at >= 0 ? at : 0);
+  }, [similarIndex]);
+
   // 随机一张：直接以整个过滤结果为查看器列表，从随机位置开始看
   const handleRandomPick = useCallback(() => {
     if (filteredImages.length === 0) return;
@@ -238,7 +295,8 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         onDetectSimilar={handleDetectSimilar}
         detectingSimilar={detectingSimilar}
         similarDetected={similarDetected}
-        similarGroupCount={similarGroups.length}
+        similarGroupCount={aliveSimilarGroups.length}
+        onOpenSimilarGroups={() => setSimilarPanelOpen(true)}
         onClearSimilar={clearSimilar}
         selectMode={selectMode}
         selectedCount={selectedIds.size}
@@ -265,6 +323,21 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         onMoved={(imageId, newPath) => retargetLocally([[imageId, newPath]])}
         resetKey={selectedDir}
       />
+      {similarPanelOpen && (
+        <SimilarGroupsPanel
+          groups={aliveSimilarGroups}
+          imageById={similarIndex}
+          selectedIds={selectedIds}
+          onToggle={toggleSelect}
+          onKeep={keepSimilar}
+          onAutoSelect={autoSelectSimilar}
+          selectedTotal={selectedIds.size}
+          onDeleteSelected={handleDeleteSelected}
+          deleting={deletingSelected}
+          onOpenImage={openSimilarGroup}
+          onClose={() => setSimilarPanelOpen(false)}
+        />
+      )}
       {viewerIndex !== null && viewerList[viewerIndex] && (
         <ImageViewer
           images={viewerList}
