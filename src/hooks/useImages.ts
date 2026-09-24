@@ -80,6 +80,24 @@ export function useImages() {
     }
   }, [refresh]);
 
+  /** 删除后就地剔除本地清单：整库有 20 万条，重拉一次要过桥 70MB JSON 再重建目录树 */
+  const dropLocally = useCallback((ids: Iterable<string>) => {
+    const gone = new Set(ids);
+    if (gone.size === 0) return;
+    setImages(prev => prev.filter(image => !gone.has(image.id)));
+  }, []);
+
+  /** 移动后就地套用新路径。一次调用改多条：逐张 setImages 会把整表复制 N 遍 */
+  const retargetLocally = useCallback((updates: Array<[imageId: string, newPath: string]>) => {
+    if (updates.length === 0) return;
+    const byId = new Map(updates);
+    setImages(prev => prev.map(image => {
+      const next = byId.get(image.id);
+      if (next === undefined) return image;
+      return { ...image, path: next, filename: next.split(/[\\/]/).pop() ?? image.filename };
+    }));
+  }, []);
+
   const initialRun = useCallback(async () => {
     await loadImages();
     await rescanAll();
@@ -89,6 +107,6 @@ export function useImages() {
 
   return {
     images, loading, error, rescanStatus, clearError,
-    scanDirectory, loadImages, initialRun,
+    scanDirectory, loadImages, initialRun, dropLocally, retargetLocally,
   };
 }

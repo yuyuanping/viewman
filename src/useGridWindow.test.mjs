@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { gridWindowOf } from './hooks/useGridWindow.ts';
+import { gridWindowOf, rowHeightOf } from './hooks/useGridWindow.ts';
+
+const card = (offsetTop, offsetHeight = 232) => ({ offsetTop, offsetHeight });
+const pad = (offsetTop, offsetHeight) => ({ offsetTop, offsetHeight, dataset: { pad: 'top' } });
+
+test('rowHeightOf anchors on the first real card and reads the next row', () => {
+  // 4 列：前三张与第四张同排（offsetTop 相等，差 0 不是行高），第五张才在下一行
+  const kids = [card(0), card(0), card(0), card(0), card(250), card(250)];
+  assert.equal(rowHeightOf(kids, 18), 250);
+});
+
+test('rowHeightOf skips pad spacers on both ends', () => {
+  // 回归：pad 撑高块曾被当成第一张卡，量到的"行高"其实是 padTop 高度
+  const kids = [pad(0, 5000), card(5000), card(5000), card(5250)];
+  assert.equal(rowHeightOf(kids, 18), 250);
+  const trailingPad = [...[card(0), card(0), card(250)], pad(250, 9000)];
+  assert.equal(rowHeightOf(trailingPad, 18), 250);
+});
+
+test('rowHeightOf falls back to card height for a single row', () => {
+  assert.equal(rowHeightOf([card(0, 232)], 18), 250);
+  assert.equal(rowHeightOf([], 18), 0);
+});
 
 test('gridWindowOf slices by rows with overscan and pads both ends', () => {
   // 100 条、4 列、行高 170 → 共 25 行

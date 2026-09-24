@@ -208,31 +208,80 @@ fn build_images_parallel(
     (images, warnings)
 }
 
+/// 挑出没能进回收站的那些：整批一次 shell 事务（`trash::delete_all` 内部只建一个
+/// IFileOperation），失败再退回逐张，让被占用的那几张只影响自己。
+/// 磁盘上已经不存在的一律视作已删除——库记录必须能清掉，否则残留显示。
+fn filter_undeleted(targets: &[(String, String)]) -> Vec<(String, String)> {
+    let present: Vec<&(String, String)> = targets
+        .iter()
+        .filter(|(_, path)| Path::new(path).exists())
+        .collect();
+    if present.is_empty() {
+        return Vec::new();
+    }
+
+    let paths: Vec<&str> = present.iter().map(|(_, path)| path.as_str()).collect();
+    if trash::delete_all(&paths).is_ok() {
+        // 整批成功：仍在磁盘上的才算没删掉
+        return present
+            .into_iter()
+            .filter(|(_, path)| Path::new(path).exists())
+            .cloned()
+            .collect();
+    }
+
+    // 一个文件被占用就足以让整批报错 → 退回逐张，只留下真正删不掉的那些
+    let mut survivors = Vec::new();
+    for (id, path) in present {
+        if trash::delete(path).is_err() && Path::new(path).exists() {
+            survivors.push((id.clone(), path.clone()));
+        }
+    }
+    survivors
+}
+
+/// 批量删除图片：一次回收站事务 + 一次数据库事务，返回成功删除的 id。
+/// 逐张删时每张都要过一次 IPC、一次 shell 调用和一次事务落盘，勾选几百张就是十几秒。
 #[tauri::command]
-pub fn delete_image(
+pub async fn delete_images(
     app: tauri::AppHandle,
-    state: State<AppState>,
-    image_id: String,
-) -> Result<(), String> {
-    let path = {
+    state: State<'_, AppState>,
+    image_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let targets: Vec<(String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_image_path(&conn, &image_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Image not found: {}", image_id))?
+        let mut out = Vec::with_capacity(image_ids.len());
+        for image_id in &image_ids {
+            let path = db::get_image_path(&conn, image_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Image not found: {}", image_id))?;
+            out.push((image_id.clone(), path));
+        }
+        out
     };
 
-    // 文件已被外部删除时 trash::delete 会失败，但库记录必须能删掉，否则残留显示
-    if Path::new(&path).exists() {
-        trash::delete(&path).map_err(|e| format!("删除文件失败: {}", e))?;
-    }
+    let for_files = targets.clone();
+    let survivors = tauri::async_runtime::spawn_blocking(move || filter_undeleted(&for_files))
+        .await
+        .map_err(|e| e.to_string())?;
+    let failed: HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
+    let deleted: Vec<String> = targets
+        .iter()
+        .filter(|(id, _)| !failed.contains(id))
+        .map(|(id, _)| id.clone())
+        .collect();
 
-    {
+    if !deleted.is_empty() {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::delete_image(&conn, &image_id).map_err(|e| e.to_string())?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        db::delete_images_by_ids(&tx, &deleted).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        for id in &deleted {
+            clear_thumbnail_cache(&app, id);
+        }
     }
 
-    clear_thumbnail_cache(&app, &image_id);
-    Ok(())
+    Ok(deleted)
 }
 
 /// 把图片文件移动到目标文件夹并同步库记录路径；目标重名时自动加 " (2)" 后缀，
@@ -460,6 +509,15 @@ mod tests {
 
         db::delete_image(&conn, "i1").unwrap();
         assert!(!db::is_image_path_taken(&conn, "C:/pics/a.png", "other").unwrap());
+    }
+
+    #[test]
+    fn test_undeleted_treats_missing_files_as_deleted() {
+        // 文件早已被外部清掉：不该报错卡住整批，库记录要能跟着删
+        let ghost = std::env::temp_dir().join("viewman-definitely-absent.jpg");
+        let targets = vec![("i1".to_string(), ghost.to_string_lossy().to_string())];
+        assert!(filter_undeleted(&targets).is_empty());
+        assert!(filter_undeleted(&[]).is_empty());
     }
 
     #[test]

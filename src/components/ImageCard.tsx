@@ -15,8 +15,9 @@ interface ImageCardProps {
   similar?: boolean;
   onToggleSelect?: (image: Image) => void;
   onOpen: (image: Image) => void;
-  onDeleted: () => void;
-  onMoved: () => void;
+  /** 删除成功后回报 id，父层据此就地剔除，不再重拉整库 */
+  onDeleted: (imageId: string) => void;
+  onMoved: (imageId: string, newPath: string) => void;
 }
 
 export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
@@ -48,8 +49,8 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
     if (!confirm(`确定要删除 "${image.filename}" 到回收站？`)) return;
     setDeleting(true);
     try {
-      await api.deleteImage(image.id);
-      onDeleted();
+      const deleted = await api.deleteImages([image.id]);
+      if (deleted.length > 0) onDeleted(image.id);
     } catch (err) {
       alert("删除失败: " + err);
       setDeleting(false);
@@ -68,8 +69,8 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
     if (!confirm(`将 "${image.filename}" 移动到:\n${dir}`)) return;
     setMoving(true);
     try {
-      await api.moveImage(image.id, dir);
-      onMoved();
+      const newPath = await api.moveImage(image.id, dir);
+      onMoved(image.id, newPath);
     } catch (err) {
       alert("移动失败: " + err);
     } finally {

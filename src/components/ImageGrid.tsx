@@ -12,8 +12,8 @@ interface ImageGridProps {
   onToggleSelect?: (image: Image) => void;
   onOpen: (image: Image) => void;
   onScanDirectory: () => void;
-  onDeleted: () => void;
-  onMoved: () => void;
+  onDeleted: (imageId: string) => void;
+  onMoved: (imageId: string, newPath: string) => void;
   /** 目录/过滤切换时滚动归零并重测网格几何 */
   resetKey: unknown;
 }
@@ -48,7 +48,7 @@ export function ImageGrid({ images, duplicateIds, similarIds, selectMode, select
   return (
     <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
       <div className="image-tiles" ref={gridRef}>
-        {padTop > 0 && <div style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
+        {padTop > 0 && <div data-pad="top" style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
         {images.slice(start, end).map(image => (
           <ImageCard
             key={image.id}
@@ -63,7 +63,7 @@ export function ImageGrid({ images, duplicateIds, similarIds, selectMode, select
             onMoved={onMoved}
           />
         ))}
-        {padBottom > 0 && <div style={{ height: padBottom, gridColumn: "1 / -1" }} aria-hidden="true" />}
+        {padBottom > 0 && <div data-pad="bottom" style={{ height: padBottom, gridColumn: "1 / -1" }} aria-hidden="true" />}
       </div>
     </div>
   );

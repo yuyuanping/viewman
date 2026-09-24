@@ -1,48 +1,6 @@
 import { useMemo, useState } from "react";
-
-interface DirNode {
-  path: string;
-  name: string;
-  itemCount: number;
-  children: DirNode[];
-}
-
-/** 目录树只依赖 path，视频库与图片库共用 */
-interface MediaItem {
-  path: string;
-}
-
-function buildDirTree(items: MediaItem[], rootLabel: string): DirNode {
-  const root: DirNode = { path: "", name: rootLabel, itemCount: items.length, children: [] };
-
-  for (const item of items) {
-    const idx = Math.max(item.path.lastIndexOf("\\"), item.path.lastIndexOf("/"));
-    if (idx === -1) continue;
-    const dir = item.path.slice(0, idx);
-    const parts = dir.split(/[\\/]/);
-
-    let current = root;
-    let accumulated = "";
-    for (const p of parts) {
-      accumulated += (accumulated ? "\\" : "") + p;
-      let child = current.children.find(c => c.path === accumulated);
-      if (!child) {
-        child = { path: accumulated, name: p, itemCount: 0, children: [] };
-        current.children.push(child);
-      }
-      child.itemCount++;
-      current = child;
-    }
-  }
-
-  function sortTree(node: DirNode) {
-    node.children.sort((a, b) => a.name.localeCompare(b.name));
-    node.children.forEach(sortTree);
-  }
-  sortTree(root);
-
-  return root;
-}
+import { buildDirTree } from "../dirTree";
+import type { DirNode, MediaItem } from "../dirTree";
 
 interface DirTreeProps {
   items: MediaItem[];

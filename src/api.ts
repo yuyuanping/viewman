@@ -51,7 +51,8 @@ export const api = {
     invoke<number>("remove_media_directory", { kind, dir }),
   getImages: () => invoke<Image[]>("get_images"),
   scanImageDirectory: (dir: string) => invoke<Image[]>("scan_image_directory", { dir }),
-  deleteImage: (imageId: string) => invoke<void>("delete_image", { imageId }),
+  /** 批量删除图片：一次回收站事务 + 一次库事务，返回真正删掉的 id */
+  deleteImages: (imageIds: string[]) => invoke<string[]>("delete_images", { imageIds }),
   moveImage: (imageId: string, targetDir: string) =>
     invoke<string>("move_image", { imageId, targetDir }),
   generateImageThumbnails: (imageIds: string[]) =>

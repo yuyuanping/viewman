@@ -1,9 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { DirTree } from "./DirTree";
 import { RecentlyPlayedList } from "./RecentlyPlayedList";
-import { countUnderDir } from "../scanRoots";
+import { countUnderDirs } from "../scanRoots";
 import type { RescanStatus } from "../hooks/useVideos";
 import type { Image, MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
 
@@ -55,6 +55,9 @@ export function Sidebar({
   const activeLoading = isImageTab ? imageLoading : loading;
   const activeScanProgress = isImageTab ? imageScanProgress : scanProgress;
   const activeRescanStatus = isImageTab ? imageRescanStatus : rescanStatus;
+  // 每个扫描根挂了多少条：整库统计只在库内容变化时重算，选目录/切标签不再跟着算
+  const activeItems = isImageTab ? images : videos;
+  const rootCounts = useMemo(() => countUnderDirs(activeItems, roots), [activeItems, roots]);
 
   const handleScan = async () => {
     setOperationError(null);
@@ -148,12 +151,12 @@ export function Sidebar({
         <div className="flex flex-col gap-1">
           <span className="text-xs text-gray-400 font-medium">扫描目录</span>
           <ul className="flex flex-col gap-0.5 max-h-40 overflow-y-auto">
-            {roots.map((dir) => {
+            {roots.map((dir, i) => {
               const name = dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || dir;
               return (
                 <li key={dir} className="flex items-center gap-1 text-xs text-gray-300 group">
                   <span className="truncate flex-1" title={dir}>{name}</span>
-                  <span className="text-gray-500 tabular-nums shrink-0">{countUnderDir(isImageTab ? images : videos, dir)}</span>
+                  <span className="text-gray-500 tabular-nums shrink-0">{rootCounts[i] ?? 0}</span>
                   <button
                     type="button"
                     onClick={() => void handleRemoveRoot(dir)}

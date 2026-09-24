@@ -59,7 +59,7 @@ pub fn run() {
             commands::generate_thumbnails,
             commands::get_images,
             commands::scan_image_directory,
-            commands::delete_image,
+            commands::delete_images,
             commands::move_image,
             commands::generate_image_thumbnails,
             commands::find_duplicate_images,

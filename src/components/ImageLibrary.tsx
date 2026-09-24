@@ -17,12 +17,16 @@ interface ImageLibraryProps {
   images: Image[];
   selectedDir: string | null;
   reloadImages: () => Promise<void>;
+  /** 按 id 就地剔除本地清单（删除成功后用，省掉整库重拉） */
+  dropLocally: (imageIds: string[]) => void;
+  /** 移动成功后就地套用后端返回的新路径 */
+  retargetLocally: (updates: Array<[imageId: string, newPath: string]>) => void;
   onScanDirectory: () => void;
   notify: Notify;
 }
 
 /** 图片库页面：与视频库各自的搜索、排序、多选与工具，共享的只是筛选/排序这类纯函数 */
-export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirectory, notify }: ImageLibraryProps) {
+export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, retargetLocally, onScanDirectory, notify }: ImageLibraryProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortField, setSortField] = useState<ImageSortField>("filename");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -37,11 +41,20 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
     images, reloadImages, notify,
     { generate: api.generateImageThumbnails, event: "image-thumbnail-progress", unit: "图片" },
   );
+
+  /** 一批图片进回收站，返回真正删掉的 id 并同步本地清单 */
+  const trashImages = useCallback(async (imageIds: string[]) => {
+    if (imageIds.length === 0) return [];
+    const deleted = await api.deleteImages(imageIds);
+    dropLocally(deleted);
+    return deleted;
+  }, [dropLocally]);
+
   const {
     duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
     detecting: detectingDuplicates, detect: handleDetectDuplicates,
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
-  } = useDuplicates(reloadImages, notify, { detect: api.findDuplicateImages, remove: api.deleteImage, unit: "图片" });
+  } = useDuplicates(notify, { detect: api.findDuplicateImages, remove: trashImages, unit: "图片" });
 
   // 相似图检测（pHash）：只检测+高亮，不提供一键删（保留哪张是人的判断）
   const [similarGroups, setSimilarGroups] = useState<string[][]>([]);
@@ -71,9 +84,15 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
   }, []);
   const similarIds = useMemo(() => new Set(similarGroups.flat()), [similarGroups]);
 
+  // 排一次、筛多次：切目录和打字只是从排好的清单里线性筛（19 万条 ≈30ms），
+  // 不再每次条件一变就重排整库。Array.filter 保序，结果与"先筛后排"一致。
+  const sortedImages = useMemo(
+    () => sortMedia(images, sortField, sortDirection),
+    [images, sortField, sortDirection],
+  );
   const filteredImages = useMemo(
-    () => sortMedia(filterMedia(images, selectedDir, searchQuery), sortField, sortDirection),
-    [images, selectedDir, searchQuery, sortField, sortDirection],
+    () => filterMedia(sortedImages, selectedDir, searchQuery),
+    [sortedImages, selectedDir, searchQuery],
   );
 
   // 筛选条件一变，勾选但已不在视图里的项不再可见，直接清空选择避免"隐形删除"
@@ -109,20 +128,16 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
     if (!confirm(`确定将选中的 ${ids.length} 张图片移入回收站？`)) return;
     setDeletingSelected(true);
     let ok = 0;
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        await api.deleteImage(id);
-        ok += 1;
-      } catch {
-        failed += 1;
-      }
+    try {
+      ok = (await trashImages(ids)).length;
+    } catch (e) {
+      notify(`删除失败：${String(e)}`, "error");
     }
+    const failed = ids.length - ok;
     setSelectedIds(new Set());
-    await reloadImages();
     notify(failed > 0 ? `已删除 ${ok} 张，${failed} 张失败（可能被占用）` : `已将 ${ok} 张图片移入回收站。`, failed > 0 ? "error" : "info");
     setDeletingSelected(false);
-  }, [selectedIds, reloadImages, notify]);
+  }, [selectedIds, trashImages, notify]);
 
   // 多选批量移动：选目录后逐个 move，失败只计数不中断
   const [movingSelected, setMovingSelected] = useState(false);
@@ -138,21 +153,21 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
     if (!dir) return;
     if (!confirm(`将选中的 ${ids.length} 张图片移动到:\n${dir}`)) return;
     setMovingSelected(true);
-    let ok = 0;
+    const moved: Array<[string, string]> = [];
     let failed = 0;
     for (const id of ids) {
       try {
-        await api.moveImage(id, dir);
-        ok += 1;
+        moved.push([id, await api.moveImage(id, dir)]);
       } catch {
         failed += 1;
       }
     }
+    retargetLocally(moved);
     setSelectedIds(new Set());
-    await reloadImages();
+    const ok = moved.length;
     notify(failed > 0 ? `已移动 ${ok} 张，${failed} 张失败（可能被占用或目标重名冲突）` : `已将 ${ok} 张图片移动到目标文件夹。`, failed > 0 ? "error" : "info");
     setMovingSelected(false);
-  }, [selectedIds, reloadImages, notify]);
+  }, [selectedIds, retargetLocally, notify]);
 
   const openViewer = useCallback((image: Image) => {
     const index = filteredImages.findIndex(i => i.id === image.id);
@@ -174,14 +189,14 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
 
   // 查看器里删掉当前这张：就地接着看下一张，删完了才关闭
   const handleViewerDelete = useCallback(async (image: Image) => {
-    await api.deleteImage(image.id);
-    await reloadImages();
+    const deleted = await trashImages([image.id]);
+    if (deleted.length === 0) return;
     const remaining = viewerList.filter(i => i.id !== image.id);
     setViewerList(remaining);
     if (remaining.length === 0) setViewerIndex(null);
     else setViewerIndex(prev => Math.min(prev ?? 0, remaining.length - 1));
     notify("已将图片移入回收站。");
-  }, [viewerList, reloadImages, notify]);
+  }, [viewerList, trashImages, notify]);
 
   const withoutThumbnailCount = useMemo(
     () => images.filter(i => !i.thumbnail_path).length,
@@ -246,8 +261,8 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
         onToggleSelect={toggleSelect}
         onOpen={openViewer}
         onScanDirectory={onScanDirectory}
-        onDeleted={reloadImages}
-        onMoved={reloadImages}
+        onDeleted={(imageId) => dropLocally([imageId])}
+        onMoved={(imageId, newPath) => retargetLocally([[imageId, newPath]])}
         resetKey={selectedDir}
       />
       {viewerIndex !== null && viewerList[viewerIndex] && (

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseScanRoots, isUnderDir, countUnderDir } from './scanRoots.ts';
+import { parseScanRoots, isUnderDir, countUnderDir, countUnderDirs } from './scanRoots.ts';
 
 test('scan roots dedupe case-insensitively and drop invalid entries', () => {
   const roots = parseScanRoots(['D:\\视频', 'd:\\视频\\', 'E:\\media', 42, null, '', 'D:\\视频 ']);
@@ -32,4 +32,16 @@ test('countUnderDir tallies only the entries hanging below the directory', () =>
   ];
   assert.equal(countUnderDir(items, 'D:\\pics'), 2);
   assert.equal(countUnderDir(items, 'D:\\nowhere'), 0);
+});
+
+test('countUnderDirs matches per-root counts and keeps input order', () => {
+  const items = [
+    { path: 'D:\\pics\\a.jpg' },
+    { path: 'D:\\pics\\sub\\b.jpg' },
+    { path: 'D:\\pics2\\c.jpg' },
+    { path: 'E:\\other\\d.jpg' },
+  ];
+  const roots = ['E:\\other', 'd:\\pics\\', 'D:\\pics2', 'D:\\nowhere'];
+  assert.deepEqual(countUnderDirs(items, roots), roots.map(dir => countUnderDir(items, dir)));
+  assert.deepEqual(countUnderDirs(items, []), []);
 });

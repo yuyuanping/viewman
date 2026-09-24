@@ -3,14 +3,17 @@ import type { Notify } from "./useToasts";
 
 interface DuplicateOptions {
   detect: () => Promise<string[][]>;
-  remove: (id: string) => Promise<void>;
+  /**
+   * 把这一批移入回收站，返回真正删掉的 id。
+   * 删完之后本地清单怎么更新（就地剔除还是整库重拉）由实现方决定，这里不假设。
+   */
+  remove: (ids: string[]) => Promise<string[]>;
   /** 提示文案里的媒体名称 */
   unit: string;
 }
 
 /** 重复条目：按内容指纹分组检测，标记每组之外的多余副本并可一键移入回收站 */
 export function useDuplicates(
-  reload: () => Promise<void>,
   notify: Notify,
   { detect: detectDuplicates, remove, unit }: DuplicateOptions,
 ) {
@@ -49,20 +52,19 @@ export function useDuplicates(
     setDeleting(true);
     let ok = 0;
     let failed = 0;
-    for (const id of ids) {
-      try {
-        await remove(id);
-        ok += 1;
-      } catch {
-        failed += 1;
-      }
+    try {
+      const deleted = await remove(ids);
+      ok = deleted.length;
+      failed = ids.length - deleted.length;
+    } catch (e) {
+      failed = ids.length;
+      notify(`删除重复副本失败：${String(e)}`, "error");
     }
-    await reload();
     setGroups([]);
     setDetected(false);
     notify(failed > 0 ? `已删除 ${ok} 个重复副本，${failed} 个失败（可能被占用）` : `已删除 ${ok} 个重复副本到回收站。`);
     setDeleting(false);
-  }, [extraIds, reload, notify, remove, unit]);
+  }, [extraIds, notify, remove, unit]);
 
   const clear = useCallback(() => {
     setGroups([]);

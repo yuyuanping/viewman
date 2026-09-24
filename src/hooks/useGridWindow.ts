@@ -7,26 +7,38 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * 1. 列数/列宽/行距不自己推导——直接读真实网格元素的 computed style
  *    （grid-template-columns / row-gap）。CSS 是唯一真相：媒体查询断点、
  *    auto-fill 变化、未来改样式都不需要同步两处公式。
- * 2. 行高 = 真实网格第一张真实卡的实测锚高（卡片 aspect-ratio + 文案行恒定，
- *    同行所有卡等高），ResizeObserver 跟踪窗口宽/字体变化自动重测。
- * 3. scrollTop 防残留：切换目录/过滤导致列表变短时，浏览器把 scrollTop
+ * 2. 行高 = 真实网格里第一张真实卡的实测锚高（卡片 aspect-ratio + 文案行恒定，
+ *    同行所有卡等高），撑高 pad 块用 data-pad 标记跳过，ResizeObserver
+ *    跟踪窗口宽/字体变化自动重测。
+ * 3. ref 用 callback ref + state：网格元素可能比 hook 晚出现（列表先空后有），
+ *    useRef + 空依赖 effect 会永远错过它，observer 一次都挂不上 → 行重量不到
+ *    → 停在"只渲染前 60 条"且滚不动（历史 bug：启动后首屏看不全库）。
+ * 4. scrollTop 防残留：切换目录/过滤导致列表变短时，浏览器把 scrollTop
  *    夹回来需要一帧，窗口计算先按当前滚动位置夹到有效行区间，
  *    再叠 overscan——顺序错误会产生 start > end 的空窗口（历史 bug：
  *    网格永久空白，看起来像"切目录卡死"）。
- * 4. 探针未就绪（首帧）渲染前 60 条，量到行高后自动切窗口模式。
- * 5. resetKey 变化（切换目录/过滤）时滚动归零：既防残留 scrollTop 越界，
+ * 5. 探针未就绪（首帧）渲染前 60 条，量到行高后自动切窗口模式。
+ * 6. resetKey 变化（切换目录/过滤）时滚动归零：既防残留 scrollTop 越界，
  *    也符合"切目录回顶部"的直觉。
  */
 
-/** 行高锚（纯函数）：取第一张真实卡的锚高。pad 占位（内联 gridColumn 跨全列）
- * 跳过——卡片根元素无内联样式，style.gridColumn 是占位的唯一签名；
- * 同排卡 offsetTop 相等（差 0 不是行高），下一个 offsetTop 更大的卡才是下一行——
- * 差值即行高；只有一张真实卡（单行网格）时退回其高度 + row-gap。 */
-function rowHeightOf(children: HTMLCollection, gap: number): number {
-  let first: HTMLElement | null = null;
+/** rowHeightOf 只依赖这几个量，用结构类型即可（真实 HTMLElement 天然满足，测试可传假对象） */
+export interface RowAnchor {
+  offsetTop: number;
+  offsetHeight: number;
+  dataset?: { pad?: string };
+}
+
+/**
+ * 行高锚（纯函数）：跳过撑高占位（data-pad），取第一张真实卡为锚，
+ * 往后第一张 offsetTop 更大的卡就在下一行，差值即行高；
+ * 同排卡 offsetTop 相等（差 0 不是行高），只有一行时退回卡高 + row-gap。
+ */
+export function rowHeightOf(children: ArrayLike<RowAnchor>, gap: number): number {
+  let first: RowAnchor | null = null;
   for (let i = 0; i < children.length; i++) {
-    const c = children[i] as HTMLElement;
-    if (c.style.gridColumn) continue;
+    const c = children[i];
+    if (c.dataset?.pad) continue;
     if (first === null) {
       first = c;
       continue;
@@ -39,9 +51,10 @@ function rowHeightOf(children: HTMLCollection, gap: number): number {
 export interface GridWindowState {
   /** 挂到滚动容器 */
   onScroll: (e: React.UIEvent<HTMLDivElement>) => void;
-  viewportRef: React.RefObject<HTMLDivElement | null>;
-  /** 挂到真实网格元素（读 computed style 量列宽行距、第一行高度） */
-  gridRef: React.RefObject<HTMLDivElement | null>;
+  /** callback ref：挂到滚动容器 */
+  viewportRef: (el: HTMLDivElement | null) => void;
+  /** callback ref：挂到真实网格元素（读 computed style 量列宽行距、行高） */
+  gridRef: (el: HTMLDivElement | null) => void;
   /** 变化时滚动归零并重测（传"当前目录/过滤键"） */
   resetKey: unknown;
   /** 当前应渲染的条目下标区间 [start, end) */
@@ -61,61 +74,70 @@ export function useGridWindow(
 ): GridWindowState {
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(0);
+  const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null);
+  const [gridEl, setGridEl] = useState<HTMLDivElement | null>(null);
   const [gridGeom, setGridGeom] = useState({ columns: 1, rowH: 0 });
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const gridRef = useRef<HTMLDivElement | null>(null);
-  const resetKeyRef = useRef(resetKey);
+  const viewportRefObj = useRef<HTMLDivElement | null>(null);
+
+  const viewportRef = useCallback((el: HTMLDivElement | null) => {
+    viewportRefObj.current = el;
+    setViewportEl(el);
+  }, []);
+  const gridRef = useCallback((el: HTMLDivElement | null) => {
+    setGridEl(el);
+  }, []);
 
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     setScrollTop(e.currentTarget.scrollTop);
   }, []);
 
-  // 视口高度跟踪
+  // 视口高度跟踪；元素刚挂上时以它的真实滚动位置为准（重挂载后 DOM 归零，
+  // 而 scrollTop state 还留着旧值，会让窗口算到列表中段去）
   useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const sync = () => setViewportH(el.clientHeight);
+    if (!viewportEl) return;
+    const sync = () => {
+      setViewportH(viewportEl.clientHeight);
+      setScrollTop(viewportEl.scrollTop);
+    };
     sync();
     const ro = new ResizeObserver(sync);
-    ro.observe(el);
+    ro.observe(viewportEl);
     return () => ro.disconnect();
-  }, []);
+  }, [viewportEl]);
 
   // 网格几何测量：列数（从 grid-template-columns 数）+ 第一行实测高度
   // 浏览器把 grid-template-columns 解析成 "220px 220px ..."，直接用。
   const measureGrid = useCallback(() => {
-    const grid = gridRef.current;
-    if (!grid || grid.children.length === 0) return;
-    const cs = getComputedStyle(grid);
+    if (!gridEl || gridEl.children.length === 0) return;
+    const cs = getComputedStyle(gridEl);
     const cols = cs.gridTemplateColumns
       ? cs.gridTemplateColumns.split(/\s+/).filter(Boolean).length
       : 1;
     if (cols < 1) return;
     const gap = parseFloat(cs.rowGap) || 0;
-    const rowH = rowHeightOf(grid.children, gap);
+    const rowH = rowHeightOf(gridEl.children as unknown as ArrayLike<RowAnchor>, gap);
     if (rowH > 0) {
       setGridGeom(prev =>
         prev.columns === cols && Math.abs(prev.rowH - rowH) < 0.5 ? prev : { columns: cols, rowH },
       );
     }
-  }, []);
+  }, [gridEl]);
 
   useEffect(() => {
-    const grid = gridRef.current;
-    if (!grid) return;
+    if (!gridEl) return;
     measureGrid();
     const ro = new ResizeObserver(() => measureGrid());
-    ro.observe(grid);
+    ro.observe(gridEl);
     return () => ro.disconnect();
-  }, [measureGrid]);
+  }, [measureGrid, gridEl]);
 
-  // resetKey 变化：滚动归零（防旧 scrollTop 越界 + 符合切目录回顶直觉）
+  // resetKey 变化：滚动归零并重测（防旧 scrollTop 越界 + 符合切目录回顶直觉）
   useEffect(() => {
-    resetKeyRef.current = resetKey;
-    const el = viewportRef.current;
+    const el = viewportRefObj.current;
     if (el && el.scrollTop > 0) el.scrollTop = 0;
     setScrollTop(0);
-  }, [resetKey]);
+    measureGrid();
+  }, [resetKey, measureGrid]);
 
   const { columns, rowH } = gridGeom;
   const ready = rowH > 0 && viewportH > 0;

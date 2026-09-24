@@ -34,6 +34,7 @@ function App() {
   const {
     images, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
     rescanStatus: imagesRescanStatus, scanDirectory: scanImageDirectory, loadImages, initialRun: loadImageLibrary,
+    dropLocally: dropImagesLocally, retargetLocally: retargetImagesLocally,
   } = useImages();
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer();
   const { launch: launchInPotPlayer, error: potPlayerError, clearError: clearPotPlayerError } = usePotPlayer(saveProgress);
@@ -82,11 +83,25 @@ function App() {
     hevcCount, hevcDetected, detecting: detectingHevc, detectProgress: hevcDetectProgress, detect: handleDetectHevc,
     converting: convertingHevc, convert: handleConvertHevc, hevcProgress, clearDetected: clearHevc,
   } = useHevcConversion(loadVideos, notify);
+  /** 视频侧没有批量删除命令：逐张删完再整库重拉（图片库走批量 + 本地剔除） */
+  const trashVideos = useCallback(async (ids: string[]) => {
+    const deleted: string[] = [];
+    for (const id of ids) {
+      try {
+        await api.deleteVideo(id);
+        deleted.push(id);
+      } catch {
+        // 被占用的文件删不掉，留给调用方按 failed 计数
+      }
+    }
+    await loadVideos();
+    return deleted;
+  }, [loadVideos]);
   const {
     duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
     detecting: detectingDuplicates, detect: handleDetectDuplicates,
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
-  } = useDuplicates(loadVideos, notify, { detect: api.findDuplicateVideos, remove: api.deleteVideo, unit: "视频" });
+  } = useDuplicates(notify, { detect: api.findDuplicateVideos, remove: trashVideos, unit: "视频" });
   const {
     missingIds, clearMissing,
     fakeIds, clearFake, convertFakes, converting,
@@ -427,6 +442,8 @@ function App() {
             images={images}
             selectedDir={selectedImageDir}
             reloadImages={loadImages}
+            dropLocally={dropImagesLocally}
+            retargetLocally={retargetImagesLocally}
             onScanDirectory={handlePickImageDirectory}
             notify={notify}
           />
