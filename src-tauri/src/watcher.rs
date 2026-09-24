@@ -19,6 +19,7 @@ use tauri::{Emitter, Manager};
 
 // scan_directory / scan_image_directory 经 commands.rs 平铺 re-export，直接可用
 use crate::commands::{scan_directory, scan_image_directory, AppState};
+use crate::models::ScanOutcome;
 
 /// 防抖窗口：事件静默这么久后才真正触发扫描
 const DEBOUNCE: Duration = Duration::from_secs(3);
@@ -149,29 +150,29 @@ fn classify(
     None
 }
 
-/// 对一个根跑增量扫描，完成后广播 library-changed 让前端刷新对应库。
-/// 失败静默（磁盘可能被拔走），下轮事件会再试。
+/// 对一个根跑增量扫描，把本轮的增删原样广播出去（前端就地合并，不再整库重拉）。
+/// 失败静默（磁盘可能被拔走），下轮事件再试；失败时不广播，库本来就没改动。
 fn run_scan(app: &tauri::AppHandle, kind: &'static str, root: &PathBuf) {
     let dir = root.to_string_lossy().to_string();
-    let result = scan_root(app, kind, dir);
+    let state = app.state::<AppState>();
+    let result = match kind {
+        "video" => tauri::async_runtime::block_on(scan_directory(app.clone(), state, dir))
+            .map(|outcome| emit_outcome(app, "videos-changed", outcome)),
+        "image" => tauri::async_runtime::block_on(scan_image_directory(app.clone(), state, dir))
+            .map(|outcome| emit_outcome(app, "images-changed", outcome)),
+        _ => Ok(()),
+    };
     if let Err(e) = result {
         eprintln!("自动重扫失败（{kind} {root:?}）：{e}");
     }
-    let _ = app.emit("library-changed", kind);
 }
 
-/// 一个根一次扫描；两库返回类型不同，内部各自丢弃载荷只留成败
-fn scan_root(app: &tauri::AppHandle, kind: &str, dir: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    match kind {
-        "video" => {
-            tauri::async_runtime::block_on(scan_directory(app.clone(), state, dir)).map(|_| ())
-        }
-        "image" => {
-            tauri::async_runtime::block_on(scan_image_directory(app.clone(), state, dir)).map(|_| ())
-        }
-        _ => Ok(()),
+/// 一条数据都没变时不打扰前端：合并空增量也要重排整表
+fn emit_outcome<T: serde::Serialize + Clone>(app: &tauri::AppHandle, event: &str, outcome: ScanOutcome<T>) {
+    if outcome.items.is_empty() && outcome.removed_ids.is_empty() {
+        return;
     }
+    let _ = app.emit(event, outcome);
 }
 
 /// 根表重读：新增的根挂上 watch；已移除的根取消 watch

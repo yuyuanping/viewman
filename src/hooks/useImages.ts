@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { api } from "../api";
-import type { Image } from "../types";
+import type { Image, ScanOutcome } from "../types";
+import { mergeById } from "../scanMerge";
 import type { RescanStatus } from "./useVideos";
 import { loadScanRoots } from "../scanRootStore";
 
@@ -15,23 +16,28 @@ export function useImages() {
     setImages(await api.getImages());
   }, []);
 
-  /** 执行一次图片目录扫描并刷新列表；返回错误信息（null = 成功）。loading 由调用方管理 */
+  /** 删除后就地剔除本地清单：整库有 20 万条，重拉一次要过桥 70MB JSON 再重建目录树 */
+  const dropLocally = useCallback((ids: Iterable<string>) => {
+    const gone = new Set(ids);
+    if (gone.size === 0) return;
+    setImages(prev => prev.filter(image => !gone.has(image.id)));
+  }, []);
+
+  /** 合并一轮图片扫描的增量：只动这轮真正新增/刷新/失效的那几条 */
+  const applyScan = useCallback((outcome: ScanOutcome<Image>) => {
+    if (outcome.items.length > 0) setImages(prev => mergeById(prev, outcome.items));
+    dropLocally(outcome.removed_ids);
+  }, [dropLocally]);
+
+  /** 执行一次图片目录扫描并就地合并增量；返回错误信息（null = 成功）。loading 由调用方管理 */
   const runScan = useCallback(async (dir: string): Promise<string | null> => {
-    let scanError: string | null = null;
     try {
-      await api.scanImageDirectory(dir);
+      applyScan(await api.scanImageDirectory(dir));
+      return null;
     } catch (e) {
-      scanError = `图片扫描失败，未完成更新：${String(e)}`;
+      return `图片扫描失败，未完成更新：${String(e)}`;
     }
-    if (scanError === null) {
-      try {
-        await refresh();
-      } catch (e) {
-        scanError = `扫描已保存，但刷新列表失败：${String(e)}。请重启应用刷新。`;
-      }
-    }
-    return scanError;
-  }, [refresh]);
+  }, [applyScan]);
 
   /** 扫描根由后端在能读到目录时即刻记下，扫到一半被打断，下次启动会自己接着扫 */
   const scanDirectory = useCallback(async (dir: string) => {
@@ -80,13 +86,6 @@ export function useImages() {
     }
   }, [refresh]);
 
-  /** 删除后就地剔除本地清单：整库有 20 万条，重拉一次要过桥 70MB JSON 再重建目录树 */
-  const dropLocally = useCallback((ids: Iterable<string>) => {
-    const gone = new Set(ids);
-    if (gone.size === 0) return;
-    setImages(prev => prev.filter(image => !gone.has(image.id)));
-  }, []);
-
   /** 移动后就地套用新路径。一次调用改多条：逐张 setImages 会把整表复制 N 遍 */
   const retargetLocally = useCallback((updates: Array<[imageId: string, newPath: string]>) => {
     if (updates.length === 0) return;
@@ -107,6 +106,6 @@ export function useImages() {
 
   return {
     images, loading, error, rescanStatus, clearError,
-    scanDirectory, loadImages, initialRun, dropLocally, retargetLocally,
+    scanDirectory, loadImages, initialRun, applyScan, dropLocally, retargetLocally,
   };
 }

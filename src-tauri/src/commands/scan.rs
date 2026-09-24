@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{Emitter, Manager, State};
 
 use crate::db;
-use crate::models::Video;
+use crate::models::{ScanOutcome, Video};
 use crate::scanner;
 
 use super::settings::{remember_root, SCAN_ROOTS_KEY};
@@ -34,7 +34,7 @@ pub async fn scan_directory(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     dir: String,
-) -> Result<Vec<Video>, String> {
+) -> Result<ScanOutcome<Video>, String> {
     let existing_videos = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_all_videos(&conn).map_err(|e| e.to_string())?
@@ -135,7 +135,7 @@ pub async fn scan_directory(
         ScanProgress { processed: videos.len(), total: videos.len(), done: true, warnings: warnings.clone(), summary: Some(ScanSummary { added: summary.added, removed: stale_ids.len(), refreshed: summary.refreshed }) },
     );
 
-    Ok(videos)
+    Ok(ScanOutcome { items: videos, removed_ids: stale_ids })
 }
 
 /// 目录 → 大小写不敏感的前缀比较键（统一带结尾分隔符，避免 "D:\v" 误匹配 "D:\vids2"）。

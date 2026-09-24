@@ -5,6 +5,7 @@ import type {
   MediaKind,
   PotPlayerStatus,
   RecentlyPlayed,
+  ScanOutcome,
   Video,
   VideoFileStatus,
   VideoWithProgress,
@@ -17,7 +18,7 @@ export const api = {
   getRecentlyPlayed: () => invoke<RecentlyPlayed[]>("get_recently_played"),
   /** 完整播放历史（无条数上限） */
   getPlayHistory: () => invoke<RecentlyPlayed[]>("get_play_history"),
-  scanDirectory: (dir: string) => invoke<Video[]>("scan_directory", { dir }),
+  scanDirectory: (dir: string) => invoke<ScanOutcome<Video>>("scan_directory", { dir }),
   saveProgress: (videoId: string, position: number) =>
     invoke<void>("save_progress", { videoId, position }),
   checkVideoFile: (videoId: string) => invoke<VideoFileStatus>("check_video_file", { videoId }),
@@ -51,7 +52,7 @@ export const api = {
   removeMediaDirectory: (kind: MediaKind, dir: string) =>
     invoke<number>("remove_media_directory", { kind, dir }),
   getImages: () => invoke<Image[]>("get_images"),
-  scanImageDirectory: (dir: string) => invoke<Image[]>("scan_image_directory", { dir }),
+  scanImageDirectory: (dir: string) => invoke<ScanOutcome<Image>>("scan_image_directory", { dir }),
   /** 批量删除图片：一次回收站事务 + 一次库事务，返回真正删掉的 id */
   deleteImages: (imageIds: string[]) => invoke<string[]>("delete_images", { imageIds }),
   moveImage: (imageId: string, targetDir: string) =>

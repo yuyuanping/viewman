@@ -19,7 +19,7 @@ import { useFileCheck } from "./hooks/useFileCheck";
 import { api } from "./api";
 import { loadScanRoots } from "./scanRootStore";
 import { countUnderDir, isUnderDir } from "./scanRoots";
-import type { MediaKind, Video } from "./types";
+import type { Image, MediaKind, ScanOutcome, Video } from "./types";
 import type { SortField, SortDirection, WatchState } from "./libraryFilter";
 import { filterMedia, filterByWatchState, filterByMedia, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
@@ -30,11 +30,11 @@ const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
 const TAB_PREF_KEY = "viewman.mediaTab";
 
 function App() {
-  const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus, dropLocally: dropVideosLocally, retargetLocally: retargetVideosLocally } = useVideos();
+  const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus, applyScan: applyVideoScan, dropLocally: dropVideosLocally, retargetLocally: retargetVideosLocally } = useVideos();
   const {
     images, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
     rescanStatus: imagesRescanStatus, scanDirectory: scanImageDirectory, loadImages, initialRun: loadImageLibrary,
-    dropLocally: dropImagesLocally, retargetLocally: retargetImagesLocally,
+    applyScan: applyImageScan, dropLocally: dropImagesLocally, retargetLocally: retargetImagesLocally,
   } = useImages();
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer();
   const { launch: launchInPotPlayer, error: potPlayerError, clearError: clearPotPlayerError } = usePotPlayer(saveProgress);
@@ -113,18 +113,18 @@ function App() {
     void refreshScanRoots();
   }, [refreshScanRoots]);
 
-  // 目录监视自动扫描完成广播：后台重扫了哪个库就刷新哪个库
+  // 目录监视自动扫描完成广播：后端把本轮的增删直接带过来，不再整库重拉
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | undefined;
-    listen<string>("library-changed", (e) => {
-      const kind = e.payload;
-      if (kind === "video") void loadVideos();
-      else if (kind === "image") void loadImages();
-    }).then(fn => { if (disposed) fn(); else unlisten = fn; })
-      .catch(() => undefined);
-    return () => { disposed = true; unlisten?.(); };
-  }, [loadVideos, loadImages]);
+    const unlisteners: Array<() => void> = [];
+    const bind = <T,>(event: string, apply: (outcome: ScanOutcome<T>) => void) =>
+      listen<ScanOutcome<T>>(event, (received) => apply(received.payload))
+        .then(fn => { if (disposed) fn(); else unlisteners.push(fn); })
+        .catch(() => undefined);
+    void bind<Video>("videos-changed", applyVideoScan);
+    void bind<Image>("images-changed", applyImageScan);
+    return () => { disposed = true; for (const fn of unlisteners) fn(); };
+  }, [applyVideoScan, applyImageScan]);
 
   /** 移除目录：只清除应用内的记录与封面缓存，磁盘文件保持原样 */
   const handleRemoveRoot = useCallback(async (dir: string) => {

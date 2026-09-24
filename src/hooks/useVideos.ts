@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api";
-import type { RecentlyPlayed, Video } from "../types";
+import type { RecentlyPlayed, ScanOutcome, Video } from "../types";
+import { mergeById } from "../scanMerge";
 import { loadScanRoots, migrateLegacyScanRoots } from "../scanRootStore";
 
 /** 自动重扫的目录级进度 */
@@ -30,23 +31,47 @@ export function useVideos() {
     setRecentlyPlayed(recent);
   }, []);
 
-  /** 执行一次目录扫描并刷新列表；返回错误信息（null = 成功）。loading 由调用方管理 */
+  /** 删除后就地剔除本地清单：整库重拉一次要过桥几十 MB JSON，还要重建目录树 */
+  const dropLocally = useCallback((ids: Iterable<string>) => {
+    const gone = new Set(ids);
+    if (gone.size === 0) return;
+    setVideos(prev => prev.filter(video => !gone.has(video.id)));
+    setProgressMap(prev => {
+      const next = { ...prev };
+      for (const id of gone) delete next[id];
+      return next;
+    });
+    setRecentlyPlayed(prev => prev.filter(entry => !gone.has(entry.video.id)));
+  }, []);
+
+  /** 移动后就地套用后端返回的新路径。一次调用改多条：逐张 setVideos 会把整表复制 N 遍 */
+  const retargetLocally = useCallback((updates: Array<[videoId: string, newPath: string]>) => {
+    if (updates.length === 0) return;
+    const byId = new Map(updates);
+    const patch = (video: Video): Video => {
+      const next = byId.get(video.id);
+      if (next === undefined) return video;
+      return { ...video, path: next, filename: next.split(/[\\/]/).pop() ?? video.filename };
+    };
+    setVideos(prev => prev.map(patch));
+    setRecentlyPlayed(prev => prev.map(entry => ({ ...entry, video: patch(entry.video) })));
+  }, []);
+
+  /** 合并一轮扫描的增量：只动这轮真正新增/刷新/失效的那几条，整库不必重拉 */
+  const applyScan = useCallback((outcome: ScanOutcome<Video>) => {
+    if (outcome.items.length > 0) setVideos(prev => mergeById(prev, outcome.items));
+    dropLocally(outcome.removed_ids);
+  }, [dropLocally]);
+
+  /** 执行一次目录扫描并就地合并增量；返回错误信息（null = 成功）。loading 由调用方管理 */
   const runScan = useCallback(async (dir: string): Promise<string | null> => {
-    let scanError: string | null = null;
     try {
-      await api.scanDirectory(dir);
+      applyScan(await api.scanDirectory(dir));
+      return null;
     } catch (e) {
-      scanError = `扫描失败，未完成更新：${String(e)}`;
+      return `扫描失败，未完成更新：${String(e)}`;
     }
-    if (scanError === null) {
-      try {
-        await refresh();
-      } catch (e) {
-        scanError = `扫描已保存，但刷新列表失败：${String(e)}。请重启应用刷新。`;
-      }
-    }
-    return scanError;
-  }, [refresh]);
+  }, [applyScan]);
 
   /** 扫描根由后端在能读到目录时即刻记下，扫到一半被打断，下次启动会自己接着扫 */
   const scanDirectory = useCallback(async (dir: string) => {
@@ -110,32 +135,6 @@ export function useVideos() {
     }
   }, [refresh]);
 
-  /** 删除后就地剔除本地清单：整库重拉一次要过桥几十 MB JSON，还要重建目录树 */
-  const dropLocally = useCallback((ids: Iterable<string>) => {
-    const gone = new Set(ids);
-    if (gone.size === 0) return;
-    setVideos(prev => prev.filter(video => !gone.has(video.id)));
-    setProgressMap(prev => {
-      const next = { ...prev };
-      for (const id of gone) delete next[id];
-      return next;
-    });
-    setRecentlyPlayed(prev => prev.filter(entry => !gone.has(entry.video.id)));
-  }, []);
-
-  /** 移动后就地套用后端返回的新路径。一次调用改多条：逐张 setVideos 会把整表复制 N 遍 */
-  const retargetLocally = useCallback((updates: Array<[videoId: string, newPath: string]>) => {
-    if (updates.length === 0) return;
-    const byId = new Map(updates);
-    const patch = (video: Video): Video => {
-      const next = byId.get(video.id);
-      if (next === undefined) return video;
-      return { ...video, path: next, filename: next.split(/[\\/]/).pop() ?? video.filename };
-    };
-    setVideos(prev => prev.map(patch));
-    setRecentlyPlayed(prev => prev.map(entry => ({ ...entry, video: patch(entry.video) })));
-  }, []);
-
   useEffect(() => {
     void (async () => {
       await migrateLegacyScanRoots();
@@ -145,5 +144,5 @@ export function useVideos() {
   }, [loadVideos, rescanAll]);
 
   const clearError = useCallback(() => setError(null), []);
-  return { videos, progressMap, recentlyPlayed, loading, error, rescanStatus, clearError, scanDirectory, saveProgress, loadVideos, dropLocally, retargetLocally };
+  return { videos, progressMap, recentlyPlayed, loading, error, rescanStatus, clearError, scanDirectory, saveProgress, loadVideos, applyScan, dropLocally, retargetLocally };
 }

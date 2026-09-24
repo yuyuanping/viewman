@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{Emitter, Manager, State};
 
 use crate::db;
-use crate::models::Image;
+use crate::models::{Image, ScanOutcome};
 use crate::scanner;
 
 use super::scan::{
@@ -29,7 +29,7 @@ pub async fn scan_image_directory(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     dir: String,
-) -> Result<Vec<Image>, String> {
+) -> Result<ScanOutcome<Image>, String> {
     let existing_images = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_all_images(&conn).map_err(|e| e.to_string())?
@@ -130,7 +130,7 @@ pub async fn scan_image_directory(
         ScanProgress { processed: images.len(), total: images.len(), done: true, warnings: warnings.clone(), summary: Some(ScanSummary { added: summary.added, removed: stale_ids.len(), refreshed: summary.refreshed }) },
     );
 
-    Ok(images)
+    Ok(ScanOutcome { items: images, removed_ids: stale_ids })
 }
 
 /// 要不要重新探测：库里没有这条、探测过但没拿到尺寸、或文件大小变了。

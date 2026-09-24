@@ -30,6 +30,15 @@ pub struct Image {
     pub modified_at: Option<String>,
 }
 
+/// 一次扫描的增量结果：前端就地合并这两份数据，不必再整库重拉一次几十 MB
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanOutcome<T> {
+    /// 本轮新增或元数据刷新过的条目（已是落库后的最终值）
+    pub items: Vec<T>,
+    /// 本轮判定为"磁盘上已不存在"并从库里清掉的 id
+    pub removed_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchProgress {
     pub id: String,

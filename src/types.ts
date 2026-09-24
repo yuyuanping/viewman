@@ -26,6 +26,12 @@ export interface Image {
 
 export type MediaKind = "video" | "image";
 
+/** 一次扫描的增量结果：items 覆盖/追加，removed_ids 剔除，两边都空说明这轮没变化 */
+export interface ScanOutcome<T> {
+  items: T[];
+  removed_ids: string[];
+}
+
 export interface WatchProgress {
   id: string;
   video_id: string;
