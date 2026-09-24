@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { VideoGrid } from "./components/VideoGrid";
@@ -103,6 +104,19 @@ function App() {
   useEffect(() => {
     void refreshScanRoots();
   }, [refreshScanRoots]);
+
+  // 目录监视自动扫描完成广播：后台重扫了哪个库就刷新哪个库
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listen<string>("library-changed", (e) => {
+      const kind = e.payload;
+      if (kind === "video") void loadVideos();
+      else if (kind === "image") void loadImages();
+    }).then(fn => { if (disposed) fn(); else unlisten = fn; })
+      .catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, [loadVideos, loadImages]);
 
   /** 移除目录：只清除应用内的记录与封面缓存，磁盘文件保持原样 */
   const handleRemoveRoot = useCallback(async (dir: string) => {

@@ -25,3 +25,4 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 winreg = "0.52"
 trash = "3"
+notify = "6"

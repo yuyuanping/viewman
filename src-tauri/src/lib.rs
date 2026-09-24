@@ -3,6 +3,7 @@ mod db;
 mod models;
 mod potplayer;
 mod scanner;
+mod watcher;
 
 use commands::AppState;
 use db::init_db;
@@ -26,6 +27,8 @@ pub fn run() {
             app.manage(AppState {
                 db: std::sync::Mutex::new(conn),
             });
+            // 扫描根目录监视：文件变化防抖后自动增量扫描（失败不影响手动扫描）
+            watcher::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
