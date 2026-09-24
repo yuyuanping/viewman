@@ -1,5 +1,6 @@
 import type { Video } from "../types";
 import { VideoCard } from "./VideoCard";
+import { useGridWindow } from "../hooks/useGridWindow";
 
 interface VideoGridProps {
   videos: Video[];
@@ -17,6 +18,11 @@ interface VideoGridProps {
 }
 
 export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, duplicateIds, selectMode, selectedIds, onToggleSelect, onPlay, onDeleted, onMoved }: VideoGridProps) {
+  // 与 CSS .video-tiles 的 minmax/gap 对齐；900px 断点换成窄屏值
+  const isNarrow = typeof window !== "undefined" && window.innerWidth <= 900;
+  const { onScroll, viewportRef, probeRef, slice, padTop, padBottom } =
+    useGridWindow(videos.length, isNarrow ? 170 : 200, isNarrow ? 14 : 20);
+
   if (videos.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -29,10 +35,25 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
     );
   }
 
+  const [start, end] = slice;
+
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
+      {/* 探针卡：绝对定位到屏外，量真实高度；不在网格内占位 */}
+      <div ref={probeRef} className="absolute overflow-hidden pointer-events-none" style={{ width: 200, left: -9999, top: 0 }} aria-hidden="true">
+        <div className="video-tiles" style={{ display: "grid", gridTemplateColumns: "200px" }}>
+          <VideoCard
+            video={videos[0]}
+            progress={progressMap[videos[0].id] ?? null}
+            onPlay={() => undefined}
+            onDeleted={() => undefined}
+            onMoved={() => undefined}
+          />
+        </div>
+      </div>
       <div className="video-tiles">
-        {videos.map(video => (
+        {padTop > 0 && <div style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
+        {videos.slice(start, end).map(video => (
           <VideoCard
             key={video.id}
             video={video}
@@ -49,6 +70,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
             onMoved={onMoved}
           />
         ))}
+        {padBottom > 0 && <div style={{ height: padBottom, gridColumn: "1 / -1" }} aria-hidden="true" />}
       </div>
     </div>
   );

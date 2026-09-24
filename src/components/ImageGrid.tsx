@@ -1,5 +1,6 @@
 import type { Image } from "../types";
 import { ImageCard } from "./ImageCard";
+import { useGridWindow } from "../hooks/useGridWindow";
 
 interface ImageGridProps {
   images: Image[];
@@ -16,6 +17,11 @@ interface ImageGridProps {
 }
 
 export function ImageGrid({ images, duplicateIds, similarIds, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved }: ImageGridProps) {
+  // 与 CSS .image-tiles 的 minmax/gap 对齐；900px 断点换窄屏值
+  const isNarrow = typeof window !== "undefined" && window.innerWidth <= 900;
+  const { onScroll, viewportRef, probeRef, slice, padTop, padBottom } =
+    useGridWindow(images.length, isNarrow ? 120 : 150, isNarrow ? 10 : 14);
+
   if (images.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -37,10 +43,24 @@ export function ImageGrid({ images, duplicateIds, similarIds, selectMode, select
     );
   }
 
+  const [start, end] = slice;
+
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
+      {/* 探针卡：绝对定位到屏外，量真实高度；不在网格内占位 */}
+      <div ref={probeRef} className="absolute overflow-hidden pointer-events-none" style={{ width: 150, left: -9999, top: 0 }} aria-hidden="true">
+        <div className="image-tiles" style={{ display: "grid", gridTemplateColumns: "150px" }}>
+          <ImageCard
+            image={images[0]}
+            onOpen={() => undefined}
+            onDeleted={() => undefined}
+            onMoved={() => undefined}
+          />
+        </div>
+      </div>
       <div className="image-tiles">
-        {images.map(image => (
+        {padTop > 0 && <div style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
+        {images.slice(start, end).map(image => (
           <ImageCard
             key={image.id}
             image={image}
@@ -54,6 +74,7 @@ export function ImageGrid({ images, duplicateIds, similarIds, selectMode, select
             onMoved={onMoved}
           />
         ))}
+        {padBottom > 0 && <div style={{ height: padBottom, gridColumn: "1 / -1" }} aria-hidden="true" />}
       </div>
     </div>
   );
