@@ -2,9 +2,11 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { VideoGrid } from "./components/VideoGrid";
+import { ImageLibrary } from "./components/ImageLibrary";
 import { PlayerView } from "./components/PlayerView";
 import { SearchBar } from "./components/SearchBar";
 import { useVideos } from "./hooks/useVideos";
+import { useImages } from "./hooks/useImages";
 import { usePlayer } from "./hooks/usePlayer";
 import { usePotPlayer } from "./hooks/usePotPlayer";
 import { useToasts } from "./hooks/useToasts";
@@ -14,18 +16,36 @@ import { useHevcConversion } from "./hooks/useHevcConversion";
 import { useDuplicates } from "./hooks/useDuplicates";
 import { useFileCheck } from "./hooks/useFileCheck";
 import { api } from "./api";
-import type { Video } from "./types";
-import { filterVideos, filterByWatchState, sortVideos, selectedDirectoryLabel } from "./libraryFilter";
+import { loadScanRoots } from "./scanRootStore";
+import { countUnderDir, isUnderDir } from "./scanRoots";
+import type { MediaKind, Video } from "./types";
 import type { SortField, SortDirection, WatchState } from "./libraryFilter";
+import { filterMedia, filterByWatchState, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
 import { ToastLayer } from "./components/Toast";
 
 const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
+const TAB_PREF_KEY = "viewman.mediaTab";
 
 function App() {
   const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus } = useVideos();
+  const {
+    images, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
+    rescanStatus: imagesRescanStatus, scanDirectory: scanImageDirectory, loadImages, initialRun: loadImageLibrary,
+  } = useImages();
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer();
   const { launch: launchInPotPlayer, error: potPlayerError, clearError: clearPotPlayerError } = usePotPlayer(saveProgress);
+
+  const [tab, setTab] = useState<MediaKind>(() => (localStorage.getItem(TAB_PREF_KEY) === "image" ? "image" : "video"));
+  const changeTab = useCallback((next: MediaKind) => {
+    setTab(next);
+    localStorage.setItem(TAB_PREF_KEY, next);
+  }, []);
+  const [selectedImageDir, setSelectedImageDir] = useState<string | null>(null);
+
+  useEffect(() => {
+    void loadImageLibrary();
+  }, [loadImageLibrary]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedDir, setSelectedDir] = useState<string | null>(null);
@@ -44,7 +64,12 @@ function App() {
 
   const { toasts, notify, dismiss } = useToasts();
   const { scanProgress, resetScanProgress } = useScanProgress(rescanStatus, setNotice);
-  const { thumbProgress, generating, generateAll: handleGenerateThumbnails } = useThumbnailGeneration(videos, loadVideos, notify);
+  const { scanProgress: imageScanProgress, resetScanProgress: resetImageScanProgress } =
+    useScanProgress(imagesRescanStatus, setNotice, "image-scan-progress");
+  const { thumbProgress, generating, generateAll: handleGenerateThumbnails } = useThumbnailGeneration(
+    videos, loadVideos, notify,
+    { generate: api.generateThumbnails, event: "thumbnail-progress", unit: "视频" },
+  );
   const {
     hevcCount, hevcDetected, detecting: detectingHevc, detectProgress: hevcDetectProgress, detect: handleDetectHevc,
     converting: convertingHevc, convert: handleConvertHevc, hevcProgress, clearDetected: clearHevc,
@@ -53,7 +78,7 @@ function App() {
     duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
     detecting: detectingDuplicates, detect: handleDetectDuplicates,
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
-  } = useDuplicates(loadVideos, notify);
+  } = useDuplicates(loadVideos, notify, { detect: api.findDuplicateVideos, remove: api.deleteVideo, unit: "视频" });
   const {
     missingIds, clearMissing,
     fakeIds, clearFake, convertFakes, converting,
@@ -61,12 +86,69 @@ function App() {
     checkProgress, checking, checkFiles: handleCheckFiles,
   } = useFileCheck(videos, setNotice, loadVideos);
 
+  // 侧栏"扫描目录"清单：只看当前标签页那一份，扫描或移除之后要重新读
+  const [scanRoots, setScanRoots] = useState<string[]>([]);
+  const [removingRoot, setRemovingRoot] = useState(false);
+  const refreshScanRoots = useCallback(async () => {
+    setScanRoots(await loadScanRoots(tab));
+  }, [tab]);
+
+  useEffect(() => {
+    void refreshScanRoots();
+  }, [refreshScanRoots]);
+
+  /** 移除目录：只清除应用内的记录与封面缓存，磁盘文件保持原样 */
+  const handleRemoveRoot = useCallback(async (dir: string) => {
+    const kind = tab;
+    const count = countUnderDir(kind === "image" ? images : videos, dir);
+    const detail = count > 0
+      ? `将清除该目录下 ${count} 个条目的库内记录（磁盘上的文件不会被删除），并停止自动扫描。`
+      : "库内没有挂在它下面的条目，将只停止自动扫描。";
+    if (!confirm(`移除目录？\n${dir}\n\n${detail}`)) return;
+    setRemovingRoot(true);
+    try {
+      const removed = await api.removeMediaDirectory(kind, dir);
+      if (selectedDir && isUnderDir(selectedDir, dir)) setSelectedDir(null);
+      if (selectedImageDir && isUnderDir(selectedImageDir, dir)) setSelectedImageDir(null);
+      await (kind === "image" ? loadImages() : loadVideos());
+      await refreshScanRoots();
+      notify(removed > 0 ? `已移除 ${removed} 条记录，文件仍在磁盘上` : "已停止扫描该目录");
+    } finally {
+      setRemovingRoot(false);
+    }
+  }, [tab, images, videos, selectedDir, selectedImageDir, loadImages, loadVideos, refreshScanRoots, notify]);
+
   const handleScan = useCallback(async (dir: string) => {
     resetScanProgress();
     setNotice(null);
-    try { await scanDirectory(dir); }
-    finally { resetScanProgress(); }
-  }, [scanDirectory, resetScanProgress]);
+    try {
+      await scanDirectory(dir);
+      await refreshScanRoots();
+    } finally {
+      resetScanProgress();
+    }
+  }, [scanDirectory, resetScanProgress, refreshScanRoots]);
+
+  const handleImageScan = useCallback(async (dir: string) => {
+    resetImageScanProgress();
+    setNotice(null);
+    try {
+      await scanImageDirectory(dir);
+      await refreshScanRoots();
+    } finally {
+      resetImageScanProgress();
+    }
+  }, [scanImageDirectory, resetImageScanProgress, refreshScanRoots]);
+
+  // 图片库空列表里的扫描入口：自己弹目录选择器
+  const handlePickImageDirectory = useCallback(async () => {
+    try {
+      const dir = await open({ directory: true, multiple: false, title: "选择图片目录" });
+      if (dir) await handleImageScan(dir);
+    } catch (e) {
+      notify(`无法扫描目录：${String(e)}`, "error");
+    }
+  }, [handleImageScan, notify]);
 
   const togglePotPlayer = useCallback(() => {
     setUseExternalPlayer((prev) => {
@@ -101,9 +183,9 @@ function App() {
   );
 
   const filteredVideos = useMemo(() => {
-    const matched = filterVideos(videos, selectedDir, searchQuery);
+    const matched = filterMedia(videos, selectedDir, searchQuery);
     const byWatchState = filterByWatchState(matched, progressMap, (v) => v.id, watchState);
-    return sortVideos(byWatchState, sortField, sortDirection);
+    return sortMedia(byWatchState, sortField, sortDirection);
   }, [videos, selectedDir, searchQuery, progressMap, watchState, sortField, sortDirection]);
 
   // 筛选条件一变，之前勾选但已不在视图里的项不再可见，直接清空选择避免"隐形删除"
@@ -148,6 +230,36 @@ function App() {
     await loadVideos();
     notify(failed > 0 ? `已删除 ${ok} 个，${failed} 个失败（可能被占用）` : `已将 ${ok} 个视频移入回收站。`, failed > 0 ? "error" : "info");
     setDeletingSelected(false);
+  }, [selectedIds, loadVideos, notify]);
+
+  // 多选批量移动：选目录后逐个 move，失败只计数不中断（被占用的文件跳过）
+  const [movingSelected, setMovingSelected] = useState(false);
+  const handleMoveSelected = useCallback(async () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    let dir: string | null;
+    try {
+      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
+    } catch {
+      return;
+    }
+    if (!dir) return;
+    if (!confirm(`将选中的 ${ids.length} 个视频移动到:\n${dir}`)) return;
+    setMovingSelected(true);
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await api.moveVideo(id, dir);
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setSelectedIds(new Set());
+    await loadVideos();
+    notify(failed > 0 ? `已移动 ${ok} 个，${failed} 个失败（可能被占用或目标重名冲突）` : `已将 ${ok} 个视频移动到目标文件夹。`, failed > 0 ? "error" : "info");
+    setMovingSelected(false);
   }, [selectedIds, loadVideos, notify]);
 
   // 从库/侧栏打开视频：以当前列表为快照固定下来；当前视频不在其中则补到最前
@@ -233,9 +345,14 @@ function App() {
     loadVideos();
   }, [currentVideo, openPlayer, progressMap, loadVideos]);
 
+  const activeError = tab === "image" ? imagesError : libraryError;
+  const clearActiveError = tab === "image" ? clearImagesError : clearLibraryError;
+
   return (
     <div className="library-shell h-screen w-screen flex text-white overflow-hidden">
       <Sidebar
+        tab={tab}
+        onTabChange={changeTab}
         videos={videos}
         recentlyPlayed={recentlyPlayed}
         selectedDir={selectedDir}
@@ -247,13 +364,22 @@ function App() {
         rescanStatus={rescanStatus}
         usePotPlayer={useExternalPlayer}
         onTogglePotPlayer={togglePotPlayer}
+        images={images}
+        selectedImageDir={selectedImageDir}
+        onSelectImageDir={setSelectedImageDir}
+        onScanImageDirectory={handleImageScan}
+        imageLoading={imagesLoading}
+        imageScanProgress={imageScanProgress}
+        imageRescanStatus={imagesRescanStatus}
+        roots={scanRoots}
+        removingRoot={removingRoot}
+        onRemoveRoot={handleRemoveRoot}
       />
       <main className="library-main flex-1 flex flex-col gap-5 overflow-hidden">
-        <SearchBar value={searchQuery} onChange={setSearchQuery} total={filteredVideos.length} />
-        {(libraryError || notice) && (
+        {(activeError || notice) && (
           <div role="alert" className="bg-amber-900/80 text-amber-100 px-3 py-2 rounded text-sm flex justify-between items-center">
-            <span>{libraryError || notice}</span>
-            <button onClick={() => { clearLibraryError(); clearNotice(); }} aria-label="关闭提示" className="hover:text-white ml-2 shrink-0">✕</button>
+            <span>{activeError || notice}</span>
+            <button onClick={() => { clearActiveError(); clearNotice(); }} aria-label="关闭提示" className="hover:text-white ml-2 shrink-0">✕</button>
           </div>
         )}
         {potPlayerError && (
@@ -262,61 +388,76 @@ function App() {
             <button onClick={clearPotPlayerError} className="text-red-300 hover:text-white ml-2">✕</button>
           </div>
         )}
-        <div className="flex justify-between items-center text-xs text-gray-400 shrink-0"><span className="truncate" title={selectedDir || "所有视频"}>{selectedDirectoryLabel(selectedDir)}</span><span className="ml-3 shrink-0">{searchQuery ? "搜索结果" : "本地媒体"}</span></div>
-        <LibraryToolbar
-          sortField={sortField}
-          sortDirection={sortDirection}
-          onSortFieldChange={setSortField}
-          onToggleDirection={toggleSortDirection}
-          watchState={watchState}
-          onWatchStateChange={setWatchState}
-          onCheckFiles={handleCheckFiles}
-          checking={checking}
-          checkProgress={checkProgress}
-          missingCount={missingIds.size}
-          onClearMissing={clearMissing}
-          fakeCount={fakeIds.size}
-          onConvertFakes={convertFakes}
-          onClearFakes={clearFake}
-          convertingFakes={converting}
-          shortCount={shortIds.size}
-          onConvertShorts={convertShorts}
-          convertingShorts={convertingShorts}
-          shortsDetected={shortsDetected}
-          onDetectShorts={detectShorts}
-          detectingShorts={detecting}
-          onClearShorts={clearShorts}
-          onGenerateThumbnails={handleGenerateThumbnails}
-          generating={generating}
-          thumbProgress={thumbProgress}
-          withoutThumbnailCount={withoutThumbnailCount}
-          onDetectHevc={handleDetectHevc}
-          detectingHevc={detectingHevc}
-          hevcDetectProgress={hevcDetectProgress}
-          hevcDetected={hevcDetected}
-          hevcCount={hevcCount}
-          onConvertHevc={handleConvertHevc}
-          convertingHevc={convertingHevc}
-          hevcProgress={hevcProgress}
-          onClearHevc={clearHevc}
-          onDetectDuplicates={handleDetectDuplicates}
-          detectingDuplicates={detectingDuplicates}
-          duplicatesDetected={duplicatesDetected}
-          duplicateGroupCount={duplicateGroupCount}
-          duplicateExtrasCount={duplicateExtrasCount}
-          onDeleteDuplicates={handleDeleteDuplicates}
-          deletingDuplicates={deletingDuplicates}
-          onClearDuplicates={clearDuplicates}
-          selectMode={selectMode}
-          selectedCount={selectedIds.size}
-          allSelected={allSelected}
-          onEnterSelect={() => setSelectMode(true)}
-          onToggleSelectAll={toggleSelectAll}
-          onDeleteSelected={handleDeleteSelected}
-          deletingSelected={deletingSelected}
-          onExitSelect={exitSelectMode}
-        />
-        <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} />
+        {tab === "image" ? (
+          <ImageLibrary
+            images={images}
+            selectedDir={selectedImageDir}
+            reloadImages={loadImages}
+            onScanDirectory={handlePickImageDirectory}
+            notify={notify}
+          />
+        ) : (
+          <>
+            <SearchBar value={searchQuery} onChange={setSearchQuery} total={filteredVideos.length} title="视频库" unit="视频" />
+            <div className="flex justify-between items-center text-xs text-gray-400 shrink-0"><span className="truncate" title={selectedDir || "所有视频"}>{selectedDirectoryLabel(selectedDir)}</span><span className="ml-3 shrink-0">{searchQuery ? "搜索结果" : "本地媒体"}</span></div>
+            <LibraryToolbar
+              sortField={sortField}
+              sortDirection={sortDirection}
+              onSortFieldChange={setSortField}
+              onToggleDirection={toggleSortDirection}
+              watchState={watchState}
+              onWatchStateChange={setWatchState}
+              onCheckFiles={handleCheckFiles}
+              checking={checking}
+              checkProgress={checkProgress}
+              missingCount={missingIds.size}
+              onClearMissing={clearMissing}
+              fakeCount={fakeIds.size}
+              onConvertFakes={convertFakes}
+              onClearFakes={clearFake}
+              convertingFakes={converting}
+              shortCount={shortIds.size}
+              onConvertShorts={convertShorts}
+              convertingShorts={convertingShorts}
+              shortsDetected={shortsDetected}
+              onDetectShorts={detectShorts}
+              detectingShorts={detecting}
+              onClearShorts={clearShorts}
+              onGenerateThumbnails={handleGenerateThumbnails}
+              generating={generating}
+              thumbProgress={thumbProgress}
+              withoutThumbnailCount={withoutThumbnailCount}
+              onDetectHevc={handleDetectHevc}
+              detectingHevc={detectingHevc}
+              hevcDetectProgress={hevcDetectProgress}
+              hevcDetected={hevcDetected}
+              hevcCount={hevcCount}
+              onConvertHevc={handleConvertHevc}
+              convertingHevc={convertingHevc}
+              hevcProgress={hevcProgress}
+              onClearHevc={clearHevc}
+              onDetectDuplicates={handleDetectDuplicates}
+              detectingDuplicates={detectingDuplicates}
+              duplicatesDetected={duplicatesDetected}
+              duplicateGroupCount={duplicateGroupCount}
+              duplicateExtrasCount={duplicateExtrasCount}
+              onDeleteDuplicates={handleDeleteDuplicates}
+              deletingDuplicates={deletingDuplicates}
+              onClearDuplicates={clearDuplicates}
+              selectMode={selectMode}
+              selectedCount={selectedIds.size}
+              allSelected={allSelected}
+              onEnterSelect={() => setSelectMode(true)}
+              onToggleSelectAll={toggleSelectAll}
+              onDeleteSelected={handleDeleteSelected}
+              deletingSelected={deletingSelected}
+              onMoveSelected={handleMoveSelected}
+              movingSelected={movingSelected}
+              onExitSelect={exitSelectMode}
+            />
+            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} />
+          </>
+        )}
       </main>
       {!useExternalPlayer && currentVideo && (
         <PlayerView

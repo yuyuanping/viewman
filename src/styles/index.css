@@ -101,6 +101,31 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 }
 .media-context-menu button:hover { background: #788cff33; }
 
+/* 视频库 / 图片库切换 */
+.media-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #182231b3; border: 1px solid #ffffff10; }
+.media-tab {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 6px 8px; border-radius: 9px; font-size: 13px; color: #9baac0;
+  background: none; border: 0; transition: background .15s, color .15s;
+}
+.media-tab:hover { color: #e6ecf5; background: #ffffff0d; }
+.media-tab-active, .media-tab-active:hover { background: #5268dc; color: #fff; }
+.media-tab-count { font-size: 11px; opacity: .75; font-variant-numeric: tabular-nums; }
+
+/* 图片磁贴：正方形密集排布，缩略图缺失时直接引用原图 */
+.image-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; padding: 3px 3px 20px; }
+.image-card { position: relative; min-width: 0; overflow: hidden; border-radius: 12px; border: 1px solid #ffffff0c; background: #151f2e; transition: border-color .18s, background .18s; }
+.image-card:hover, .image-card:focus-within { border-color: #788cff80; background: #1b293d; }
+.image-preview { aspect-ratio: 1/1; position: relative; display: flex; align-items: center; justify-content: center; background: #0f1723; overflow: hidden; }
+.image-duplicate { border-color: #991b1baa; }
+
+/* 图片查看器：margin:auto 让放大后的溢出部分仍可滚动到边缘；画布包一层定尺寸 div 承接滚动 */
+.image-viewer { background: rgba(4, 7, 13, .96); }
+.image-viewer-stage { display: flex; overflow: auto; padding: 0 28px; min-height: 0; }
+.image-viewer-canvas { position: relative; margin: auto; flex: none; }
+.image-viewer-canvas img { position: absolute; left: 50%; top: 50%; max-width: none; max-height: none; }
+.image-viewer-stage img { user-select: none; -webkit-user-drag: none; }
+
 /* 播放器右侧视频列表 */
 .player-playlist { width: 288px; scrollbar-width: thin; scrollbar-color: #ffffff2b transparent; }
 .player-playlist::-webkit-scrollbar { width: 8px; }
@@ -146,5 +171,5 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 .player-progress input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; }
 .player-progress .player-fill { transition: width .12s linear; }
 .player-play { line-height: 1; }
-@media (max-width: 900px) { .library-sidebar { width: 220px; } .library-main { padding: 18px; } .video-tiles { gap: 14px; grid-template-columns: repeat(auto-fill,minmax(170px,1fr)); } }
+@media (max-width: 900px) { .library-sidebar { width: 220px; } .library-main { padding: 18px; } .video-tiles { gap: 14px; grid-template-columns: repeat(auto-fill,minmax(170px,1fr)); } .image-tiles { gap: 10px; grid-template-columns: repeat(auto-fill,minmax(120px,1fr)); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }

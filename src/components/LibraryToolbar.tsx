@@ -52,6 +52,8 @@ interface LibraryToolbarProps {
   onToggleSelectAll: () => void;
   onDeleteSelected: () => void;
   deletingSelected: boolean;
+  onMoveSelected: () => void;
+  movingSelected: boolean;
   onExitSelect: () => void;
 }
 
@@ -120,6 +122,8 @@ export function LibraryToolbar({
   onToggleSelectAll,
   onDeleteSelected,
   deletingSelected,
+  onMoveSelected,
+  movingSelected,
   onExitSelect,
 }: LibraryToolbarProps) {
   return (
@@ -303,12 +307,21 @@ export function LibraryToolbar({
             type="button"
             className="toolbar-chip"
             onClick={onDeleteSelected}
-            disabled={deletingSelected || selectedCount === 0}
+            disabled={deletingSelected || movingSelected || selectedCount === 0}
             title="将选中的视频移入回收站"
           >
             {deletingSelected ? "删除中…" : `删除所选 (${selectedCount})`}
           </button>
-          <button type="button" className="toolbar-chip" onClick={onExitSelect} disabled={deletingSelected} title="退出多选模式">
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={onMoveSelected}
+            disabled={deletingSelected || movingSelected || selectedCount === 0}
+            title="将选中的视频移动到指定文件夹"
+          >
+            {movingSelected ? "移动中…" : "移动所选"}
+          </button>
+          <button type="button" className="toolbar-chip" onClick={onExitSelect} disabled={deletingSelected || movingSelected} title="退出多选模式">
             退出
           </button>
         </>
