@@ -17,8 +17,8 @@ interface VideoCardProps {
   selected?: boolean;
   onToggleSelect?: (video: Video) => void;
   onPlay: (video: Video) => void;
-  onDeleted: () => void;
-  onMoved: () => void;
+  onDeleted: (videoId: string) => void;
+  onMoved: (videoId: string, newPath: string) => void;
 }
 
 export function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, selectMode = false, selected = false, onToggleSelect, onPlay, onDeleted, onMoved }: VideoCardProps) {
@@ -54,8 +54,8 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
     if (!confirm(`确定要删除 "${video.filename}" 到回收站？`)) return;
     setDeleting(true);
     try {
-      await api.deleteVideo(video.id);
-      onDeleted();
+      const deleted = await api.deleteVideos([video.id]);
+      if (deleted.length > 0) onDeleted(video.id);
     } catch (err) {
       alert("删除失败: " + err);
       setDeleting(false);
@@ -74,8 +74,8 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
     if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return;
     setMoving(true);
     try {
-      await api.moveVideo(video.id, dir);
-      onMoved();
+      const newPath = await api.moveVideo(video.id, dir);
+      onMoved(video.id, newPath);
     } catch (err) {
       alert("移动失败: " + err);
     } finally {

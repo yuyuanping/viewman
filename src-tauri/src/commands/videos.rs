@@ -8,7 +8,7 @@ use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
 use super::thumbnails::clear_thumbnail_cache;
-use super::AppState;
+use super::{undeleted_targets, AppState};
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
 fn sniff_image_format(header: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -98,31 +98,48 @@ pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<Vide
     }
 }
 
+/// 批量删除视频：一次回收站事务 + 一次数据库事务，返回成功删除的 id。
+/// 与图片库同一条通路，勾选几十个不再逐个过桥。
 #[tauri::command]
-pub fn delete_video(
+pub async fn delete_videos(
     app: tauri::AppHandle,
-    state: State<AppState>,
-    video_id: String,
-) -> Result<(), String> {
-    let path = {
+    state: State<'_, AppState>,
+    video_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let targets: Vec<(String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_video_path(&conn, &video_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Video not found: {}", video_id))?
+        let mut out = Vec::with_capacity(video_ids.len());
+        for video_id in &video_ids {
+            let path = db::get_video_path(&conn, video_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Video not found: {}", video_id))?;
+            out.push((video_id.clone(), path));
+        }
+        out
     };
 
-    // 文件已被外部删除时 trash::delete 会失败，但库记录必须能删掉，否则残留显示
-    if Path::new(&path).exists() {
-        trash::delete(&path).map_err(|e| format!("删除文件失败: {}", e))?;
-    }
+    let for_files = targets.clone();
+    let survivors = tauri::async_runtime::spawn_blocking(move || undeleted_targets(&for_files))
+        .await
+        .map_err(|e| e.to_string())?;
+    let failed: std::collections::HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
+    let deleted: Vec<String> = targets
+        .iter()
+        .filter(|(id, _)| !failed.contains(id))
+        .map(|(id, _)| id.clone())
+        .collect();
 
-    {
+    if !deleted.is_empty() {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::delete_video(&conn, &video_id).map_err(|e| e.to_string())?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        db::delete_videos_by_ids(&tx, &deleted).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        for id in &deleted {
+            clear_thumbnail_cache(&app, id);
+        }
     }
 
-    clear_thumbnail_cache(&app, &video_id);
-    Ok(())
+    Ok(deleted)
 }
 
 /// 把"内容实为图片"的假视频转换成图片：按真实格式另存为 .jpg/.png 等新文件，

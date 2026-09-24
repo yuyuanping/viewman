@@ -50,7 +50,7 @@ pub fn run() {
             commands::check_ffprobe,
             commands::load_scan_roots,
             commands::save_scan_roots,
-            commands::delete_video,
+            commands::delete_videos,
             commands::move_video,
             commands::check_potplayer,
             commands::launch_potplayer,

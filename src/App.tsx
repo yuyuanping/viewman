@@ -30,7 +30,7 @@ const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
 const TAB_PREF_KEY = "viewman.mediaTab";
 
 function App() {
-  const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus } = useVideos();
+  const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus, dropLocally: dropVideosLocally, retargetLocally: retargetVideosLocally } = useVideos();
   const {
     images, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
     rescanStatus: imagesRescanStatus, scanDirectory: scanImageDirectory, loadImages, initialRun: loadImageLibrary,
@@ -83,20 +83,13 @@ function App() {
     hevcCount, hevcDetected, detecting: detectingHevc, detectProgress: hevcDetectProgress, detect: handleDetectHevc,
     converting: convertingHevc, convert: handleConvertHevc, hevcProgress, clearDetected: clearHevc,
   } = useHevcConversion(loadVideos, notify);
-  /** 视频侧没有批量删除命令：逐张删完再整库重拉（图片库走批量 + 本地剔除） */
+  /** 一批视频进回收站，返回真正删掉的 id 并同步本地清单（与图片库同一条通路） */
   const trashVideos = useCallback(async (ids: string[]) => {
-    const deleted: string[] = [];
-    for (const id of ids) {
-      try {
-        await api.deleteVideo(id);
-        deleted.push(id);
-      } catch {
-        // 被占用的文件删不掉，留给调用方按 failed 计数
-      }
-    }
-    await loadVideos();
+    if (ids.length === 0) return [];
+    const deleted = await api.deleteVideos(ids);
+    dropVideosLocally(deleted);
     return deleted;
-  }, [loadVideos]);
+  }, [dropVideosLocally]);
   const {
     duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
     detecting: detectingDuplicates, detect: handleDetectDuplicates,
@@ -259,20 +252,16 @@ function App() {
     if (!confirm(`确定将选中的 ${ids.length} 个视频移入回收站？`)) return;
     setDeletingSelected(true);
     let ok = 0;
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        await api.deleteVideo(id);
-        ok += 1;
-      } catch {
-        failed += 1;
-      }
+    try {
+      ok = (await trashVideos(ids)).length;
+    } catch (e) {
+      notify(`删除失败：${String(e)}`, "error");
     }
+    const failed = ids.length - ok;
     setSelectedIds(new Set());
-    await loadVideos();
     notify(failed > 0 ? `已删除 ${ok} 个，${failed} 个失败（可能被占用）` : `已将 ${ok} 个视频移入回收站。`, failed > 0 ? "error" : "info");
     setDeletingSelected(false);
-  }, [selectedIds, loadVideos, notify]);
+  }, [selectedIds, trashVideos, notify]);
 
   // 多选批量移动：选目录后逐个 move，失败只计数不中断（被占用的文件跳过）
   const [movingSelected, setMovingSelected] = useState(false);
@@ -288,21 +277,21 @@ function App() {
     if (!dir) return;
     if (!confirm(`将选中的 ${ids.length} 个视频移动到:\n${dir}`)) return;
     setMovingSelected(true);
-    let ok = 0;
+    const moved: Array<[string, string]> = [];
     let failed = 0;
     for (const id of ids) {
       try {
-        await api.moveVideo(id, dir);
-        ok += 1;
+        moved.push([id, await api.moveVideo(id, dir)]);
       } catch {
         failed += 1;
       }
     }
+    retargetVideosLocally(moved);
     setSelectedIds(new Set());
-    await loadVideos();
+    const ok = moved.length;
     notify(failed > 0 ? `已移动 ${ok} 个，${failed} 个失败（可能被占用或目标重名冲突）` : `已将 ${ok} 个视频移动到目标文件夹。`, failed > 0 ? "error" : "info");
     setMovingSelected(false);
-  }, [selectedIds, loadVideos, notify]);
+  }, [selectedIds, retargetVideosLocally, notify]);
 
   // 从库/侧栏打开视频：以当前列表为快照固定下来；当前视频不在其中则补到最前
   const openFromLibrary = useCallback((video: Video, position?: number) => {
@@ -345,10 +334,15 @@ function App() {
 
   const handlePlaylistDelete = useCallback(async (video: Video) => {
     if (!confirm(`确定要删除 "${video.filename}" 到回收站？`)) return;
+    let deleted: string[];
     try {
-      await api.deleteVideo(video.id);
+      deleted = await trashVideos([video.id]);
     } catch (e) {
       alert(`删除失败：${String(e)}`);
+      return;
+    }
+    if (deleted.length === 0) {
+      alert("删除失败：文件可能被占用");
       return;
     }
     const list = playlist ?? filteredVideos;
@@ -365,8 +359,7 @@ function App() {
     } else if (playlist) {
       setPlaylist(remaining);
     }
-    loadVideos();
-  }, [playlist, filteredVideos, currentVideo, progressMap, openPlayer, handleClosePlayer, loadVideos]);
+  }, [playlist, filteredVideos, currentVideo, progressMap, openPlayer, handleClosePlayer, trashVideos]);
 
   // 播放列表内移动：更新快照路径；若是当前播放项则按新路径从上次进度重新挂载
   const handlePlaylistMove = useCallback(async (video: Video) => {
@@ -391,8 +384,8 @@ function App() {
     if (currentVideo?.id === video.id) {
       openPlayer(moved, progressMap[video.id] ?? 0);
     }
-    loadVideos();
-  }, [currentVideo, openPlayer, progressMap, loadVideos]);
+    retargetVideosLocally([[video.id, newPath]]);
+  }, [currentVideo, openPlayer, progressMap, retargetVideosLocally]);
 
   const activeError = tab === "image" ? imagesError : libraryError;
   const clearActiveError = tab === "image" ? clearImagesError : clearLibraryError;
@@ -514,7 +507,7 @@ function App() {
               onRandomPick={handleRandomPick}
               onOpenHistory={() => setHistoryOpen(true)}
             />
-            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} resetKey={selectedDir} />
+            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={(videoId) => dropVideosLocally([videoId])} onMoved={(videoId, newPath) => retargetVideosLocally([[videoId, newPath]])} resetKey={selectedDir} />
           </>
         )}
       </main>

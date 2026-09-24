@@ -110,6 +110,32 @@ export function useVideos() {
     }
   }, [refresh]);
 
+  /** 删除后就地剔除本地清单：整库重拉一次要过桥几十 MB JSON，还要重建目录树 */
+  const dropLocally = useCallback((ids: Iterable<string>) => {
+    const gone = new Set(ids);
+    if (gone.size === 0) return;
+    setVideos(prev => prev.filter(video => !gone.has(video.id)));
+    setProgressMap(prev => {
+      const next = { ...prev };
+      for (const id of gone) delete next[id];
+      return next;
+    });
+    setRecentlyPlayed(prev => prev.filter(entry => !gone.has(entry.video.id)));
+  }, []);
+
+  /** 移动后就地套用后端返回的新路径。一次调用改多条：逐张 setVideos 会把整表复制 N 遍 */
+  const retargetLocally = useCallback((updates: Array<[videoId: string, newPath: string]>) => {
+    if (updates.length === 0) return;
+    const byId = new Map(updates);
+    const patch = (video: Video): Video => {
+      const next = byId.get(video.id);
+      if (next === undefined) return video;
+      return { ...video, path: next, filename: next.split(/[\\/]/).pop() ?? video.filename };
+    };
+    setVideos(prev => prev.map(patch));
+    setRecentlyPlayed(prev => prev.map(entry => ({ ...entry, video: patch(entry.video) })));
+  }, []);
+
   useEffect(() => {
     void (async () => {
       await migrateLegacyScanRoots();
@@ -119,5 +145,5 @@ export function useVideos() {
   }, [loadVideos, rescanAll]);
 
   const clearError = useCallback(() => setError(null), []);
-  return { videos, progressMap, recentlyPlayed, loading, error, rescanStatus, clearError, scanDirectory, saveProgress, loadVideos };
+  return { videos, progressMap, recentlyPlayed, loading, error, rescanStatus, clearError, scanDirectory, saveProgress, loadVideos, dropLocally, retargetLocally };
 }

@@ -31,7 +31,8 @@ export const api = {
   convertHevcVideos: (videoIds: string[]) =>
     invoke<ConversionResult>("convert_hevc_videos", { videoIds }),
   findDuplicateVideos: () => invoke<string[][]>("find_duplicate_videos"),
-  deleteVideo: (videoId: string) => invoke<void>("delete_video", { videoId }),
+  /** 批量删除视频：一次回收站事务 + 一次库事务，返回真正删掉的 id */
+  deleteVideos: (videoIds: string[]) => invoke<string[]>("delete_videos", { videoIds }),
   moveVideo: (videoId: string, targetDir: string) =>
     invoke<string>("move_video", { videoId, targetDir }),
   generateThumbnails: (videoIds: string[]) =>
