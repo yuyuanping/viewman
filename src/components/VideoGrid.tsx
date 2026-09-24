@@ -40,7 +40,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
   return (
     <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
       <div className="video-tiles" ref={gridRef}>
-        {padTop > 0 && <div style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
+        {padTop > 0 && <div data-pad="top" style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
         {videos.slice(start, end).map(video => (
           <VideoCard
             key={video.id}
@@ -58,7 +58,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
             onMoved={onMoved}
           />
         ))}
-        {padBottom > 0 && <div style={{ height: padBottom, gridColumn: "1 / -1" }} aria-hidden="true" />}
+        {padBottom > 0 && <div data-pad="bottom" style={{ height: padBottom, gridColumn: "1 / -1" }} aria-hidden="true" />}
       </div>
     </div>
   );
