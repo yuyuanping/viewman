@@ -22,6 +22,63 @@ pub fn get_all_images(conn: &Connection) -> Result<Vec<Image>> {
     Ok(images)
 }
 
+/// 相似图检测要读的行。pHash 不进 Image 模型：19 万条清单不该为它多扛一列体积。
+pub struct PhashRow {
+    pub id: String,
+    pub path: String,
+    pub created_at: String,
+    pub modified_at: Option<String>,
+    /// 已缓存的 64 位指纹（存成有符号 INTEGER，位模式原样保留）
+    pub phash: Option<i64>,
+    /// 算这个指纹时文件的修改时间，跟当前对不上就说明图改过、缓存过期
+    pub phash_modified_at: Option<String>,
+}
+
+impl PhashRow {
+    /// 缓存能不能直接用
+    pub fn cached_hash(&self) -> Option<u64> {
+        match (self.phash, self.phash_modified_at.as_deref()) {
+            (Some(hash), cached) if cached == self.modified_at.as_deref() => Some(hash as u64),
+            _ => None,
+        }
+    }
+}
+
+pub fn get_phash_rows(conn: &Connection) -> Result<Vec<PhashRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, created_at, modified_at, phash, phash_modified_at FROM images ORDER BY created_at, id"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PhashRow {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            created_at: row.get(2)?,
+            modified_at: row.get(3)?,
+            phash: row.get(4)?,
+            phash_modified_at: row.get(5)?,
+        })
+    })?.collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 一批指纹写回库（一次事务）：(image_id, 指纹, 指纹对应的文件修改时间)
+pub fn save_image_phashes(conn: &Connection, updates: &[(String, i64, Option<String>)]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE images SET phash = ?1, phash_modified_at = ?2 WHERE id = ?3",
+        )?;
+        for (id, hash, modified_at) in updates {
+            stmt.execute(rusqlite::params![hash, modified_at, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn insert_image(conn: &Connection, image: &Image) -> Result<()> {
     conn.execute(
         "INSERT INTO images (id, path, filename, width, height, file_size, created_at, thumbnail_path, modified_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -85,6 +142,40 @@ pub fn delete_images_by_ids(conn: &Connection, ids: &[String]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::{sample_image, setup_test_db};
+
+    #[test]
+    fn test_phash_cache_expires_when_file_mtime_changes() {
+        let conn = setup_test_db();
+        let mut row = sample_image("i1", "C:/pics/a.png");
+        row.modified_at = Some("1700".to_string());
+        insert_image(&conn, &row).unwrap();
+        save_image_phashes(&conn, &[("i1".to_string(), -3_i64, Some("1700".to_string()))]).unwrap();
+
+        let rows = get_phash_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cached_hash(), Some(-3_i64 as u64));
+
+        // 重新扫描把新 mtime 写回来（upsert 不动 phash 两列），指纹就该作废重算
+        let mut edited = sample_image("i1", "C:/pics/a.png");
+        edited.modified_at = Some("1800".to_string());
+        insert_image(&conn, &edited).unwrap();
+        let rows = get_phash_rows(&conn).unwrap();
+        assert_eq!(rows[0].phash, Some(-3_i64));
+        assert_eq!(rows[0].cached_hash(), None);
+    }
+
+    #[test]
+    fn test_phash_cache_survives_rescan_of_unchanged_file() {
+        let conn = setup_test_db();
+        let mut row = sample_image("i1", "C:/pics/a.png");
+        row.modified_at = Some("1700".to_string());
+        insert_image(&conn, &row).unwrap();
+        save_image_phashes(&conn, &[("i1".to_string(), 7_i64, Some("1700".to_string()))]).unwrap();
+
+        // 同一份文件再扫一遍：mtime 没变，指纹仍然算数，不该又跑一次 ffmpeg
+        insert_image(&conn, &row).unwrap();
+        assert_eq!(get_phash_rows(&conn).unwrap()[0].cached_hash(), Some(7_u64));
+    }
 
     #[test]
     fn test_insert_and_get_images() {

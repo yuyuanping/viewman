@@ -60,9 +60,36 @@ export const api = {
   generateImageThumbnails: (imageIds: string[]) =>
     invoke<number>("generate_image_thumbnails", { imageIds }),
   findDuplicateImages: () => invoke<string[][]>("find_duplicate_images"),
-  /** 相似图检测（pHash）：找视觉近似但不完全相同的连拍/截图系列 */
-  findSimilarImages: () => invoke<string[][]>("find_similar_images"),
+  /**
+   * 相似图检测（pHash）：汉明距离 ≤ threshold 算一组。
+   * 指纹落在库里，只有新图/改过的图才重算，所以改阈值只是重新比对，几秒就回。
+   * 除了分组，还带回组内各成员的指纹（拆成两个 32 位），面板据此算"距保留张几位"。
+   */
+  findSimilarImages: (threshold: number) => invoke<SimilarResult>("find_similar_images", { threshold }),
 };
+
+/** 一张图的 64 位指纹，高低 32 位分开传（JS 位运算只有 32 位） */
+export interface SimilarHash {
+  id: string;
+  lo: number;
+  hi: number;
+}
+
+export interface SimilarResult {
+  groups: string[][];
+  /** 只含成组的图片：孤张不给，免得整库指纹白传一趟 */
+  hashes: SimilarHash[];
+}
+
+/** 后端 similar-progress 事件负载 */
+export interface SimilarProgressPayload {
+  /** 本次需要补算指纹的张数（已缓存的不计在内） */
+  processed: number;
+  total: number;
+  done: boolean;
+  /** 这一批碰到过的相似组（完整成员，重叠即视作同一组） */
+  groups: string[][];
+}
 
 /** 后端 scan-progress / image-scan-progress 事件负载（两套库共用同一形状） */
 export interface ScanProgressPayload {

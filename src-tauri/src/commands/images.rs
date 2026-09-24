@@ -402,84 +402,319 @@ pub async fn find_duplicate_images(state: State<'_, AppState>) -> Result<Vec<Vec
     Ok(groups)
 }
 
-/// 找出"相似但不相同"的图片组（连拍/截图系列）：pHash 感知哈希 + 汉明距离 ≤10 聚类。
+/// 相似图检测的进度事件负载（事件名 similar-progress）
+#[derive(Clone, serde::Serialize)]
+pub struct SimilarProgress {
+    pub processed: usize,
+    pub total: usize,
+    pub done: bool,
+    /// 这一批里被碰过的组，给的是合并后的完整成员（前端按重叠并入已有结果）
+    pub groups: Vec<Vec<String>>,
+}
+
+/// 一张成组图片的指纹：u64 拆成两个 u32，前端按 JS number 做异或数 1，不必碰 BigInt
+#[derive(Clone, serde::Serialize)]
+pub struct SimilarHit {
+    pub id: String,
+    pub lo: u32,
+    pub hi: u32,
+}
+
+/// 检测结论：分组 + 组内各成员的指纹。带上指纹，面板才能按"距保留张多远"给胖组排序
+#[derive(Clone, serde::Serialize)]
+pub struct SimilarResult {
+    pub groups: Vec<Vec<String>>,
+    pub hashes: Vec<SimilarHit>,
+}
+
+/// pHash 增量聚类：每灌进一张新图只和已收进来的图比一次，整趟代价仍是一次两两比对；
+/// 换来的是"每攒够一批就能吐出已成形的组"，前端不必等全库算完才开始审。
+/// 组件之间出现桥接时把小的并进大的（同时更新成员的归属），所以合并是平摊 O(n log n)。
+struct SimilarCluster<'a> {
+    threshold: u32,
+    hashes: Vec<u64>,
+    ids: Vec<&'a str>,
+    created: Vec<&'a str>,
+    /// 节点 → 组件槽位；组件被并掉后槽位留空，不复用，免得旧索引指到别组
+    comp_of: Vec<usize>,
+    comps: Vec<Vec<usize>>,
+    /// 指纹互不相同的代表节点：两两比对只走这张表
+    reps: Vec<usize>,
+    rep_of: HashMap<u64, usize>,
+}
+
+impl<'a> SimilarCluster<'a> {
+    fn new(threshold: u32) -> Self {
+        SimilarCluster {
+            threshold,
+            hashes: Vec::new(),
+            ids: Vec::new(),
+            created: Vec::new(),
+            comp_of: Vec::new(),
+            comps: Vec::new(),
+            reps: Vec::new(),
+            rep_of: HashMap::new(),
+        }
+    }
+
+    /// 收进一张图的哈希，返回它所在组件的槽位
+    fn add(&mut self, id: &'a str, created: &'a str, hash: u64) -> usize {
+        let node = self.hashes.len();
+        self.hashes.push(hash);
+        self.ids.push(id);
+        self.created.push(created);
+
+        // 指纹完全相同 ⇒ 距离 0，直接进那张图的组件，一次比对都不用
+        if let Some(&rep) = self.rep_of.get(&hash) {
+            let home = self.comp_of[rep];
+            self.comps[home].push(node);
+            self.comp_of.push(home);
+            return home;
+        }
+        self.rep_of.insert(hash, node);
+
+        let mut targets: Vec<usize> = Vec::new();
+        for &other in &self.reps {
+            if scanner::hamming_distance(self.hashes[other], hash) <= self.threshold {
+                let comp = self.comp_of[other];
+                if !targets.contains(&comp) {
+                    targets.push(comp);
+                }
+            }
+        }
+        self.reps.push(node);
+
+        let home = if targets.is_empty() {
+            self.comps.push(vec![node]);
+            self.comps.len() - 1
+        } else {
+            targets.sort_by_key(|&comp| std::cmp::Reverse(self.comps[comp].len()));
+            let home = targets[0];
+            for index in 1..targets.len() {
+                for member in std::mem::take(&mut self.comps[targets[index]]) {
+                    self.comp_of[member] = home;
+                    self.comps[home].push(member);
+                }
+            }
+            self.comps[home].push(node);
+            home
+        };
+        self.comp_of.push(home);
+        home
+    }
+
+    fn len_of(&self, comp: usize) -> usize {
+        self.comps[comp].len()
+    }
+
+    /// 组内按加入时间升序（首张即最早入库的原件），时间相同按 id
+    fn member_ids(&self, comp: usize) -> Vec<String> {
+        let mut members = self.comps[comp].clone();
+        members.sort_by_key(|&node| (self.created[node], self.ids[node]));
+        members.into_iter().map(|node| self.ids[node].to_string()).collect()
+    }
+
+    /// 全量结果：组员 ≥2 的组，大的排前面
+    fn groups(&self) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = (0..self.comps.len())
+            .filter(|&comp| self.comps[comp].len() > 1)
+            .map(|comp| self.member_ids(comp))
+            .collect();
+        out.sort_by_key(|group| std::cmp::Reverse(group.len()));
+        out
+    }
+
+    /// 成组图片的指纹（孤张不给，免得 19 万条清单白传一趟）
+    fn signatures(&self) -> Vec<SimilarHit> {
+        let mut out = Vec::new();
+        for comp in 0..self.comps.len() {
+            if self.comps[comp].len() < 2 {
+                continue;
+            }
+            for &node in &self.comps[comp] {
+                let hash = self.hashes[node];
+                out.push(SimilarHit {
+                    id: self.ids[node].to_string(),
+                    lo: hash as u32,
+                    hi: (hash >> 32) as u32,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// 把"这一批碰到过的组"推给前端；done 时不带成员（完整结果走命令返回值）
+fn emit_similar_progress(
+    app: &tauri::AppHandle,
+    processed: usize,
+    total: usize,
+    done: bool,
+    cluster: &SimilarCluster,
+    touched: &mut HashSet<usize>,
+) {
+    let groups: Vec<Vec<String>> = if done {
+        Vec::new()
+    } else {
+        touched.iter()
+            .filter(|&&comp| cluster.len_of(comp) > 1)
+            .map(|&comp| cluster.member_ids(comp))
+            .collect()
+    };
+    touched.clear();
+    let _ = app.emit(
+        "similar-progress",
+        SimilarProgress { processed, total, done, groups },
+    );
+}
+
+/// 找出"相似但不相同"的图片组（连拍/截图系列）：pHash 感知哈希 + 汉明距离 ≤ threshold 聚类。
 /// 与 find_duplicate_images 互补：字节级去重只认完全相同，这里抓视觉近似。
-/// 个人库数量级下直接两两比对；组内按添加时间升序（第一个视为最佳保留候选）
+/// 指纹算过一次就落在 images.phash，只有新图/改过的图才再跑 ffmpeg；已缓存的部分先聚好推出去，
+/// 剩下的边算边经 similar-progress 吐组，命令返回值是最终完整结果 + 组内各成员的指纹
+/// （指纹给前端算"距保留张 N 位"：胖组靠它把最像的排前面、把只隔几级的远亲折起来）。
 #[tauri::command]
-pub async fn find_similar_images(state: State<'_, AppState>) -> Result<Vec<Vec<String>>, String> {
-    /// 汉明距离阈值：≤10 / 64 位视为相似（业界常用 8–12）
-    const SIMILAR_THRESHOLD: u32 = 10;
+pub async fn find_similar_images(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    threshold: u32,
+) -> Result<SimilarResult, String> {
+    /// 每补算这么多张推一次进度、并把攒好的指纹落库
+    const EMIT_EVERY: usize = 256;
+    let threshold = threshold.clamp(1, 32);
 
     if !crate::scanner::ffmpeg_available() {
         return Err("未检测到 ffmpeg，无法计算图片指纹。请安装 ffmpeg 并加入 PATH。".into());
     }
 
-    let jobs: Vec<(String, String, String)> = {
+    // 文件已经不在磁盘上的条目不参与聚类，也不用再白跑一遍解码
+    let rows: Vec<db::PhashRow> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_all_images(&conn)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|i| (i.id, i.path, i.created_at))
-            .filter(|(_, p, _)| Path::new(p).exists())
-            .collect()
-    };
+        db::get_phash_rows(&conn).map_err(|e| e.to_string())?
+    }
+    .into_iter()
+    .filter(|row| Path::new(&row.path).exists())
+    .collect();
 
-    let groups = tauri::async_runtime::spawn_blocking(move || {
-        let mut hashed: Vec<(String, String, u64)> = Vec::new();
-        for (id, path, _) in &jobs {
-            if let Some(h) = crate::scanner::image_phash(path) {
-                hashed.push((id.clone(), path.clone(), h));
-            }
-        }
-        // 并查集聚类：距离 ≤ 阈值即并成一组
-        let mut parent: Vec<usize> = (0..hashed.len()).collect();
-        fn find(parent: &mut Vec<usize>, i: usize) -> usize {
-            if parent[i] != i {
-                let root = find(parent, i);
-                parent[i] = root;
-            }
-            parent[i]
-        }
-        for i in 0..hashed.len() {
-            for j in (i + 1)..hashed.len() {
-                if crate::scanner::hamming_distance(hashed[i].2, hashed[j].2) <= SIMILAR_THRESHOLD {
-                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
-                    if ri != rj {
-                        parent[ri] = rj;
-                    }
+    let result = tauri::async_runtime::spawn_blocking(move || -> SimilarResult {
+        let mut cluster = SimilarCluster::new(threshold);
+        let mut touched: HashSet<usize> = HashSet::new();
+        let mut pending: Vec<&db::PhashRow> = Vec::new();
+        for row in &rows {
+            match row.cached_hash() {
+                Some(hash) => {
+                    touched.insert(cluster.add(row.id.as_str(), row.created_at.as_str(), hash));
                 }
+                None => pending.push(row),
             }
         }
-        // 收组；加入时间映射回原表排序
-        let created: HashMap<String, String> = jobs.iter().map(|(id, _, created)| (id.clone(), created.clone())).collect();
-        let mut by_root: HashMap<usize, Vec<String>> = HashMap::new();
-        for (i, item) in hashed.iter().enumerate() {
-            by_root.entry(find(&mut parent, i)).or_default().push(item.0.clone());
+        let total = pending.len();
+        // 缓存里已有的那部分不花钱：先把已经能看的组推出去，面板不用等补算完
+        emit_similar_progress(&app, 0, total, false, &cluster, &mut touched);
+
+        let mut processed = 0usize;
+        let mut fresh: Vec<(String, i64, Option<String>)> = Vec::with_capacity(EMIT_EVERY);
+        for row in pending {
+            if let Some(hash) = crate::scanner::image_phash(&row.path) {
+                touched.insert(cluster.add(row.id.as_str(), row.created_at.as_str(), hash));
+                fresh.push((row.id.clone(), hash as i64, row.modified_at.clone()));
+            }
+            processed += 1;
+            if processed % EMIT_EVERY == 0 || processed == total {
+                if let Ok(conn) = app.state::<AppState>().db.lock() {
+                    let _ = db::save_image_phashes(&conn, &fresh);
+                }
+                fresh.clear();
+                emit_similar_progress(&app, processed, total, false, &cluster, &mut touched);
+            }
         }
-        let mut out: Vec<Vec<String>> = by_root
-            .into_values()
-            .filter(|g| g.len() > 1)
-            .map(|mut g| {
-                g.sort_by(|a, b| {
-                    created.get(a).unwrap_or(&String::new()).cmp(created.get(b).unwrap_or(&String::new()))
-                        .then_with(|| a.cmp(b))
-                });
-                g
-            })
-            .collect();
-        out.sort_by_key(|g| std::cmp::Reverse(g.len()));
-        out
+        if let Ok(conn) = app.state::<AppState>().db.lock() {
+            let _ = db::save_image_phashes(&conn, &fresh);
+        }
+
+        emit_similar_progress(&app, processed, total, true, &cluster, &mut touched);
+        SimilarResult { groups: cluster.groups(), hashes: cluster.signatures() }
     })
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(groups)
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::{sample_image, setup_test_db};
+
+    #[test]
+    fn test_similar_cluster_chains_transitively_and_isolates_outliers() {
+        let mut cluster = SimilarCluster::new(3);
+        for (name, hash) in [
+            ("a", 0b0000u64),
+            ("b", 0b0011),
+            ("c", 0b1111),
+            ("d", 0xFFFF_FFFF_FFFF_FFF0),
+        ] {
+            cluster.add(name, "2026-01-01", hash);
+        }
+        // a~b、b~c 成立，a 与 c 距离 4 已超阈值：仍应靠 b 串成一组，d 单独不算组
+        assert_eq!(cluster.groups(), vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]);
+    }
+
+    #[test]
+    fn test_similar_cluster_joins_two_groups_when_a_bridge_arrives() {
+        let mut cluster = SimilarCluster::new(2);
+        cluster.add("x", "2026-01-01", 0b0000);
+        cluster.add("y", "2026-01-02", 0b1111);
+        assert_eq!(cluster.groups(), Vec::<Vec<String>>::new());
+
+        cluster.add("bridge", "2026-01-03", 0b0011);
+        assert_eq!(
+            cluster.groups(),
+            vec![vec!["x".to_string(), "y".to_string(), "bridge".to_string()]]
+        );
+        // 并组后旧槽位清空：成员总数不变，全量结果里也不会重复出现
+        let members: usize = (0..cluster.comps.len()).map(|comp| cluster.len_of(comp)).sum();
+        assert_eq!(members, 3);
+    }
+
+    #[test]
+    fn test_similar_cluster_routes_identical_hashes_through_one_representative() {
+        let mut cluster = SimilarCluster::new(3);
+        for name in ["a", "b", "c"] {
+            cluster.add(name, "2026-01-01", 0b0101);
+        }
+        cluster.add("far", "2026-01-02", 0xFFFF_FFFF_FFFF_FFF0);
+        // 同指纹只留一个代表进两两比对表，另外两张直接并进来
+        assert_eq!(cluster.reps.len(), 2);
+        assert_eq!(
+            cluster.groups(),
+            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]
+        );
+    }
+
+    #[test]
+    fn test_similar_cluster_orders_group_by_added_time() {
+        let mut cluster = SimilarCluster::new(3);
+        cluster.add("late", "2026-03-01", 0b0000);
+        cluster.add("early", "2026-01-01", 0b0011);
+        assert_eq!(cluster.groups(), vec![vec!["early".to_string(), "late".to_string()]]);
+    }
+
+    #[test]
+    fn test_similar_signatures_cover_group_members_only() {
+        let mut cluster = SimilarCluster::new(3);
+        cluster.add("a", "2026-01-01", 0xFFFF_FFFF_0000_0001);
+        cluster.add("b", "2026-01-02", 0xFFFF_FFFF_0000_0003);
+        cluster.add("lonely", "2026-01-03", 0x0000_0000_0000_0000);
+        // 孤张也回指纹就是白传：19 万条库一次就是十几 MB
+        let sigs = cluster.signatures();
+        assert_eq!(sigs.len(), 2);
+        assert!(sigs.iter().all(|hit| hit.id != "lonely"));
+        let a = sigs.iter().find(|hit| hit.id == "a").unwrap();
+        // 高低 32 位拆开后要能拼回原值
+        assert_eq!(((a.hi as u64) << 32) | a.lo as u64, 0xFFFF_FFFF_0000_0001);
+    }
 
     #[test]
     fn test_deleted_image_frees_its_path() {

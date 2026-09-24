@@ -25,6 +25,8 @@ interface ImageToolbarProps {
   detectingSimilar: boolean;
   similarDetected: boolean;
   similarGroupCount: number;
+  /** 检测进行中已比对的张数，边算边出组时用来显示进度 */
+  similarProgress: { processed: number; total: number } | null;
   onOpenSimilarGroups: () => void;
   onClearSimilar: () => void;
   selectMode: boolean;
@@ -69,6 +71,7 @@ export function ImageToolbar({
   detectingSimilar,
   similarDetected,
   similarGroupCount,
+  similarProgress,
   onOpenSimilarGroups,
   onClearSimilar,
   selectMode,
@@ -136,7 +139,9 @@ export function ImageToolbar({
           disabled={detectingSimilar}
           title="感知哈希比对，找出相似但不相同的连拍/截图系列；每组保留最早一张，其余自动勾进多选"
         >
-          {detectingSimilar ? "比对中…" : "检测相似图片"}
+          {detectingSimilar
+            ? `比对中…${similarProgress ? ` ${similarProgress.processed}/${similarProgress.total}` : ""}`
+            : "检测相似图片"}
         </button>
       )}
       {similarDetected && similarGroupCount > 0 && (

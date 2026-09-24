@@ -45,7 +45,9 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             file_size INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             thumbnail_path TEXT,
-            modified_at TEXT
+            modified_at TEXT,
+            phash INTEGER,
+            phash_modified_at TEXT
         );"
     )
 }
@@ -70,6 +72,16 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     if !image_columns.is_empty() && !image_columns.iter().any(|c| c == "modified_at") {
         conn.execute("ALTER TABLE images ADD COLUMN modified_at TEXT", [])?;
+    }
+    // 相似图指纹缓存：全库 ffmpeg 是小时级的活儿，算过就要落库，别每次检测都从头跑
+    if !image_columns.is_empty() && !image_columns.iter().any(|c| c == "phash") {
+        conn.execute("ALTER TABLE images ADD COLUMN phash INTEGER", [])?;
+    }
+    if !image_columns.is_empty() && !image_columns.iter().any(|c| c == "phash_modified_at") {
+        conn.execute(
+            "ALTER TABLE images ADD COLUMN phash_modified_at TEXT",
+            [],
+        )?;
     }
     Ok(())
 }

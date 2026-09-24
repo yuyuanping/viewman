@@ -1,13 +1,21 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Image } from "../types";
 import type { SimilarGroup } from "../similarGroups";
+import { hashDistance, KEEP_RULES } from "../similarGroups";
+import type { HashPair, KeepRule } from "../similarGroups";
 import { formatFileSize, formatResolution } from "../utils";
+import { SIMILAR_THRESHOLD_MAX, SIMILAR_THRESHOLD_MIN } from "../hooks/useSimilarDetection";
+
+/** 一组超过这个张数就先折起来：几百张一次铺出来既卡又没法逐张比对 */
+const COLLAPSE_AT = 24;
 
 interface SimilarGroupsPanelProps {
   /** 相似组：已裁掉不在库的组员，keep 是本组保留的那张 */
   groups: SimilarGroup[];
   imageById: Map<string, Image>;
+  /** 组内成员指纹：只随最终完整结果回来，用来标"距保留张几位"并按它排序 */
+  hashById: Map<string, HashPair>;
   selectedIds: Set<string>;
   onToggle: (image: Image) => void;
   /** 把该组的保留项换成这张，其余重新勾上 */
@@ -19,6 +27,18 @@ interface SimilarGroupsPanelProps {
   /** 直接走工具栏那条批量删除通路（进回收站前有二次确认） */
   onDeleteSelected: () => void;
   deleting: boolean;
+  /** 检测仍在跑：组会陆续追加进来 */
+  detecting: boolean;
+  /** 换宽容度后正在重新比对（指纹已缓存，只是重算分组） */
+  recalculating: boolean;
+  /** 补算指纹的进度；库里指纹齐全时这条不出现 */
+  progress: { processed: number; total: number } | null;
+  /** 汉明距离阈值：越大越宽松，相似多但误判也多 */
+  threshold: number;
+  onThreshold: (threshold: number) => void;
+  /** 每组默认留哪张：影响所有没手动点过「留」的组 */
+  keepRule: KeepRule;
+  onKeepRule: (rule: KeepRule) => void;
   /** 放大看：以整组为翻页范围，方便逐张比对 */
   onOpenImage: (image: Image, groupIds: string[]) => void;
   onClose: () => void;
@@ -26,11 +46,15 @@ interface SimilarGroupsPanelProps {
 
 /**
  * 相似图分组审阅面板：每组单独一块，组员并排显示，勾中的走"删除所选"那条通路。
+ * 检测是边算边推的，所以面板开着就能看到逐渐变长的清单，不必等全库跑完。
  * 块上加了 content-visibility，几千组时只有滚进视口的才参与布局。
  */
 export function SimilarGroupsPanel({
-  groups, imageById, selectedIds, onToggle, onKeep, onAutoSelect, selectedTotal, onDeleteSelected, deleting, onOpenImage, onClose,
+  groups, imageById, hashById, selectedIds, onToggle, onKeep, onAutoSelect, selectedTotal, onDeleteSelected, deleting, detecting, recalculating, progress, threshold, onThreshold, keepRule, onKeepRule, onOpenImage, onClose,
 }: SimilarGroupsPanelProps) {
+  /** 展开过的组（按组下标记着）：组员太多的组默认只铺前若干张 */
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -46,7 +70,45 @@ export function SimilarGroupsPanel({
     <div className="image-viewer fixed inset-0 z-40 flex flex-col" role="dialog" aria-modal="true" aria-label="相似图片分组">
       <div className="flex items-center gap-3 px-4 py-3 shrink-0">
         <h2 className="text-sm text-gray-200 font-medium">相似图片分组</h2>
-        <span className="text-xs text-gray-400 tabular-nums">{groups.length} 组 · 组内已勾 {selectedInGroups}</span>
+        <span className="text-xs text-gray-400 tabular-nums">
+          {groups.length} 组 · 组内已勾 {selectedInGroups}
+          {progress && ` · 补算指纹 ${progress.processed}/${progress.total}`}
+          {recalculating && " · 重新比对中…"}
+        </span>
+        <label
+          className="flex items-center gap-1.5 text-xs text-gray-400"
+          title="汉明距离阈值：往右更宽松（相似找得多、误判也多），往左更严格。指纹已存库，改完只是重新比对，不用重跑 ffmpeg"
+        >
+          宽容度
+          <input
+            type="range"
+            min={SIMILAR_THRESHOLD_MIN}
+            max={SIMILAR_THRESHOLD_MAX}
+            step={1}
+            value={threshold}
+            disabled={detecting || recalculating}
+            onChange={(e) => onThreshold(Number(e.target.value))}
+            className="w-28 accent-blue-500"
+            aria-label="相似判定宽容度（汉明距离阈值）"
+          />
+          <span className="tabular-nums text-gray-200">{threshold}</span>
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-xs text-gray-400"
+          title="每组默认保留哪一张：套图里通常想留分辨率或体积最大的那张。手动点过「留」的组不受影响"
+        >
+          选主
+          <select
+            className="toolbar-select"
+            value={keepRule}
+            onChange={(e) => onKeepRule(e.target.value as KeepRule)}
+            aria-label="每组默认保留哪张"
+          >
+            {KEEP_RULES.map(rule => (
+              <option key={rule.value} value={rule.value}>{rule.label}</option>
+            ))}
+          </select>
+        </label>
         <span className="toolbar-spacer" />
         <button
           type="button"
@@ -70,15 +132,28 @@ export function SimilarGroupsPanel({
         </button>
       </div>
       <p className="px-4 pb-2 text-xs text-gray-500 shrink-0">
-        点缩略图勾选/取消，点「留」把本组的保留项换成这张；按 Del 一次性移入回收站。
+        {detecting
+          ? "还在比对剩下的图片，组会一张张追加进来；已出的组现在就能勾、能删。"
+          : "点缩略图勾选/取消，点「留」把本组的保留项换成这张；按 Del 一次性移入回收站。"}
       </p>
 
       <div className="flex-1 overflow-y-auto px-4 pb-6">
         {groups.length === 0 && (
-          <p className="text-gray-500 text-sm p-4">没有可审阅的相似组了（组员少于两张就不算一组）。</p>
+          <p className="text-gray-500 text-sm p-4">
+            {detecting
+              ? `正在逐张算指纹，还没有成组的相似图片${progress ? `（已比对 ${progress.processed}/${progress.total}）` : ""}…`
+              : "没有可审阅的相似组了（组员少于两张就不算一组）。"}
+          </p>
         )}
         {groups.map((group, index) => {
-          const images = group.ids.map(id => imageById.get(id)).filter((image): image is Image => image !== undefined);
+          // 距保留张越近的越排在前：胖组里真正要看的总是那几枚几乎一样的
+          const ranked = group.ids
+            .map(id => imageById.get(id))
+            .filter((image): image is Image => image !== undefined)
+            .map(image => ({ image, dist: hashDistance(hashById.get(image.id), hashById.get(group.keep)) }))
+            .sort((a, b) => (a.dist ?? 99) - (b.dist ?? 99));
+          const folded = ranked.length > COLLAPSE_AT && !expanded.has(group.at);
+          const shown = folded ? ranked.slice(0, COLLAPSE_AT) : ranked;
           const selectedInGroup = group.ids.filter(id => selectedIds.has(id)).length;
           return (
             <section
@@ -88,14 +163,14 @@ export function SimilarGroupsPanel({
             >
               <header className="flex items-center gap-2 text-xs text-gray-400 mb-2 sticky top-0 py-1 bg-[#04070de6] z-10">
                 <span className="text-gray-200 font-medium">组 {index + 1}</span>
-                <span className="tabular-nums">{images.length} 张</span>
+                <span className="tabular-nums">{ranked.length} 张</span>
                 <span className={`tabular-nums ${selectedInGroup > 0 ? "text-blue-400" : "text-gray-500"}`}>
                   已勾 {selectedInGroup}
                 </span>
                 <span className="text-gray-600 truncate">{imageById.get(group.keep)?.filename}</span>
               </header>
               <ul className="flex flex-wrap gap-2.5">
-                {images.map(image => {
+                {shown.map(({ image, dist }) => {
                   const selected = selectedIds.has(image.id);
                   const isKeep = group.keep === image.id;
                   return (
@@ -127,6 +202,7 @@ export function SimilarGroupsPanel({
                           </span>
                           <span className="block px-1.5 pb-1.5 text-[10px] text-gray-500 tabular-nums">
                             {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
+                            {dist !== null && <span className={dist === 0 ? "text-emerald-400" : undefined}> · 距 {dist}</span>}
                           </span>
                         </button>
                       </div>
@@ -155,6 +231,20 @@ export function SimilarGroupsPanel({
                   );
                 })}
               </ul>
+              {ranked.length > COLLAPSE_AT && (
+                <button
+                  type="button"
+                  className="toolbar-chip mt-2"
+                  onClick={() => setExpanded(prev => {
+                    const next = new Set(prev);
+                    if (next.has(group.at)) next.delete(group.at); else next.add(group.at);
+                    return next;
+                  })}
+                  title="折起来的组员仍按当前勾选走，删除时一样进回收站"
+                >
+                  {folded ? `展开其余 ${ranked.length - COLLAPSE_AT} 张` : "收起"}
+                </button>
+              )}
             </section>
           );
         })}

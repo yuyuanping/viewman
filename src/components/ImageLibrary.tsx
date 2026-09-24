@@ -13,8 +13,8 @@ import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicates } from "../hooks/useDuplicates";
 import { useDeleteShortcut } from "../hooks/useDeleteShortcut";
 import { useRangeSelect } from "../hooks/useRangeSelect";
+import { useSimilarDetection } from "../hooks/useSimilarDetection";
 import { filterMedia, selectedDirectoryLabel, sortMedia } from "../libraryFilter";
-import { extrasOfGroups, liveGroups, selectGroupExtras } from "../similarGroups";
 import type { SortDirection } from "../libraryFilter";
 
 interface ImageLibraryProps {
@@ -60,79 +60,28 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
   } = useDuplicates(notify, { detect: api.findDuplicateImages, remove: trashImages, unit: "图片" });
 
-  // 相似图检测（pHash）：结果单独成面板按组审阅，检测完自动进多选并勾上各组副本
-  const [similarGroups, setSimilarGroups] = useState<string[][]>([]);
-  const [similarKeeps, setSimilarKeeps] = useState<Record<number, string>>({});
-  const [similarDetected, setSimilarDetected] = useState(false);
-  const [similarPanelOpen, setSimilarPanelOpen] = useState(false);
-  const [detectingSimilar, setDetectingSimilar] = useState(false);
-
-  /** 只索引相似组里那几百张，避免为 19 万条清单建一张全库 Map */
-  const similarIndex = useMemo(() => {
-    const wanted = new Set(similarGroups.flat());
-    if (wanted.size === 0) return new Map<string, Image>();
-    const byId = new Map<string, Image>();
-    for (const image of images) if (wanted.has(image.id)) byId.set(image.id, image);
-    return byId;
-  }, [images, similarGroups]);
-
-  const aliveSimilarGroups = useMemo(
-    () => liveGroups(similarGroups, new Set(similarIndex.keys()), similarKeeps),
-    [similarGroups, similarIndex, similarKeeps],
-  );
-  const similarExtras = useMemo(() => extrasOfGroups(aliveSimilarGroups), [aliveSimilarGroups]);
-
-  /** 每组保留首张（最早入库那张），其余勾上 */
-  const autoSelectSimilar = useCallback(() => {
-    setSelectMode(true);
-    setSelectedIds(new Set(similarExtras));
-  }, [similarExtras]);
-
-  const handleDetectSimilar = useCallback(async () => {
-    setDetectingSimilar(true);
-    try {
-      const found = await api.findSimilarImages();
-      if (found.length === 0) {
-        setSimilarDetected(false);
-        notify("没有发现相似的图片系列。");
-        return;
-      }
-      const alive = new Set<string>();
-      for (const image of images) alive.add(image.id);
-      const extras = extrasOfGroups(liveGroups(found, alive, {}));
-      setSimilarGroups(found);
-      setSimilarKeeps({});
-      setSimilarDetected(true);
-      setSelectMode(true);
-      setSelectedIds(new Set(extras));
-      setSimilarPanelOpen(true);
-      notify(`发现 ${found.length} 组相似图片，已自动勾上 ${extras.length} 个副本。`);
-    } catch (e) {
-      notify(`相似检测失败：${String(e)}`, "error");
-    } finally {
-      setDetectingSimilar(false);
-    }
-  }, [images, notify]);
-
-  const clearSimilar = useCallback(() => {
-    setSimilarGroups([]);
-    setSimilarKeeps({});
-    setSimilarDetected(false);
-    setSimilarPanelOpen(false);
-  }, []);
-
-  /** 换某组的保留项：该组勾选跟着翻转，其他组的勾选不动 */
-  const keepSimilar = useCallback((at: number, keepId: string) => {
-    const group = aliveSimilarGroups.find(item => item.at === at);
-    if (!group) return;
-    setSimilarKeeps(prev => ({ ...prev, [at]: keepId }));
-    setSelectedIds(prev => selectGroupExtras(prev, group, keepId));
-  }, [aliveSimilarGroups]);
-
-  const similarIds = useMemo(
-    () => new Set(aliveSimilarGroups.flatMap(group => group.ids)),
-    [aliveSimilarGroups],
-  );
+  // 相似图检测（pHash）：后端边算边推组，面板逐组审阅，新出现的副本自动勾进多选
+  const {
+    groups: aliveSimilarGroups,
+    imageById: similarIndex,
+    hashById: similarHashes,
+    similarIds,
+    groupCount: similarGroupCount,
+    detected: similarDetected,
+    detecting: detectingSimilar,
+    progress: similarProgress,
+    panelOpen: similarPanelOpen,
+    setPanelOpen: setSimilarPanelOpen,
+    detect: handleDetectSimilar,
+    clear: clearSimilar,
+    keep: keepSimilar,
+    autoSelect: autoSelectSimilar,
+    recalculating: similarRecalculating,
+    threshold: similarThreshold,
+    rethreshold: rethresholdSimilar,
+    keepRule: similarKeepRule,
+    applyKeepRule: applySimilarKeepRule,
+  } = useSimilarDetection({ images, setSelectMode, setSelectedIds, notify });
 
   // 排一次、筛多次：切目录和打字只是从排好的清单里线性筛（19 万条 ≈30ms），
   // 不再每次条件一变就重排整库。Array.filter 保序，结果与"先筛后排"一致。
@@ -295,7 +244,8 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         onDetectSimilar={handleDetectSimilar}
         detectingSimilar={detectingSimilar}
         similarDetected={similarDetected}
-        similarGroupCount={aliveSimilarGroups.length}
+        similarGroupCount={similarGroupCount}
+        similarProgress={similarProgress}
         onOpenSimilarGroups={() => setSimilarPanelOpen(true)}
         onClearSimilar={clearSimilar}
         selectMode={selectMode}
@@ -327,11 +277,19 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         <SimilarGroupsPanel
           groups={aliveSimilarGroups}
           imageById={similarIndex}
+          hashById={similarHashes}
           selectedIds={selectedIds}
           onToggle={toggleSelect}
           onKeep={keepSimilar}
           onAutoSelect={autoSelectSimilar}
           selectedTotal={selectedIds.size}
+          detecting={detectingSimilar}
+          recalculating={similarRecalculating}
+          progress={similarProgress}
+          threshold={similarThreshold}
+          onThreshold={rethresholdSimilar}
+          keepRule={similarKeepRule}
+          onKeepRule={applySimilarKeepRule}
           onDeleteSelected={handleDeleteSelected}
           deleting={deletingSelected}
           onOpenImage={openSimilarGroup}
