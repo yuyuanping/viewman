@@ -8,7 +8,9 @@ use crate::db;
 use crate::models::Image;
 use crate::scanner;
 
-use super::scan::{compute_stale_ids, ScanProgress, ScanSummary};
+use super::scan::{
+    capped_walk_warnings, dir_prefix_lower, plan_stale_ids, ScanProgress, ScanSummary,
+};
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbJob};
 use super::videos::{duplicate_signature, move_file};
@@ -38,11 +40,13 @@ pub async fn scan_image_directory(
     let task_app = app.clone();
     let (images, stale_ids, warnings, summary) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Image>, Vec<String>, Vec<String>, ScanSummary), String> {
-            // 目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
-            let files = match scanner::scan_image_directory_recursive(&dir_path) {
-                Ok(f) => f,
+            // 根目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
+            let walk = match scanner::scan_image_directory_recursive(&dir_path) {
+                Ok(w) => w,
                 Err(e) => return Err(format!("扫描中断，未修改数据库：{}", e)),
             };
+            let files = walk.files;
+            let mut walk_warnings = capped_walk_warnings(walk.warnings);
             // 读得到目录就先记下根：本轮扫描即使被打断，下次启动也会接着扫
             if let Ok(conn) = task_app.state::<AppState>().db.lock() {
                 let _ = remember_root(&conn, IMAGE_SCAN_ROOTS_KEY, &dir_for_task);
@@ -62,8 +66,14 @@ pub async fn scan_image_directory(
                 .collect();
 
             // 本次扫描已找不到、但库里还挂在该目录下的文件 → 视为外部已删除
-            let prefix = format!("{}\\", dir_for_task.trim_end_matches('\\').to_lowercase());
-            let stale_ids = compute_stale_ids(&existing, &prefix, &found);
+            let prefix = dir_prefix_lower(&dir_for_task);
+            let stale_ids = plan_stale_ids(
+                &existing,
+                &prefix,
+                &found,
+                &walk.skipped,
+                &mut walk_warnings,
+            );
 
             let new_files: Vec<_> = files
                 .into_iter()
@@ -80,7 +90,9 @@ pub async fn scan_image_directory(
                 ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![], summary: None },
             );
 
-            let (mut images, warnings) = build_images_parallel(&task_app, &new_files);
+            let (mut images, probe_warnings) = build_images_parallel(&task_app, &new_files);
+            let mut warnings = walk_warnings;
+            warnings.extend(probe_warnings);
             let mut refreshed = 0;
             for image in &mut images {
                 if let Some(old) = by_path.get(&image.path.to_lowercase()) {

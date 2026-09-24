@@ -113,48 +113,141 @@ pub fn is_image_file(path: &Path) -> bool {
     !is_temp_artifact(path) && has_known_extension(path, IMAGE_EXTENSIONS)
 }
 
-pub fn scan_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
-    scan_directory_filtered(dir, is_video_file)
+/// 一次全盘走查的产物。`files` 之外还要带出"哪里没走成"：调用方据此决定
+/// 哪些库记录不能判定为已删除。
+#[derive(Default)]
+pub struct Walked {
+    pub files: Vec<std::path::PathBuf>,
+    pub warnings: Vec<String>,
+    /// 本轮没有读取到的目录：打不开的（权限不足、网络盘掉线）和有意不跟随的链接目录。
+    /// 这些子树里的文件一个都没看到，记录不能判定为已删除。
+    pub skipped: Vec<std::path::PathBuf>,
 }
 
-pub fn scan_image_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
-    scan_directory_filtered(dir, is_image_file)
+pub fn scan_directory_recursive(dir: &Path) -> Result<Walked, String> {
+    require_dir(dir)?;
+    Ok(walk_filtered(dir, is_video_file, |path| fs::read_dir(path)))
 }
 
-fn scan_directory_filtered(
-    dir: &Path,
-    wanted: impl Fn(&Path) -> bool + Copy,
-) -> Result<Vec<std::path::PathBuf>, String> {
-    if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", dir.display()));
+pub fn scan_image_directory_recursive(dir: &Path) -> Result<Walked, String> {
+    require_dir(dir)?;
+    Ok(walk_filtered(dir, is_image_file, |path| fs::read_dir(path)))
+}
+
+/// 根目录本身打不开必须是错误而不是"扫到 0 个文件"——后者会被调用方当成
+/// "全盘已删除"去清库
+fn require_dir(dir: &Path) -> Result<(), String> {
+    if dir.is_dir() {
+        Ok(())
+    } else {
+        Err(format!("Not a directory: {}", dir.display()))
     }
+}
 
-    let mut files = Vec::new();
-    let entries = fs::read_dir(dir)
-        .map_err(|e| format!("Cannot read directory {}: {}", dir.display(), e))?;
+/// 目录条目分成三类：文件、要进去的普通目录、不进去的链接目录。
+enum Entry {
+    File,
+    Dir,
+    Link,
+}
 
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Error reading entry: {}", e))?;
-        let path = entry.path();
+/// Windows 上 `DirEntry::file_type` 把 junction/挂载点报成"既不是文件也不是目录"，
+/// 所以这一类只能落到磁盘上实判一次；普通文件/普通目录走前两行，零额外开销。
+fn classify(entry: &fs::DirEntry) -> Entry {
+    match entry.file_type() {
+        Ok(ft) if ft.is_file() => Entry::File,
+        Ok(ft) if ft.is_dir() => {
+            if ft.is_symlink() {
+                Entry::Link
+            } else {
+                Entry::Dir
+            }
+        }
+        _ => {
+            let path = entry.path();
+            if !path.is_dir() {
+                return Entry::File;
+            }
+            if fs::read_link(&path).is_ok() {
+                Entry::Link
+            } else {
+                Entry::Dir
+            }
+        }
+    }
+}
 
-        if path.is_dir() {
-            // 回收站/系统目录里的 $R*.mp4 是已删除文件的副本，不能重新入库
-            let dir_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if dir_name == "$recycle.bin" || dir_name == "system volume information" {
+fn walk_filtered(
+    root: &Path,
+    wanted: impl Fn(&Path) -> bool,
+    read_dir: impl Fn(&Path) -> Result<fs::ReadDir, std::io::Error>,
+) -> Walked {
+    let mut walk = Walked::default();
+    let mut links: Vec<std::path::PathBuf> = Vec::new();
+    // 显式栈而不是递归：栈深度由目录树决定，不会因为一条链接失控
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                // 单个目录读不了不影响其余部分：记一条告警继续走
+                walk.skipped.push(dir.clone());
+                walk.warnings.push(format!("无法读取目录 {}: {}", dir.display(), e));
                 continue;
             }
-            let mut sub = scan_directory_filtered(&path, wanted)?;
-            files.append(&mut sub);
-        } else if wanted(&path) {
-            files.push(path);
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    walk.warnings.push(format!("{} 中有条目无法读取: {}", dir.display(), e));
+                    continue;
+                }
+            };
+            let path = entry.path();
+
+            match classify(&entry) {
+                Entry::File => {
+                    if wanted(&path) {
+                        walk.files.push(path);
+                    }
+                }
+                Entry::Dir => {
+                    // 回收站/系统目录里的 $R*.mp4 是已删除文件的副本，不能重新入库
+                    let dir_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if dir_name != "$recycle.bin" && dir_name != "system volume information" {
+                        stack.push(path);
+                    }
+                }
+                // 链接目录（junction/目录软链/挂载点）不进：跟进去会把同一批文件按两条
+                // 路径重复收录，一条指回祖先的链接还能让整盘扫描无限展开。
+                // 根目录本身是链接时照常读取——那是用户自己选的入口。
+                Entry::Link => links.push(path),
+            }
         }
     }
 
-    Ok(files)
+    if !links.is_empty() {
+        let named: Vec<String> = links
+            .iter()
+            .take(3)
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        walk.warnings.push(format!(
+            "跳过 {} 个链接目录（不跟随 junction/软链）: {}",
+            links.len(),
+            named.join("、")
+        ));
+        walk.skipped.extend(links);
+    }
+
+    walk
 }
 
 fn file_name(path: &Path) -> String {
@@ -520,11 +613,68 @@ mod tests {
 
         let videos = scan_directory_recursive(&dir).unwrap();
         let images = scan_image_directory_recursive(&dir).unwrap();
-        assert_eq!(videos.len(), 1);
-        assert_eq!(images.len(), 1);
-        assert!(images[0].ends_with("b.png"));
+        assert_eq!(videos.files.len(), 1);
+        assert_eq!(images.files.len(), 1);
+        assert!(images.files[0].ends_with("b.png"));
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 单个目录读不了（权限不足、网络盘掉线）不能中断整盘扫描：其余文件照常收，
+    /// 同时把该目录记进 skipped，供调用方跳过"已删除"判定
+    #[test]
+    fn test_walk_skips_unreadable_dir_and_continues() {
+        let dir = std::env::temp_dir().join(format!("viewman_locked_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("locked").join("deep")).unwrap();
+        fs::write(dir.join("a.mp4"), b"x").unwrap();
+        fs::write(dir.join("locked").join("deep").join("b.mp4"), b"x").unwrap();
+
+        let blocked = dir.join("locked");
+        let walked = walk_filtered(&dir, is_video_file, |path| {
+            if path == blocked.as_path() {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                fs::read_dir(path)
+            }
+        });
+
+        assert_eq!(walked.files.len(), 1, "被跳过的子树不该混进结果，实际: {:?}", walked.files);
+        assert_eq!(walked.skipped, vec![blocked]);
+        assert_eq!(walked.warnings.len(), 1);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 回归：库里放一条指回自身的 junction，扫描必须走完而不是无限递归；
+    /// 链接目录整个不跟随，但记进 skipped 以免其下记录被判定为已删除
+    #[cfg(windows)]
+    #[test]
+    fn test_scan_survives_self_referencing_junction() {
+        let dir = std::env::temp_dir().join(format!("viewman_cycle_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.mp4"), b"x").unwrap();
+        fs::write(dir.join("sub").join("b.mp4"), b"x").unwrap();
+
+        let link = dir.join("loop");
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &dir.to_string_lossy()])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("跳过：本机无法创建 junction");
+            fs::remove_dir(&link).ok();
+            fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        let walked = scan_directory_recursive(&dir).unwrap();
+        assert_eq!(walked.files.len(), 2, "每个真实文件只应被看到一次，实际: {:?}", walked.files);
+        assert_eq!(walked.skipped, vec![link.clone()]);
+        assert_eq!(walked.warnings.len(), 1);
+
+        fs::remove_dir(&link).ok();
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -647,8 +797,16 @@ mod tests {
 
         let result = scan_directory_recursive(&dir);
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        assert!(result.unwrap().files.is_empty());
 
         fs::remove_dir(&dir).unwrap();
+    }
+
+    /// 根目录不存在必须是 Err，不能退化成"扫到 0 个文件"——调用方会把 0 当作"全盘已删除"
+    #[test]
+    fn test_scan_missing_root_is_error() {
+        let dir = std::env::temp_dir().join(format!("viewman_absent_{}", uuid::Uuid::new_v4()));
+        assert!(scan_directory_recursive(&dir).is_err());
+        assert!(scan_image_directory_recursive(&dir).is_err());
     }
 }
