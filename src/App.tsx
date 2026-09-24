@@ -16,6 +16,7 @@ import { useThumbnailGeneration } from "./hooks/useThumbnailGeneration";
 import { useHevcConversion } from "./hooks/useHevcConversion";
 import { useDuplicates } from "./hooks/useDuplicates";
 import { useFileCheck } from "./hooks/useFileCheck";
+import { useDeleteShortcut } from "./hooks/useDeleteShortcut";
 import { api } from "./api";
 import { loadScanRoots } from "./scanRootStore";
 import { countUnderDir, isUnderDir } from "./scanRoots";
@@ -262,6 +263,10 @@ function App() {
     notify(failed > 0 ? `已删除 ${ok} 个，${failed} 个失败（可能被占用）` : `已将 ${ok} 个视频移入回收站。`, failed > 0 ? "error" : "info");
     setDeletingSelected(false);
   }, [selectedIds, trashVideos, notify]);
+
+  // Del 即删勾选；播放器或历史面板盖在上面时让位
+  useDeleteShortcut(handleDeleteSelected,
+    selectMode && selectedIds.size > 0 && !currentVideo && !historyOpen && !deletingSelected);
 
   // 多选批量移动：选目录后逐个 move，失败只计数不中断（被占用的文件跳过）
   const [movingSelected, setMovingSelected] = useState(false);

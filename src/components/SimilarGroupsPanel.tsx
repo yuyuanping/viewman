@@ -61,7 +61,7 @@ export function SimilarGroupsPanel({
           className="toolbar-chip"
           onClick={onDeleteSelected}
           disabled={deleting || selectedTotal === 0}
-          title="把已勾中的图片移入回收站（删除前会再确认一次）"
+          title="把已勾中的图片移入回收站（Del，删除前会再确认一次）"
         >
           {deleting ? "删除中…" : `删除所选 (${selectedTotal})`}
         </button>
@@ -70,7 +70,7 @@ export function SimilarGroupsPanel({
         </button>
       </div>
       <p className="px-4 pb-2 text-xs text-gray-500 shrink-0">
-        点缩略图勾选/取消，点「留」把本组的保留项换成这张；确认后右上角「删除所选」一次性移入回收站。
+        点缩略图勾选/取消，点「留」把本组的保留项换成这张；按 Del 一次性移入回收站。
       </p>
 
       <div className="flex-1 overflow-y-auto px-4 pb-6">

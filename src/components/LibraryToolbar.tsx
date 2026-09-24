@@ -382,7 +382,7 @@ export function LibraryToolbar({
             className="toolbar-chip"
             onClick={onDeleteSelected}
             disabled={deletingSelected || movingSelected || selectedCount === 0}
-            title="将选中的视频移入回收站"
+            title="将选中的视频移入回收站（Del）"
           >
             {deletingSelected ? "删除中…" : `删除所选 (${selectedCount})`}
           </button>

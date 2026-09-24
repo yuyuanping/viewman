@@ -11,6 +11,7 @@ import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicates } from "../hooks/useDuplicates";
+import { useDeleteShortcut } from "../hooks/useDeleteShortcut";
 import { filterMedia, selectedDirectoryLabel, sortMedia } from "../libraryFilter";
 import { extrasOfGroups, liveGroups, selectGroupExtras } from "../similarGroups";
 import type { SortDirection } from "../libraryFilter";
@@ -186,6 +187,10 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     notify(failed > 0 ? `已删除 ${ok} 张，${failed} 张失败（可能被占用）` : `已将 ${ok} 张图片移入回收站。`, failed > 0 ? "error" : "info");
     setDeletingSelected(false);
   }, [selectedIds, trashImages, notify]);
+
+  // Del 即删勾选；查看器盖在最上层时让位，免得在遮罩后批量删掉看不见的条目
+  useDeleteShortcut(handleDeleteSelected,
+    selectMode && selectedIds.size > 0 && viewerIndex === null && !deletingSelected);
 
   // 多选批量移动：选目录后逐个 move，失败只计数不中断
   const [movingSelected, setMovingSelected] = useState(false);
