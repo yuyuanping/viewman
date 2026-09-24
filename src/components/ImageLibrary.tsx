@@ -248,6 +248,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
         onScanDirectory={onScanDirectory}
         onDeleted={reloadImages}
         onMoved={reloadImages}
+        resetKey={selectedDir}
       />
       {viewerIndex !== null && viewerList[viewerIndex] && (
         <ImageViewer
