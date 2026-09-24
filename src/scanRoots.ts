@@ -6,6 +6,18 @@ export function dedupeKey(dir: string): string {
   return dir.toLowerCase().replace(/[\\/]+$/, "");
 }
 
+/** path 是否位于 dir 之内（不含 dir 自身）：大小写与 \ / 分隔符都不敏感 */
+export function isUnderDir(path: string, dir: string): boolean {
+  const parent = dedupeKey(dir);
+  if (!parent) return false;
+  return path.toLowerCase().replace(/\//g, "\\").startsWith(parent + "\\");
+}
+
+/** 统计挂在某目录下的条目数，用于"移除目录"前告知影响范围 */
+export function countUnderDir(items: { path: string }[], dir: string): number {
+  return items.reduce((n, item) => (isUnderDir(item.path, dir) ? n + 1 : n), 0);
+}
+
 /** 解析并规范化扫描目录清单：去重（大小写不敏感，Windows 路径）、剔除非字符串与空值 */
 export function parseScanRoots(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];

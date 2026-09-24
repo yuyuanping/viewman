@@ -10,6 +10,20 @@ export interface Video {
   thumbnail_path?: string | null;
 }
 
+/** 图片库条目：与视频分表存放，宽高来自 ffprobe，null 表示尚未探测 */
+export interface Image {
+  id: string;
+  path: string;
+  filename: string;
+  width: number | null;
+  height: number | null;
+  file_size: number;
+  created_at: string;
+  thumbnail_path?: string | null;
+}
+
+export type MediaKind = "video" | "image";
+
 export interface WatchProgress {
   id: string;
   video_id: string;

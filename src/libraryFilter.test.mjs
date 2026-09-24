@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  filterVideos,
+  filterMedia,
   selectedDirectoryLabel,
-  sortVideos,
+  sortMedia,
   filterByWatchState,
   watchStateOf,
   FINISHED_RATIO,
@@ -14,14 +14,14 @@ const videos = [
   { id: '3', path: 'E:/other/gamma.mp4', filename: 'gamma.mp4' },
 ];
 test('filename search ignores case and clearing restores results', () => {
-  assert.deepEqual(filterVideos(videos, null, 'BETA').map(v => v.id), ['2']);
-  assert.equal(filterVideos(videos, null, '').length, 3);
-  assert.deepEqual(filterVideos([], null, ''), []);
+  assert.deepEqual(filterMedia(videos, null, 'BETA').map(v => v.id), ['2']);
+  assert.equal(filterMedia(videos, null, '').length, 3);
+  assert.deepEqual(filterMedia([], null, ''), []);
 });
 test('directory and search filters compose without matching sibling prefixes', () => {
-  assert.deepEqual(filterVideos(videos, 'd:/media', '').map(v => v.id), ['1', '2']);
-  assert.deepEqual(filterVideos(videos, 'D:/media', 'gamma'), []);
-  assert.deepEqual(filterVideos(videos, 'D:/med', ''), []);
+  assert.deepEqual(filterMedia(videos, 'd:/media', '').map(v => v.id), ['1', '2']);
+  assert.deepEqual(filterMedia(videos, 'D:/media', 'gamma'), []);
+  assert.deepEqual(filterMedia(videos, 'D:/med', ''), []);
 });
 test('selected directory label supports root and child folders', () => {
   assert.equal(selectedDirectoryLabel('D:/media/sub'), 'sub');
@@ -34,16 +34,27 @@ const sortable = [
   { id: 'c', filename: 'gamma10.mp4', duration: 100, file_size: 100, created_at: '2026-03-01T00:00:00' },
 ];
 
-test('sortVideos sorts by each field without mutating the input', () => {
+test('sortMedia sorts by each field without mutating the input', () => {
   const original = [...sortable];
-  assert.deepEqual(sortVideos(sortable, 'file_size', 'asc').map(v => v.id), ['c', 'b', 'a']);
-  assert.deepEqual(sortVideos(sortable, 'created_at', 'desc').map(v => v.id), ['c', 'b', 'a']);
+  assert.deepEqual(sortMedia(sortable, 'file_size', 'asc').map(v => v.id), ['c', 'b', 'a']);
+  assert.deepEqual(sortMedia(sortable, 'created_at', 'desc').map(v => v.id), ['c', 'b', 'a']);
   assert.deepEqual(sortable, original);
 });
 
-test('sortVideos keeps unknown duration at the end in both directions', () => {
-  assert.deepEqual(sortVideos(sortable, 'duration', 'asc').map(v => v.id), ['c', 'b', 'a']);
-  assert.deepEqual(sortVideos(sortable, 'duration', 'desc').map(v => v.id), ['b', 'c', 'a']);
+test('sortMedia keeps unknown duration at the end in both directions', () => {
+  assert.deepEqual(sortMedia(sortable, 'duration', 'asc').map(v => v.id), ['c', 'b', 'a']);
+  assert.deepEqual(sortMedia(sortable, 'duration', 'desc').map(v => v.id), ['b', 'c', 'a']);
+});
+
+test('image entries carry no duration and still filter and sort by their own fields', () => {
+  const images = [
+    { id: '2', path: 'D:/pics/b.png', filename: 'b.png', file_size: 30, created_at: '2026-02-01T00:00:00' },
+    { id: '1', path: 'D:/pics/a.png', filename: 'a.png', file_size: 10, created_at: '2026-01-01T00:00:00' },
+    { id: '3', path: 'E:/else/c.png', filename: 'c.png', file_size: 20, created_at: '2026-03-01T00:00:00' },
+  ];
+  assert.deepEqual(filterMedia(images, 'd:/pics', '').map(v => v.id), ['2', '1']);
+  assert.deepEqual(sortMedia(images, 'file_size', 'asc').map(v => v.id), ['1', '3', '2']);
+  assert.equal(selectedDirectoryLabel(null, '所有图片'), '所有图片');
 });
 
 test('filename sorting is numeric-aware so gamma2 precedes gamma10', () => {
@@ -51,7 +62,7 @@ test('filename sorting is numeric-aware so gamma2 precedes gamma10', () => {
     { id: '2', filename: 'ep2.mp4', duration: 1, file_size: 1, created_at: '' },
     { id: '10', filename: 'ep10.mp4', duration: 1, file_size: 1, created_at: '' },
   ];
-  assert.deepEqual(sortVideos(names, 'filename', 'asc').map(v => v.id), ['2', '10']);
+  assert.deepEqual(sortMedia(names, 'filename', 'asc').map(v => v.id), ['2', '10']);
 });
 
 test('watch state derives from progress and duration', () => {

@@ -2,9 +2,12 @@ use std::path::Path;
 use std::process::Command;
 use std::fs;
 use serde::Deserialize;
-use crate::models::Video;
+
+use crate::models::{Image, Video};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
+/// HEIC/HEIF 刻意不入库：WebView2 无法解码，收进来只会显示成裂图
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "avif"];
 
 /// 启动 ffprobe/ffmpeg 这类控制台程序。Windows 上必须带 CREATE_NO_WINDOW，
 /// 否则 release 版（GUI 子系统）每调用一次就会闪现一个黑色控制台窗口。
@@ -71,22 +74,40 @@ pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
     Ok(VideoMeta { duration, width, height })
 }
 
-pub fn is_video_file(path: &Path) -> bool {
-    // 转码中断可能留下 `.viewman-h264-*.tmp.mp4`，不能当视频入库
-    if path
-        .file_name()
+/// 转码中断可能留下 `.viewman-h264-*.tmp.mp4`，不能当视频入库
+fn is_temp_artifact(path: &Path) -> bool {
+    path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with(".viewman-"))
-    {
-        return false;
-    }
+}
+
+fn has_known_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
-        .is_some_and(|e| VIDEO_EXTENSIONS.contains(&e.as_str()))
+        .is_some_and(|e| extensions.contains(&e.as_str()))
+}
+
+pub fn is_video_file(path: &Path) -> bool {
+    !is_temp_artifact(path) && has_known_extension(path, VIDEO_EXTENSIONS)
+}
+
+pub fn is_image_file(path: &Path) -> bool {
+    !is_temp_artifact(path) && has_known_extension(path, IMAGE_EXTENSIONS)
 }
 
 pub fn scan_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    scan_directory_filtered(dir, is_video_file)
+}
+
+pub fn scan_image_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    scan_directory_filtered(dir, is_image_file)
+}
+
+fn scan_directory_filtered(
+    dir: &Path,
+    wanted: impl Fn(&Path) -> bool + Copy,
+) -> Result<Vec<std::path::PathBuf>, String> {
     if !dir.is_dir() {
         return Err(format!("Not a directory: {}", dir.display()));
     }
@@ -109,9 +130,9 @@ pub fn scan_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, S
             if dir_name == "$recycle.bin" || dir_name == "system volume information" {
                 continue;
             }
-            let mut sub = scan_directory_recursive(&path)?;
+            let mut sub = scan_directory_filtered(&path, wanted)?;
             files.append(&mut sub);
-        } else if is_video_file(&path) {
+        } else if wanted(&path) {
             files.push(path);
         }
     }
@@ -119,21 +140,48 @@ pub fn scan_directory_recursive(dir: &Path) -> Result<Vec<std::path::PathBuf>, S
     Ok(files)
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+fn added_at_now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn file_size_of(path: &Path) -> i64 {
+    fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
+}
+
 pub fn build_video(path: &std::path::PathBuf) -> Video {
     let metadata = get_metadata(&path.to_string_lossy()).ok();
-    let file_meta = fs::metadata(path).ok();
 
     Video {
         id: uuid::Uuid::new_v4().to_string(),
         path: path.to_string_lossy().to_string(),
-        filename: path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        filename: file_name(path),
         duration: metadata.as_ref().and_then(|m| m.duration),
         width: metadata.as_ref().and_then(|m| m.width),
         height: metadata.as_ref().and_then(|m| m.height),
-        file_size: file_meta.map(|m| m.len() as i64).unwrap_or(0),
-        created_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        file_size: file_size_of(path),
+        created_at: added_at_now(),
+        thumbnail_path: None,
+    }
+}
+
+/// 图片条目：ffprobe 读图片同样能给出宽高，取不到时留空由前端回退显示原图
+pub fn build_image(path: &std::path::PathBuf) -> Image {
+    let metadata = get_metadata(&path.to_string_lossy()).ok();
+
+    Image {
+        id: uuid::Uuid::new_v4().to_string(),
+        path: path.to_string_lossy().to_string(),
+        filename: file_name(path),
+        width: metadata.as_ref().and_then(|m| m.width),
+        height: metadata.as_ref().and_then(|m| m.height),
+        file_size: file_size_of(path),
+        created_at: added_at_now(),
         thumbnail_path: None,
     }
 }
@@ -284,6 +332,7 @@ pub fn extract_full_frame(video_path: &str, out_path: &Path) -> Result<(), Strin
 }
 
 /// 用 ffmpeg 抽取一帧写入 out_path。先尝试 10% 位置，失败则回退到首帧。
+/// 传入 duration 为 None 时对图片同样适用（seek 0 + 单帧 = 缩放导出）。
 pub fn extract_thumbnail(
     video_path: &str,
     out_path: &Path,
@@ -349,6 +398,36 @@ mod tests {
         assert!(!is_video_file(&PathBuf::from("test.txt")));
         assert!(!is_video_file(&PathBuf::from("test")));
         assert!(!is_video_file(&PathBuf::from(".viewman-h264-abc.tmp.mp4")));
+        // 视频扫描不能把图片收进来
+        assert!(!is_video_file(&PathBuf::from("photo.jpg")));
+    }
+
+    #[test]
+    fn test_is_image_file() {
+        assert!(is_image_file(&PathBuf::from("photo.JPG")));
+        assert!(is_image_file(&PathBuf::from("icon.png")));
+        assert!(is_image_file(&PathBuf::from("pic.webp")));
+        assert!(!is_image_file(&PathBuf::from("clip.mp4")));
+        assert!(!is_image_file(&PathBuf::from("notes.txt")));
+        // 系统装了 HEVC 也解不了 HEIC，浏览器只会显示裂图，故不入库
+        assert!(!is_image_file(&PathBuf::from("camera.heic")));
+    }
+
+    #[test]
+    fn test_scan_separates_images_from_videos() {
+        let dir = std::env::temp_dir().join(format!("viewman_kind_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.mp4"), b"x").unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub").join("b.png"), b"x").unwrap();
+
+        let videos = scan_directory_recursive(&dir).unwrap();
+        let images = scan_image_directory_recursive(&dir).unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(images.len(), 1);
+        assert!(images[0].ends_with("b.png"));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -393,9 +472,42 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// 图片封面复用同一条 ffmpeg 通路：seek 0 + 单帧 = 缩放导出
     #[test]
-    fn test_scan_empty_directory() {
-        let dir = std::env::temp_dir().join(format!("viewman_test_{}", uuid::Uuid::new_v4()));
+    fn test_extract_thumbnail_from_image_file() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：本机未安装 ffmpeg");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("viewman_imgthumb_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let png = dir.join("source.png");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "lavfi",
+                "-i", "testsrc=size=1200x800:rate=1:duration=1",
+                "-frames:v", "1",
+                &png.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert!(generated.status.success(), "生成测试图片失败");
+
+        let out = dir.join("thumb.jpg");
+        extract_thumbnail(&png.to_string_lossy(), &out, None).unwrap();
+        assert!(fs::metadata(&out).unwrap().len() > 0, "图片封面应为非空文件");
+
+        let probe = get_metadata(&png.to_string_lossy()).unwrap();
+        assert_eq!(probe.width, Some(1200));
+        assert_eq!(probe.height, Some(800));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_scan_empty_directory() {        let dir = std::env::temp_dir().join(format!("viewman_test_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
 
         let result = scan_directory_recursive(&dir);

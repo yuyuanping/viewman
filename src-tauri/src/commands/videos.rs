@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager, State};
 
 use crate::db;
-use crate::models::{ConversionResult, Video, VideoFileStatus};
+use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
+use super::thumbnails::clear_thumbnail_cache;
 use super::AppState;
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
@@ -124,13 +125,6 @@ pub fn delete_video(
     Ok(())
 }
 
-/// 封面缓存文件名由视频 id 决定，视频移除后一并清理，避免留下孤儿文件
-fn clear_thumbnail_cache(app: &tauri::AppHandle, video_id: &str) {
-    if let Ok(dir) = app.path().app_data_dir() {
-        let _ = std::fs::remove_file(dir.join("thumbnails").join(format!("{}.jpg", video_id)));
-    }
-}
-
 /// 把"内容实为图片"的假视频转换成图片：按真实格式另存为 .jpg/.png 等新文件，
 /// 源文件移入回收站，并从视频库删除记录
 #[tauri::command]
@@ -182,6 +176,11 @@ pub fn convert_fake_images(
         }
 
         clear_thumbnail_cache(&app, &video_id);
+        // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
+        let image = scanner::build_image(&target);
+        if let Ok(conn) = state.db.lock() {
+            let _ = db::insert_image(&conn, &image);
+        }
         result.converted += 1;
     }
     Ok(result)
@@ -264,8 +263,8 @@ pub async fn convert_short_videos(
         out
     };
 
-    let (converted_ids, errors) = tauri::async_runtime::spawn_blocking(move || {
-        let mut converted: Vec<String> = Vec::new();
+    let (converted, errors) = tauri::async_runtime::spawn_blocking(move || {
+        let mut converted: Vec<(String, Image)> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for (id, path, duration) in jobs {
             let p = Path::new(&path);
@@ -285,7 +284,7 @@ pub async fn convert_short_videos(
                     errors.push(format!("源文件移入回收站失败，已保留 {}: {}", p.display(), e));
                     continue;
                 }
-                converted.push(id);
+                converted.push((id, scanner::build_image(&target)));
                 continue;
             }
             let need_still_check = !matches!(duration, Some(d) if d < 1.0);
@@ -313,7 +312,7 @@ pub async fn convert_short_videos(
                 errors.push(format!("移入回收站失败，已保留 {}: {}", p.display(), e));
                 continue;
             }
-            converted.push(id);
+            converted.push((id, scanner::build_image(&target)));
         }
         (converted, errors)
     })
@@ -323,19 +322,21 @@ pub async fn convert_short_videos(
     let mut result = ConversionResult { converted: 0, errors };
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        for id in &converted_ids {
+        for (id, image) in &converted {
             db::delete_video(&conn, id).map_err(|e| e.to_string())?;
+            // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
+            let _ = db::insert_image(&conn, image);
             result.converted += 1;
         }
     }
-    for id in &converted_ids {
+    for (id, _) in &converted {
         clear_thumbnail_cache(&app, id);
     }
     Ok(result)
 }
 
 /// 文件移动：同盘 rename；跨盘（Windows ERROR_NOT_SAME_DEVICE）回退为复制+删源
-fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
+pub(crate) fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(17) => {
@@ -585,7 +586,7 @@ pub async fn convert_hevc_videos(
 
 /// 重复检测内容指纹：文件大小 + 首/中/尾各 256KB 采样哈希（SipHash）。
 /// 视频内容相同则指纹相同；不同文件冲撞概率可忽略，且指纹相同前已按大小分组。
-fn duplicate_signature(path: &str, size: i64) -> Option<u64> {
+pub(crate) fn duplicate_signature(path: &str, size: i64) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     use std::io::{Read, Seek, SeekFrom};
 

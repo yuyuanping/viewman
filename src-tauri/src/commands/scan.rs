@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::db;
 use crate::models::Video;
 use crate::scanner;
 
+use super::settings::{remember_root, SCAN_ROOTS_KEY};
 use super::AppState;
 
 #[derive(Clone, serde::Serialize)]
@@ -38,6 +39,10 @@ pub async fn scan_directory(
                 Ok(f) => f,
                 Err(e) => return Err(format!("扫描中断，未修改数据库：{}", e)),
             };
+            // 读得到目录就先记下根：本轮扫描即使被打断，下次启动也会接着扫
+            if let Ok(conn) = task_app.state::<AppState>().db.lock() {
+                let _ = remember_root(&conn, SCAN_ROOTS_KEY, &dir_for_task);
+            }
 
             let found: HashSet<String> = files
                 .iter()
@@ -91,16 +96,12 @@ pub async fn scan_directory(
 
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        // 清理失效条目 + 插入新条目必须在同一事务里：要么全部生效，要么全部回滚
-        // （Transaction 会解引用为 Connection，直接复用现有函数）
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        // 新条目已在探测时逐条落库，这里只清外部已删除的失效条目
         if !stale_ids.is_empty() {
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             db::delete_videos_by_ids(&tx, &stale_ids).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
         }
-        for video in &videos {
-            db::insert_video(&tx, video).map_err(|e| e.to_string())?;
-        }
-        tx.commit().map_err(|e| e.to_string())?;
     }
 
     let _ = app.emit(
@@ -113,7 +114,7 @@ pub async fn scan_directory(
 
 /// 返回 should-delete 的 video id：路径在 prefix 目录下（大小写不敏感），且不在 found 集合里。
 /// prefix 已含结尾分隔符，避免 "D:\v" 误匹配 "D:\vids2"。
-fn compute_stale_ids(
+pub(crate) fn compute_stale_ids(
     existing: &[(String, String)],
     prefix: &str,
     found_lower: &HashSet<String>,
@@ -140,6 +141,7 @@ fn build_videos_parallel(
     let next = AtomicUsize::new(0);
     let processed = AtomicUsize::new(0);
     let probe_failures = AtomicUsize::new(0);
+    let write_failures = AtomicUsize::new(0);
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -159,6 +161,17 @@ fn build_videos_parallel(
                         let video = scanner::build_video(&files[i]);
                         if video.duration.is_none() {
                             probe_failures.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // 探一条落一条：中途退出应用，下次扫描从这里接着走而不是从头再来
+                        match app.state::<AppState>().db.lock() {
+                            Ok(conn) => {
+                                if db::insert_video(&conn, &video).is_err() {
+                                    write_failures.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            Err(_) => {
+                                write_failures.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                         out.push(video);
                         let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -184,6 +197,10 @@ fn build_videos_parallel(
             "{} 个视频未能获取时长（请确认已安装 ffmpeg/ffprobe，或文件本身损坏）",
             failures
         ));
+    }
+    let missed = write_failures.load(Ordering::Relaxed);
+    if missed > 0 {
+        warnings.push(format!("{} 个视频记录写入数据库失败，下次扫描会重试", missed));
     }
     (videos, warnings)
 }

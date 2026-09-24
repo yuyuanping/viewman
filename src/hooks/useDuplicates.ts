@@ -1,9 +1,19 @@
 import { useCallback, useMemo, useState } from "react";
-import { api } from "../api";
 import type { Notify } from "./useToasts";
 
-/** 重复视频：按内容指纹分组检测，标记每组之外的多余副本并可一键移入回收站 */
-export function useDuplicates(loadVideos: () => Promise<void>, notify: Notify) {
+interface DuplicateOptions {
+  detect: () => Promise<string[][]>;
+  remove: (id: string) => Promise<void>;
+  /** 提示文案里的媒体名称 */
+  unit: string;
+}
+
+/** 重复条目：按内容指纹分组检测，标记每组之外的多余副本并可一键移入回收站 */
+export function useDuplicates(
+  reload: () => Promise<void>,
+  notify: Notify,
+  { detect: detectDuplicates, remove, unit }: DuplicateOptions,
+) {
   const [groups, setGroups] = useState<string[][]>([]);
   const [detected, setDetected] = useState(false);
   const [detecting, setDetecting] = useState(false);
@@ -15,22 +25,22 @@ export function useDuplicates(loadVideos: () => Promise<void>, notify: Notify) {
   const detect = useCallback(async () => {
     setDetecting(true);
     try {
-      const found = await api.findDuplicateVideos();
+      const found = await detectDuplicates();
       setGroups(found);
       setDetected(true);
       const extras = found.reduce((n, g) => n + g.length - 1, 0);
       if (found.length === 0) {
-        notify("没有发现内容相同的重复视频。");
+        notify(`没有发现内容相同的重复${unit}。`);
         setDetected(false);
       } else {
-        notify(`发现 ${found.length} 组重复视频，共 ${extras} 个多余副本。`);
+        notify(`发现 ${found.length} 组重复${unit}，共 ${extras} 个多余副本。`);
       }
     } catch (e) {
       notify(`检测重复失败：${String(e)}`, "error");
     } finally {
       setDetecting(false);
     }
-  }, [notify]);
+  }, [detectDuplicates, notify, unit]);
 
   const deleteExtras = useCallback(async () => {
     const ids = [...extraIds];
@@ -41,18 +51,18 @@ export function useDuplicates(loadVideos: () => Promise<void>, notify: Notify) {
     let failed = 0;
     for (const id of ids) {
       try {
-        await api.deleteVideo(id);
+        await remove(id);
         ok += 1;
       } catch {
         failed += 1;
       }
     }
-    await loadVideos();
+    await reload();
     setGroups([]);
     setDetected(false);
     notify(failed > 0 ? `已删除 ${ok} 个重复副本，${failed} 个失败（可能被占用）` : `已删除 ${ok} 个重复副本到回收站。`);
     setDeleting(false);
-  }, [extraIds, loadVideos, notify]);
+  }, [extraIds, reload, notify, remove, unit]);
 
   const clear = useCallback(() => {
     setGroups([]);

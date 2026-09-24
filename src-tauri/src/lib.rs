@@ -53,6 +53,13 @@ pub fn run() {
             commands::potplayer_status,
             commands::enable_potplayer_titlebar,
             commands::generate_thumbnails,
+            commands::get_images,
+            commands::scan_image_directory,
+            commands::delete_image,
+            commands::move_image,
+            commands::generate_image_thumbnails,
+            commands::find_duplicate_images,
+            commands::remove_media_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

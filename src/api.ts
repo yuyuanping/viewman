@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConversionResult,
+  Image,
+  MediaKind,
   PotPlayerStatus,
   RecentlyPlayed,
   Video,
@@ -37,11 +39,22 @@ export const api = {
   launchPotplayer: (videoPath: string, seek: number | null) =>
     invoke<void>("launch_potplayer", { videoPath, seek }),
   potplayerStatus: (videoPath: string) => invoke<PotPlayerStatus>("potplayer_status", { videoPath }),
-  loadScanRoots: () => invoke<string[]>("load_scan_roots"),
-  saveScanRoots: (roots: string[]) => invoke<void>("save_scan_roots", { roots }),
+  loadScanRoots: (kind: MediaKind) => invoke<string[]>("load_scan_roots", { kind }),
+  saveScanRoots: (kind: MediaKind, roots: string[]) => invoke<void>("save_scan_roots", { kind, roots }),
+  /** 移除目录：忘掉扫描根并删除库内条目（磁盘文件不动），返回清除的条目数 */
+  removeMediaDirectory: (kind: MediaKind, dir: string) =>
+    invoke<number>("remove_media_directory", { kind, dir }),
+  getImages: () => invoke<Image[]>("get_images"),
+  scanImageDirectory: (dir: string) => invoke<Image[]>("scan_image_directory", { dir }),
+  deleteImage: (imageId: string) => invoke<void>("delete_image", { imageId }),
+  moveImage: (imageId: string, targetDir: string) =>
+    invoke<string>("move_image", { imageId, targetDir }),
+  generateImageThumbnails: (imageIds: string[]) =>
+    invoke<number>("generate_image_thumbnails", { imageIds }),
+  findDuplicateImages: () => invoke<string[][]>("find_duplicate_images"),
 };
 
-/** 后端 scan-progress 事件负载 */
+/** 后端 scan-progress / image-scan-progress 事件负载（两套库共用同一形状） */
 export interface ScanProgressPayload {
   processed: number;
   total: number;

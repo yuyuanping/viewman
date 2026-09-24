@@ -14,6 +14,20 @@ pub struct Video {
     pub thumbnail_path: Option<String>,
 }
 
+/// 图片库条目：与视频分表存放，宽高来自 ffprobe，缺失表示尚未探测
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Image {
+    pub id: String,
+    pub path: String,
+    pub filename: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub file_size: i64,
+    pub created_at: String,
+    /// 缩略图缓存文件的绝对路径（由 ffmpeg 缩放导出，缺失表示尚未生成）
+    pub thumbnail_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchProgress {
     pub id: String,

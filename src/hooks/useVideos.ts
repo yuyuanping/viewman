@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api";
 import type { RecentlyPlayed, Video } from "../types";
-import { loadScanRoots, migrateLegacyScanRoots, rememberScanRoot } from "../scanRootStore";
+import { loadScanRoots, migrateLegacyScanRoots } from "../scanRootStore";
 
 /** 自动重扫的目录级进度 */
 export interface RescanStatus {
@@ -48,6 +48,7 @@ export function useVideos() {
     return scanError;
   }, [refresh]);
 
+  /** 扫描根由后端在能读到目录时即刻记下，扫到一半被打断，下次启动会自己接着扫 */
   const scanDirectory = useCallback(async (dir: string) => {
     setLoading(true);
     setError(null);
@@ -55,8 +56,6 @@ export function useVideos() {
       const result = await runScan(dir);
       if (result !== null) {
         setError(result);
-      } else {
-        await rememberScanRoot(dir);
       }
     } finally {
       setLoading(false);
@@ -65,7 +64,7 @@ export function useVideos() {
 
   /** 打开应用时自动重新扫描所有已记录的目录；个别目录失败只汇总提示，不影响其余目录 */
   const rescanAll = useCallback(async () => {
-    const roots = await loadScanRoots();
+    const roots = await loadScanRoots("video");
     if (roots.length === 0) return;
     setLoading(true);
     const failed: string[] = [];

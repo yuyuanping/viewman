@@ -1,10 +1,12 @@
 use rusqlite::{Connection, Result};
 
+mod images;
 mod progress;
 mod settings;
 mod videos;
 
 // 对 commands 保持平铺的函数路径（db::get_all_videos 等）
+pub use images::*;
 pub use progress::*;
 pub use settings::*;
 pub use videos::*;
@@ -33,6 +35,16 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS images (
+            id TEXT PRIMARY KEY,
+            path TEXT UNIQUE NOT NULL,
+            filename TEXT NOT NULL,
+            width INTEGER,
+            height INTEGER,
+            file_size INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            thumbnail_path TEXT
         );"
     )
 }
@@ -76,6 +88,20 @@ pub(crate) fn sample_video(id: &str, path: &str) -> crate::models::Video {
         duration: Some(60.0),
         width: Some(1280),
         height: Some(720),
+        file_size: 100,
+        created_at: "".into(),
+        thumbnail_path: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn sample_image(id: &str, path: &str) -> crate::models::Image {
+    crate::models::Image {
+        id: id.into(),
+        path: path.into(),
+        filename: "i.png".into(),
+        width: Some(800),
+        height: Some(600),
         file_size: 100,
         created_at: "".into(),
         thumbnail_path: None,

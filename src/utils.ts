@@ -21,6 +21,12 @@ export function formatFileSize(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(1))} ${sizes[i]}`;
 }
 
+/** 图片尺寸标注：ffprobe 取不到宽高时留白，不显示 0×0 */
+export function formatResolution(width: number | null | undefined, height: number | null | undefined): string {
+  if (!width || !height) return "";
+  return `${width}×${height}`;
+}
+
 // 系统装了 HEVC 视频扩展时 WebView2 能原生解码，无需转码兜底
 export const hevcNativeSupported: boolean = (() => {
   try {
