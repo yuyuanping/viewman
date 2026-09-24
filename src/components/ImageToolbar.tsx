@@ -30,6 +30,8 @@ interface ImageToolbarProps {
   onMoveSelected: () => void;
   movingSelected: boolean;
   onExitSelect: () => void;
+  /** 从当前过滤结果里随机打开一张 */
+  onRandomPick: () => void;
 }
 
 const SORT_OPTIONS: { value: ImageSortField; label: string }[] = [
@@ -65,6 +67,7 @@ export function ImageToolbar({
   onMoveSelected,
   movingSelected,
   onExitSelect,
+  onRandomPick,
 }: ImageToolbarProps) {
   return (
     <div className="library-toolbar shrink-0">
@@ -87,6 +90,14 @@ export function ImageToolbar({
         title={sortDirection === "asc" ? "升序" : "降序"}
       >
         {sortDirection === "asc" ? "↑ 升序" : "↓ 降序"}
+      </button>
+      <button
+        type="button"
+        className="toolbar-chip"
+        onClick={onRandomPick}
+        title="从当前列表随机打开一张"
+      >
+        随机一张
       </button>
 
       <span className="toolbar-spacer" />

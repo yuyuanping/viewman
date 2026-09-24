@@ -265,6 +265,37 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     }
   }, []);
 
+  // 通用播放器快捷键：空格 播放/暂停，F 全屏，M 静音，↑↓ 音量
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      // 输入控件里有自己的键行为，不劫持
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const el = videoRef.current;
+      if (!el) return;
+      if (e.key === " ") {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        el.muted = !el.muted;
+        setAutoMuted(false);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        el.volume = Math.min(1, el.volume + 0.1);
+        el.muted = false;
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        el.volume = Math.max(0, el.volume - 0.1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [togglePlay, toggleFullscreen]);
+
   // 画面旋转：每点一次顺时针 90°；90/270 时按旋转后的外接框重新约束视频
   const [rot, setRot] = useState(0);
   const rotateFrame = useCallback(() => setRot(r => (r + 90) % 360), []);

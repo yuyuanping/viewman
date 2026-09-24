@@ -16,6 +16,17 @@ pub struct ScanProgress {
     pub total: usize,
     pub done: bool,
     pub warnings: Vec<String>,
+    /// 扫描摘要（done=true 时有效）：本次新增 / 移除 / 元数据刷新的条目数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ScanSummary>,
+}
+
+/// 一次扫描的变更统计，供前端在完成 Toast 里展示
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct ScanSummary {
+    pub added: usize,
+    pub removed: usize,
+    pub refreshed: usize,
 }
 
 #[tauri::command]
@@ -32,8 +43,8 @@ pub async fn scan_directory(
     let dir_path = std::path::PathBuf::from(&dir);
     let dir_for_task = dir.clone();
     let task_app = app.clone();
-    let (videos, stale_ids, warnings) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Video>, Vec<String>, Vec<String>), String> {
+    let (videos, stale_ids, warnings, summary) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Video>, Vec<String>, Vec<String>, ScanSummary), String> {
             // 目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
             let files = match scanner::scan_directory_recursive(&dir_path) {
                 Ok(f) => f,
@@ -70,12 +81,14 @@ pub async fn scan_directory(
 
             let _ = task_app.emit(
                 "scan-progress",
-                ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![] },
+                ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![], summary: None },
             );
 
             let (mut videos, warnings) = build_videos_parallel(&task_app, &new_files);
+            let mut refreshed = 0;
             for video in &mut videos {
                 if let Some(old) = by_path.get(&video.path.to_lowercase()) {
+                    refreshed += 1;
                     let incomplete = video.duration.is_none() || video.width.is_none() || video.height.is_none();
                     video.id = old.id.clone();
                     video.path = old.path.clone();
@@ -89,7 +102,10 @@ pub async fn scan_directory(
                     }
                 }
             }
-            Ok((videos, stale_ids, warnings))
+            // added = 探测成功的条目里没在旧库出现过的；refreshed = 命中旧库被刷新的
+            let added = videos.iter().filter(|v| !by_path.contains_key(&v.path.to_lowercase())).count();
+            let summary = Ok((videos, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }));
+            summary
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -106,7 +122,7 @@ pub async fn scan_directory(
 
     let _ = app.emit(
         "scan-progress",
-        ScanProgress { processed: videos.len(), total: videos.len(), done: true, warnings: warnings.clone() },
+        ScanProgress { processed: videos.len(), total: videos.len(), done: true, warnings: warnings.clone(), summary: Some(ScanSummary { added: summary.added, removed: stale_ids.len(), refreshed: summary.refreshed }) },
     );
 
     Ok(videos)
@@ -177,7 +193,7 @@ fn build_videos_parallel(
                         let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                         let _ = app.emit(
                             "scan-progress",
-                            ScanProgress { processed: done, total, done: false, warnings: vec![] },
+                            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
                         );
                     }
                     out

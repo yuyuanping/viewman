@@ -132,6 +132,13 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
     setViewerIndex(index >= 0 ? index : 0);
   }, [filteredImages]);
 
+  // 随机一张：直接以整个过滤结果为查看器列表，从随机位置开始看
+  const handleRandomPick = useCallback(() => {
+    if (filteredImages.length === 0) return;
+    setViewerList(filteredImages);
+    setViewerIndex(Math.floor(Math.random() * filteredImages.length));
+  }, [filteredImages]);
+
   const closeViewer = useCallback(() => {
     setViewerIndex(null);
     setViewerList([]);
@@ -162,6 +169,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
         title="图片库"
         unit="图片"
         measure="张"
+        totalSize={filteredImages.reduce((s, i) => s + i.file_size, 0)}
       />
       <div className="flex justify-between items-center text-xs text-gray-400 shrink-0">
         <span className="truncate" title={selectedDir || "所有图片"}>{selectedDirectoryLabel(selectedDir, "所有图片")}</span>
@@ -194,6 +202,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, onScanDirector
         onMoveSelected={handleMoveSelected}
         movingSelected={movingSelected}
         onExitSelect={exitSelectMode}
+        onRandomPick={handleRandomPick}
       />
       <ImageGrid
         images={filteredImages}

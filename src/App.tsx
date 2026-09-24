@@ -279,6 +279,13 @@ function App() {
     }
   }, [useExternalPlayer, openFromLibrary, launchInPotPlayer, seekFor]);
 
+  // 随机播放：从当前过滤结果里抽一个（跳过假视频）
+  const handleRandomPick = useCallback(() => {
+    const pool = filteredVideos.filter(v => !fakeIds.has(v.id));
+    if (pool.length === 0) return;
+    handlePlayVideo(pool[Math.floor(Math.random() * pool.length)]);
+  }, [filteredVideos, fakeIds, handlePlayVideo]);
+
   const handlePlayById = useCallback((videoId: string, position: number) => {
     const video = videos.find((v) => v.id === videoId);
     if (!video) return;
@@ -398,7 +405,7 @@ function App() {
           />
         ) : (
           <>
-            <SearchBar value={searchQuery} onChange={setSearchQuery} total={filteredVideos.length} title="视频库" unit="视频" />
+            <SearchBar value={searchQuery} onChange={setSearchQuery} total={filteredVideos.length} title="视频库" unit="视频" totalDuration={filteredVideos.reduce((s, v) => s + (v.duration ?? 0), 0)} totalSize={filteredVideos.reduce((s, v) => s + v.file_size, 0)} />
             <div className="flex justify-between items-center text-xs text-gray-400 shrink-0"><span className="truncate" title={selectedDir || "所有视频"}>{selectedDirectoryLabel(selectedDir)}</span><span className="ml-3 shrink-0">{searchQuery ? "搜索结果" : "本地媒体"}</span></div>
             <LibraryToolbar
               sortField={sortField}
@@ -454,6 +461,7 @@ function App() {
               onMoveSelected={handleMoveSelected}
               movingSelected={movingSelected}
               onExitSelect={exitSelectMode}
+              onRandomPick={handleRandomPick}
             />
             <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onPlay={handlePlayVideo} onDeleted={loadVideos} onMoved={loadVideos} />
           </>

@@ -16,9 +16,17 @@ export function useScanProgress(
     let disposed = false;
     let unlisten: (() => void) | undefined;
     listen<ScanProgressPayload>(event, (received) => {
-      const { processed, total, done, warnings } = received.payload;
+      const { processed, total, done, warnings, summary } = received.payload;
       setScanProgress(done ? null : { processed, total });
       if (warnings?.length) onNotice(warnings.join("；"));
+      // 扫描完成：有实际变更才提示，让"扫了一圈什么都没变"保持安静
+      if (done && summary) {
+        const parts: string[] = [];
+        if (summary.added > 0) parts.push(`新增 ${summary.added}`);
+        if (summary.removed > 0) parts.push(`移除 ${summary.removed}`);
+        if (summary.refreshed > 0) parts.push(`刷新 ${summary.refreshed}`);
+        if (parts.length > 0) onNotice(`扫描完成：${parts.join("，")}`);
+      }
     }).then((fn) => {
       if (disposed) fn(); else unlisten = fn;
     }).catch(e => onNotice(`扫描进度监听失败：${String(e)}`));

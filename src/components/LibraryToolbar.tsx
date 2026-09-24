@@ -55,6 +55,8 @@ interface LibraryToolbarProps {
   onMoveSelected: () => void;
   movingSelected: boolean;
   onExitSelect: () => void;
+  /** 从当前过滤结果里随机打开一个 */
+  onRandomPick: () => void;
 }
 
 const SORT_OPTIONS: { value: SortField; label: string }[] = [
@@ -125,6 +127,7 @@ export function LibraryToolbar({
   onMoveSelected,
   movingSelected,
   onExitSelect,
+  onRandomPick,
 }: LibraryToolbarProps) {
   return (
     <div className="library-toolbar shrink-0">
@@ -147,6 +150,14 @@ export function LibraryToolbar({
         title={sortDirection === "asc" ? "升序" : "降序"}
       >
         {sortDirection === "asc" ? "↑ 升序" : "↓ 降序"}
+      </button>
+      <button
+        type="button"
+        className="toolbar-chip"
+        onClick={onRandomPick}
+        title="从当前列表随机播放一个"
+      >
+        随机播放
       </button>
 
       <span className="toolbar-label" style={{ marginLeft: 8 }}>观看状态</span>

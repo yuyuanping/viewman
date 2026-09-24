@@ -60,6 +60,8 @@ export interface ScanProgressPayload {
   total: number;
   done: boolean;
   warnings?: string[];
+  /** 扫描摘要（done=true 时携带）：本次新增 / 移除 / 元数据刷新的条目数 */
+  summary?: { added: number; removed: number; refreshed: number };
 }
 
 /** 后端 hevc-progress 事件负载 */

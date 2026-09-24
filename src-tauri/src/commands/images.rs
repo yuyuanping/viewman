@@ -8,7 +8,7 @@ use crate::db;
 use crate::models::Image;
 use crate::scanner;
 
-use super::scan::{compute_stale_ids, ScanProgress};
+use super::scan::{compute_stale_ids, ScanProgress, ScanSummary};
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbJob};
 use super::videos::{duplicate_signature, move_file};
@@ -36,8 +36,8 @@ pub async fn scan_image_directory(
     let dir_path = PathBuf::from(&dir);
     let dir_for_task = dir.clone();
     let task_app = app.clone();
-    let (images, stale_ids, warnings) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Image>, Vec<String>, Vec<String>), String> {
+    let (images, stale_ids, warnings, summary) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Image>, Vec<String>, Vec<String>, ScanSummary), String> {
             // 目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
             let files = match scanner::scan_image_directory_recursive(&dir_path) {
                 Ok(f) => f,
@@ -77,12 +77,14 @@ pub async fn scan_image_directory(
 
             let _ = task_app.emit(
                 "image-scan-progress",
-                ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![] },
+                ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![], summary: None },
             );
 
             let (mut images, warnings) = build_images_parallel(&task_app, &new_files);
+            let mut refreshed = 0;
             for image in &mut images {
                 if let Some(old) = by_path.get(&image.path.to_lowercase()) {
+                    refreshed += 1;
                     let incomplete = image.width.is_none() || image.height.is_none();
                     image.id = old.id.clone();
                     image.path = old.path.clone();
@@ -95,7 +97,8 @@ pub async fn scan_image_directory(
                     }
                 }
             }
-            Ok((images, stale_ids, warnings))
+            let added = images.iter().filter(|i| !by_path.contains_key(&i.path.to_lowercase())).count();
+            Ok((images, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }))
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -112,7 +115,7 @@ pub async fn scan_image_directory(
 
     let _ = app.emit(
         "image-scan-progress",
-        ScanProgress { processed: images.len(), total: images.len(), done: true, warnings: warnings.clone() },
+        ScanProgress { processed: images.len(), total: images.len(), done: true, warnings: warnings.clone(), summary: Some(ScanSummary { added: summary.added, removed: stale_ids.len(), refreshed: summary.refreshed }) },
     );
 
     Ok(images)
@@ -177,7 +180,7 @@ fn build_images_parallel(
                         let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                         let _ = app.emit(
                             "image-scan-progress",
-                            ScanProgress { processed: done, total, done: false, warnings: vec![] },
+                            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
                         );
                     }
                     out

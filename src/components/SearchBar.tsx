@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { formatDuration, formatFileSize } from "../utils";
 
 interface SearchBarProps {
   value: string;
@@ -9,9 +10,13 @@ interface SearchBarProps {
   unit: string;
   /** 计数量词：视频用"个"，图片用"张" */
   measure?: string;
+  /** 当前列表的总时长（秒），视频库显示；图片库不传 */
+  totalDuration?: number | null;
+  /** 当前列表的总大小（字节） */
+  totalSize?: number;
 }
 
-export function SearchBar({ value, onChange, total, title, unit, measure = "个" }: SearchBarProps) {
+export function SearchBar({ value, onChange, total, title, unit, measure = "个", totalDuration = null, totalSize = 0 }: SearchBarProps) {
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -28,7 +33,11 @@ export function SearchBar({ value, onChange, total, title, unit, measure = "个"
     <header className="flex flex-col gap-5 shrink-0">
       <div className="flex items-end justify-between gap-3">
         <div><h2 className="library-heading">{title}</h2></div>
-        <span className="text-gray-400 text-xs rounded-full border border-white/10 px-3 py-1.5 tabular-nums">{total.toLocaleString()} {measure}{unit}</span>
+        <span className="text-gray-400 text-xs rounded-full border border-white/10 px-3 py-1.5 tabular-nums" title={totalDuration ? "当前列表 · 总时长 · 总大小" : "当前列表 · 总大小"}>
+          {total.toLocaleString()} {measure}{unit}
+          {totalDuration ? <> · {formatDuration(totalDuration)}</> : null}
+          {totalSize > 0 ? <> · {formatFileSize(totalSize)}</> : null}
+        </span>
       </div>
       <div className="search-field">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" className="text-gray-400 shrink-0" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
