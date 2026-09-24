@@ -60,6 +60,7 @@ pub fn run() {
             commands::generate_image_thumbnails,
             commands::find_duplicate_images,
             commands::remove_media_directory,
+            commands::capture_frame,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

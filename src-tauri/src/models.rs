@@ -26,6 +26,8 @@ pub struct Image {
     pub created_at: String,
     /// 缩略图缓存文件的绝对路径（由 ffmpeg 缩放导出，缺失表示尚未生成）
     pub thumbnail_path: Option<String>,
+    /// 文件修改时间（ISO8601 本地时间），扫描时从文件系统读取；照片整理排序用
+    pub modified_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

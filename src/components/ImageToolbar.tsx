@@ -1,7 +1,7 @@
 import type { SortDirection } from "../libraryFilter";
 
 /** 图片库没有时长，排序字段比视频库少一项 */
-export type ImageSortField = "filename" | "file_size" | "created_at";
+export type ImageSortField = "filename" | "file_size" | "created_at" | "modified_at";
 
 interface ImageToolbarProps {
   sortField: ImageSortField;
@@ -38,6 +38,7 @@ const SORT_OPTIONS: { value: ImageSortField; label: string }[] = [
   { value: "filename", label: "文件名" },
   { value: "file_size", label: "文件大小" },
   { value: "created_at", label: "添加时间" },
+  { value: "modified_at", label: "修改时间" },
 ];
 
 export function ImageToolbar({

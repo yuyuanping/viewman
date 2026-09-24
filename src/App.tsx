@@ -20,7 +20,7 @@ import { loadScanRoots } from "./scanRootStore";
 import { countUnderDir, isUnderDir } from "./scanRoots";
 import type { MediaKind, Video } from "./types";
 import type { SortField, SortDirection, WatchState } from "./libraryFilter";
-import { filterMedia, filterByWatchState, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
+import { filterMedia, filterByWatchState, filterByMedia, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
 import { ToastLayer } from "./components/Toast";
 
@@ -55,6 +55,10 @@ function App() {
   const [sortField, setSortField] = useState<SortField>("filename");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [watchState, setWatchState] = useState<WatchState>("all");
+  // 高级过滤：null=不限；数值为下限
+  const [minSizeGb, setMinSizeGb] = useState<string>("");   // "" | "1" | "5"（GB）
+  const [minDurationMin, setMinDurationMin] = useState<string>(""); // "" | "10" | "30" | "60"（分钟）
+  const [minHeight, setMinHeight] = useState<string>("");   // "" | "480" | "720" | "1080" | "2160"（p）
   // 多选批量删除模式
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -185,13 +189,19 @@ function App() {
   const filteredVideos = useMemo(() => {
     const matched = filterMedia(videos, selectedDir, searchQuery);
     const byWatchState = filterByWatchState(matched, progressMap, (v) => v.id, watchState);
-    return sortMedia(byWatchState, sortField, sortDirection);
-  }, [videos, selectedDir, searchQuery, progressMap, watchState, sortField, sortDirection]);
+    const mediaFilter = {
+      minSize: minSizeGb ? Number(minSizeGb) * 1024 ** 3 : null,
+      minDuration: minDurationMin ? Number(minDurationMin) * 60 : null,
+      minHeight: minHeight ? Number(minHeight) : null,
+    };
+    const byMedia = filterByMedia(byWatchState, mediaFilter);
+    return sortMedia(byMedia, sortField, sortDirection);
+  }, [videos, selectedDir, searchQuery, progressMap, watchState, minSizeGb, minDurationMin, minHeight, sortField, sortDirection]);
 
   // 筛选条件一变，之前勾选但已不在视图里的项不再可见，直接清空选择避免"隐形删除"
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [selectedDir, searchQuery, watchState]);
+  }, [selectedDir, searchQuery, watchState, minSizeGb, minDurationMin, minHeight]);
 
   const toggleSelect = useCallback((video: Video) => {
     setSelectedIds(prev => {
@@ -414,6 +424,12 @@ function App() {
               onToggleDirection={toggleSortDirection}
               watchState={watchState}
               onWatchStateChange={setWatchState}
+              minSizeGb={minSizeGb}
+              minDurationMin={minDurationMin}
+              minHeight={minHeight}
+              onMinSizeGbChange={setMinSizeGb}
+              onMinDurationMinChange={setMinDurationMin}
+              onMinHeightChange={setMinHeight}
               onCheckFiles={handleCheckFiles}
               checking={checking}
               checkProgress={checkProgress}

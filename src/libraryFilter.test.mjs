@@ -5,6 +5,7 @@ import {
   selectedDirectoryLabel,
   sortMedia,
   filterByWatchState,
+  filterByMedia,
   watchStateOf,
   FINISHED_RATIO,
 } from './libraryFilter.ts';
@@ -85,4 +86,34 @@ test('filterByWatchState narrows the list and passes everything through for all'
   assert.deepEqual(filterByWatchState(videos, progress, resolveId, 'unwatched').map(v => v.id), ['a']);
   assert.deepEqual(filterByWatchState(videos, progress, resolveId, 'finished').map(v => v.id), ['b']);
   assert.deepEqual(filterByWatchState(videos, progress, resolveId, 'in_progress').map(v => v.id), ['c']);
+});
+
+test('filterByMedia applies size, duration and height floors', () => {
+  const items = [
+    { id: 'big', duration: 3600, file_size: 5 * 1024 ** 3, height: 2160 },   // 1h, 5GB, 4K
+    { id: 'mid', duration: 1200, file_size: 900 * 1024 ** 2, height: 1080 },   // 20min, 900MB, 1080p
+    { id: 'small', duration: 60, file_size: 20 * 1024 ** 2, height: 480 },     // 1min, 20MB, 480p
+    { id: 'unknown', duration: null, file_size: 100, height: null },          // 探测失败
+  ];
+  // 无条件：全过
+  assert.equal(filterByMedia(items, null).length, 4);
+  // 只限大小
+  assert.deepEqual(filterByMedia(items, { minSize: 1024 ** 3 }).map(v => v.id), ['big']);
+  // 只限时长：时长未知直接排除
+  assert.deepEqual(filterByMedia(items, { minDuration: 1800 }).map(v => v.id), ['big']);
+  // 只限分辨率：height 未知排除
+  assert.deepEqual(filterByMedia(items, { minHeight: 1080 }).map(v => v.id), ['big', 'mid']);
+  // 组合
+  assert.deepEqual(filterByMedia(items, { minDuration: 600, minSize: 100 * 1024 ** 2, minHeight: 720 }).map(v => v.id), ['big', 'mid']);
+});
+
+test('sortMedia by modified_at puts entries without mtime at the end', () => {
+  const items = [
+    { id: 'no-mtime', filename: 'a.png', file_size: 1, created_at: '', modified_at: null },
+    { id: 'new', filename: 'b.png', file_size: 1, created_at: '', modified_at: '2026-03-01T00:00:00' },
+    { id: 'old', filename: 'c.png', file_size: 1, created_at: '', modified_at: '2026-01-01T00:00:00' },
+  ];
+  assert.deepEqual(sortMedia(items, 'modified_at', 'asc').map(v => v.id), ['old', 'new', 'no-mtime']);
+  // 切换方向缺失值仍在末尾
+  assert.deepEqual(sortMedia(items, 'modified_at', 'desc').map(v => v.id), ['new', 'old', 'no-mtime']);
 });

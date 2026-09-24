@@ -35,6 +35,9 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
   const [rate, setRate] = useState(loadRate);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [progressError, setProgressError] = useState<string | null>(null);
+  // 截图：成功/失败走 notice 条（播放器内没有 Toast 队列）
+  const [captureNotice, setCaptureNotice] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
   const [fileReadable, setFileReadable] = useState(false);
   const [showError, setShowError] = useState(false);
   const [autoMuted, setAutoMuted] = useState(false);
@@ -241,6 +244,25 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     if (el.paused) tryPlay(el);
   }, [tryPlay]);
 
+  // 截图当前帧：后端 ffmpeg 抽帧存到视频同目录，几秒后自动收起成功提示
+  const captureTimerRef = useRef<number | null>(null);
+  const handleCapture = useCallback(async () => {
+    const el = videoRef.current;
+    if (!el || capturing) return;
+    setCapturing(true);
+    setCaptureNotice(null);
+    try {
+      const out = await api.captureFrame(video.id, el.currentTime);
+      setCaptureNotice(`已保存：${out}`);
+    } catch (e) {
+      setCaptureNotice(`截图失败：${String(e)}`);
+    } finally {
+      setCapturing(false);
+      if (captureTimerRef.current) window.clearTimeout(captureTimerRef.current);
+      captureTimerRef.current = window.setTimeout(() => setCaptureNotice(null), 5000);
+    }
+  }, [video.id, capturing]);
+
   const changeRate = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = Number(e.target.value);
     setRate(value);
@@ -283,6 +305,9 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
         e.preventDefault();
         el.muted = !el.muted;
         setAutoMuted(false);
+      } else if (e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void handleCapture();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         el.volume = Math.min(1, el.volume + 0.1);
@@ -294,7 +319,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlay, toggleFullscreen]);
+  }, [togglePlay, toggleFullscreen, handleCapture]);
 
   // 画面旋转：每点一次顺时针 90°；90/270 时按旋转后的外接框重新约束视频
   const [rot, setRot] = useState(0);
@@ -397,6 +422,9 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
         {progressError && (
           <p className="player-progress-notice text-amber-300 text-sm">{progressError}</p>
         )}
+        {captureNotice && (
+          <p className="player-progress-notice text-gray-300 text-sm truncate max-w-full px-6" title={captureNotice}>{captureNotice}</p>
+        )}
 
         <div className="player-controls w-full max-w-3xl flex flex-col gap-3.5">
           <div className="player-transport flex items-center justify-center gap-4">
@@ -422,6 +450,17 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
               title="快进 10 秒（→）"
             >
               10⏩
+            </button>
+          </div>
+
+          <div className="flex items-center justify-center gap-3 text-xs text-gray-300">
+            <button
+              onClick={() => void handleCapture()}
+              disabled={capturing}
+              className="inline-flex items-center gap-1.5 rounded-full bg-white/10 hover:bg-white/15 px-3 py-1.5 transition disabled:opacity-50"
+              title="截图当前帧到视频所在目录（S）"
+            >
+              {capturing ? "截图中…" : "📷 截图"}
             </button>
           </div>
 

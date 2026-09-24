@@ -4,7 +4,7 @@ use crate::models::Image;
 
 pub fn get_all_images(conn: &Connection) -> Result<Vec<Image>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, filename, width, height, file_size, created_at, thumbnail_path FROM images ORDER BY filename"
+        "SELECT id, path, filename, width, height, file_size, created_at, thumbnail_path, modified_at FROM images ORDER BY filename"
     )?;
     let images = stmt.query_map([], |row| {
         Ok(Image {
@@ -16,6 +16,7 @@ pub fn get_all_images(conn: &Connection) -> Result<Vec<Image>> {
             file_size: row.get(5)?,
             created_at: row.get(6)?,
             thumbnail_path: row.get(7)?,
+            modified_at: row.get(8)?,
         })
     })?.collect::<Result<Vec<_>>>()?;
     Ok(images)
@@ -23,14 +24,15 @@ pub fn get_all_images(conn: &Connection) -> Result<Vec<Image>> {
 
 pub fn insert_image(conn: &Connection, image: &Image) -> Result<()> {
     conn.execute(
-        "INSERT INTO images (id, path, filename, width, height, file_size, created_at, thumbnail_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO images (id, path, filename, width, height, file_size, created_at, thumbnail_path, modified_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(path) DO UPDATE SET filename=excluded.filename, width=COALESCE(excluded.width,images.width),
          height=COALESCE(excluded.height,images.height), file_size=excluded.file_size,
-         thumbnail_path=COALESCE(excluded.thumbnail_path,images.thumbnail_path)",
+         thumbnail_path=COALESCE(excluded.thumbnail_path,images.thumbnail_path),
+         modified_at=COALESCE(excluded.modified_at,images.modified_at)",
         params![
             image.id, image.path, image.filename,
             image.width, image.height,
-            image.file_size, image.created_at, image.thumbnail_path
+            image.file_size, image.created_at, image.thumbnail_path, image.modified_at
         ],
     )?;
     Ok(())

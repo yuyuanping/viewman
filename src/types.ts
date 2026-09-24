@@ -20,6 +20,8 @@ export interface Image {
   file_size: number;
   created_at: string;
   thumbnail_path?: string | null;
+  /** 文件修改时间（ISO8601），照片整理排序用；老数据可能缺失 */
+  modified_at?: string | null;
 }
 
 export type MediaKind = "video" | "image";

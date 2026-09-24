@@ -34,6 +34,9 @@ export const api = {
     invoke<string>("move_video", { videoId, targetDir }),
   generateThumbnails: (videoIds: string[]) =>
     invoke<number>("generate_thumbnails", { videoIds }),
+  /** 播放器截图：截当前帧存到视频同目录，返回输出路径 */
+  captureFrame: (videoId: string, position: number) =>
+    invoke<string>("capture_frame", { videoId, position }),
   checkPotplayer: () => invoke<boolean>("check_potplayer"),
   checkFfprobe: () => invoke<boolean>("check_ffprobe"),
   launchPotplayer: (videoPath: string, seek: number | null) =>

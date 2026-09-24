@@ -133,3 +133,45 @@ pub async fn generate_thumbnails(
 pub(crate) fn cached_thumbnail_usable(path: &Option<String>) -> bool {
     matches!(path, Some(p) if std::path::Path::new(p).exists())
 }
+
+/// 播放器截图：截当前播放帧，存到视频同目录（<视频名>_<时间戳>.png），返回输出路径。
+/// 用 ffmpeg seek 到指定秒抽 1 帧，原始分辨率不缩放
+#[tauri::command]
+pub async fn capture_frame(
+    state: State<'_, AppState>,
+    video_id: String,
+    position: f64,
+) -> Result<String, String> {
+    let path = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_video_path(&conn, &video_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Video not found: {}", video_id))?
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let src = std::path::Path::new(&path);
+        let parent = src.parent().ok_or("无法确定视频所在目录")?;
+        let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "frame".into());
+        let stamp = if position > 0.0 { format!("_{:02}m{:02}s", (position / 60.0).floor() as u32, (position % 60.0).round() as u32) } else { "_start".to_string() };
+        let out = parent.join(format!("{}_{}.png", stem, stamp));
+
+        let output = crate::scanner::hidden_command("ffmpeg")
+            .args([
+                "-y",
+                "-ss", &position.max(0.0).to_string(),
+                "-i", &path,
+                "-frames:v", "1",
+                &out.to_string_lossy(),
+            ])
+            .output()
+            .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("截图失败: {}", detail.chars().take(200).collect::<String>()));
+        }
+        Ok(out.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

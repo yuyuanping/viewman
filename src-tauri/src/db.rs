@@ -44,7 +44,8 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             height INTEGER,
             file_size INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            thumbnail_path TEXT
+            thumbnail_path TEXT,
+            modified_at TEXT
         );"
     )
 }
@@ -60,6 +61,15 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
     }
     if !columns.iter().any(|c| c == "video_codec") {
         conn.execute("ALTER TABLE videos ADD COLUMN video_codec TEXT", [])?;
+    }
+    drop(stmt);
+    // 图片表可能尚未建（PRAGMA 对不存在的表返回空列集），有列且缺 modified_at 才补
+    let mut stmt = conn.prepare("PRAGMA table_info(images)")?;
+    let image_columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>>>()?;
+    if !image_columns.is_empty() && !image_columns.iter().any(|c| c == "modified_at") {
+        conn.execute("ALTER TABLE images ADD COLUMN modified_at TEXT", [])?;
     }
     Ok(())
 }
@@ -105,6 +115,7 @@ pub(crate) fn sample_image(id: &str, path: &str) -> crate::models::Image {
         file_size: 100,
         created_at: "".into(),
         thumbnail_path: None,
+        modified_at: None,
     }
 }
 

@@ -173,6 +173,15 @@ pub fn build_video(path: &std::path::PathBuf) -> Video {
 /// 图片条目：ffprobe 读图片同样能给出宽高，取不到时留空由前端回退显示原图
 pub fn build_image(path: &std::path::PathBuf) -> Image {
     let metadata = get_metadata(&path.to_string_lossy()).ok();
+    let modified_at = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| {
+            chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + d)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string()
+        });
 
     Image {
         id: uuid::Uuid::new_v4().to_string(),
@@ -183,6 +192,7 @@ pub fn build_image(path: &std::path::PathBuf) -> Image {
         file_size: file_size_of(path),
         created_at: added_at_now(),
         thumbnail_path: None,
+        modified_at,
     }
 }
 

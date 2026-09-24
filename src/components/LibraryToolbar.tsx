@@ -8,6 +8,13 @@ interface LibraryToolbarProps {
   onToggleDirection: () => void;
   watchState: WatchState;
   onWatchStateChange: (state: WatchState) => void;
+  /** 高级过滤：值为字符串，空串 = 不限 */
+  minSizeGb: string;
+  minDurationMin: string;
+  minHeight: string;
+  onMinSizeGbChange: (v: string) => void;
+  onMinDurationMinChange: (v: string) => void;
+  onMinHeightChange: (v: string) => void;
   onCheckFiles: () => void;
   checking: boolean;
   checkProgress: { processed: number; total: number } | null;
@@ -80,6 +87,12 @@ export function LibraryToolbar({
   onToggleDirection,
   watchState,
   onWatchStateChange,
+  minSizeGb,
+  minDurationMin,
+  minHeight,
+  onMinSizeGbChange,
+  onMinDurationMinChange,
+  onMinHeightChange,
   onCheckFiles,
   checking,
   checkProgress,
@@ -172,6 +185,45 @@ export function LibraryToolbar({
           {option.label}
         </button>
       ))}
+
+      <span className="toolbar-label" style={{ marginLeft: 8 }}>筛选</span>
+      <select
+        className="toolbar-select"
+        value={minDurationMin}
+        onChange={(e) => onMinDurationMinChange(e.target.value)}
+        aria-label="时长下限"
+        title="按时长过滤"
+      >
+        <option value="">时长不限</option>
+        <option value="10">≥10 分钟</option>
+        <option value="30">≥30 分钟</option>
+        <option value="60">≥1 小时</option>
+      </select>
+      <select
+        className="toolbar-select"
+        value={minSizeGb}
+        onChange={(e) => onMinSizeGbChange(e.target.value)}
+        aria-label="大小下限"
+        title="按文件大小过滤"
+      >
+        <option value="">大小不限</option>
+        <option value="1">≥1 GB</option>
+        <option value="5">≥5 GB</option>
+        <option value="10">≥10 GB</option>
+      </select>
+      <select
+        className="toolbar-select"
+        value={minHeight}
+        onChange={(e) => onMinHeightChange(e.target.value)}
+        aria-label="分辨率下限"
+        title="按分辨率过滤"
+      >
+        <option value="">分辨率不限</option>
+        <option value="480">≥480p</option>
+        <option value="720">≥720p</option>
+        <option value="1080">≥1080p</option>
+        <option value="2160">≥4K</option>
+      </select>
 
       <span className="toolbar-spacer" />
 
