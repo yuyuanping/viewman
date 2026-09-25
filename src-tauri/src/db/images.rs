@@ -22,57 +22,98 @@ pub fn get_all_images(conn: &Connection) -> Result<Vec<Image>> {
     Ok(images)
 }
 
-/// 相似图检测要读的行。pHash 不进 Image 模型：19 万条清单不该为它多扛一列体积。
-pub struct PhashRow {
+/// 相似/重复检测要读的行。指纹不进 Image 模型：19 万条清单不该为它多扛几列体积。
+pub struct ImageSig {
     pub id: String,
     pub path: String,
     pub created_at: String,
     pub modified_at: Option<String>,
-    /// 已缓存的 64 位指纹（存成有符号 INTEGER，位模式原样保留）
+    /// 已缓存的 64 位 pHash（存成有符号 INTEGER，位模式原样保留）
     pub phash: Option<i64>,
-    /// 算这个指纹时文件的修改时间，跟当前对不上就说明图改过、缓存过期
-    pub phash_modified_at: Option<String>,
+    /// 同一次解码算出的 64 位 dHash；老库里只有 phash 时它为空，下次检测补算
+    pub dhash: Option<i64>,
+    /// 32×32 灰度缩略像素（1024 字节）：重复判定的最后一道要看它。
+    /// 只有"两枚哈希都相同"的候选才补算，所以大面积为空是正常的
+    pub sig_pixels: Option<Vec<u8>>,
+    /// 算这组指纹时文件的修改时间，跟当前对不上就说明图改过、缓存过期
+    pub sig_modified_at: Option<String>,
 }
 
-impl PhashRow {
-    /// 缓存能不能直接用
-    pub fn cached_hash(&self) -> Option<u64> {
-        match (self.phash, self.phash_modified_at.as_deref()) {
-            (Some(hash), cached) if cached == self.modified_at.as_deref() => Some(hash as u64),
+impl ImageSig {
+    /// 缓存的时间戳跟当前文件对得上，才说明这组指纹还是这张图现在的样子
+    fn fresh(&self) -> bool {
+        self.sig_modified_at.as_deref() == self.modified_at.as_deref()
+    }
+
+    /// 相似判定用的两枚感知哈希：缺任何一个都算没缓存（同趟解码出来的，不分开存）
+    pub fn cached_sigs(&self) -> Option<(u64, u64)> {
+        match (self.phash, self.dhash, self.fresh()) {
+            (Some(p), Some(d), true) => Some((p as u64, d as u64)),
+            _ => None,
+        }
+    }
+
+    /// 重复判定用的缩略像素：前提是两枚哈希也在（否则连候选都进不了）
+    pub fn cached_pixels(&self) -> Option<&[u8]> {
+        match (self.cached_sigs(), self.sig_pixels.as_deref()) {
+            (Some(_), Some(pixels)) if pixels.len() == 32 * 32 => Some(pixels),
             _ => None,
         }
     }
 }
 
-pub fn get_phash_rows(conn: &Connection) -> Result<Vec<PhashRow>> {
+pub fn get_image_sigs(conn: &Connection) -> Result<Vec<ImageSig>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, created_at, modified_at, phash, phash_modified_at FROM images ORDER BY created_at, id"
+        "SELECT id, path, created_at, modified_at, phash, dhash, sig_pixels, sig_modified_at FROM images ORDER BY created_at, id"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(PhashRow {
+        Ok(ImageSig {
             id: row.get(0)?,
             path: row.get(1)?,
             created_at: row.get(2)?,
             modified_at: row.get(3)?,
             phash: row.get(4)?,
-            phash_modified_at: row.get(5)?,
+            dhash: row.get(5)?,
+            sig_pixels: row.get(6)?,
+            sig_modified_at: row.get(7)?,
         })
     })?.collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// 一批指纹写回库（一次事务）：(image_id, 指纹, 指纹对应的文件修改时间)
-pub fn save_image_phashes(conn: &Connection, updates: &[(String, i64, Option<String>)]) -> Result<()> {
+/// 一批指纹写回库（一次事务）：(image_id, phash, dhash, 指纹对应的文件修改时间)。
+/// 两枚出自同一次解码，所以总是一起写。
+pub fn save_image_sigs(
+    conn: &Connection,
+    updates: &[(String, i64, i64, Option<String>)],
+) -> Result<()> {
     if updates.is_empty() {
         return Ok(());
     }
     let tx = conn.unchecked_transaction()?;
     {
         let mut stmt = tx.prepare(
-            "UPDATE images SET phash = ?1, phash_modified_at = ?2 WHERE id = ?3",
+            "UPDATE images SET phash = ?1, dhash = ?2, sig_modified_at = ?3 WHERE id = ?4",
         )?;
-        for (id, hash, modified_at) in updates {
-            stmt.execute(rusqlite::params![hash, modified_at, id])?;
+        for (id, phash, dhash, modified_at) in updates {
+            stmt.execute(rusqlite::params![phash, dhash, modified_at, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// 一批候选的缩略像素写回库（一次事务）：(image_id, 32×32 灰度)。
+/// 只给"两枚哈希相同"的候选算，所以量比指纹小两个数量级；写完下次检测就不必再解码。
+pub fn save_image_pixels(conn: &Connection, updates: &[(String, Vec<u8>)]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare("UPDATE images SET sig_pixels = ?1 WHERE id = ?2")?;
+        for (id, pixels) in updates {
+            stmt.execute(rusqlite::params![pixels, id])?;
         }
     }
     tx.commit()?;
@@ -149,19 +190,28 @@ mod tests {
         let mut row = sample_image("i1", "C:/pics/a.png");
         row.modified_at = Some("1700".to_string());
         insert_image(&conn, &row).unwrap();
-        save_image_phashes(&conn, &[("i1".to_string(), -3_i64, Some("1700".to_string()))]).unwrap();
+        save_image_sigs(&conn, &[("i1".to_string(), -3_i64, 11_i64, Some("1700".to_string()))]).unwrap();
+        save_image_pixels(&conn, &[("i1".to_string(), vec![7u8; 32 * 32])]).unwrap();
 
-        let rows = get_phash_rows(&conn).unwrap();
+        let rows = get_image_sigs(&conn).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].cached_hash(), Some(-3_i64 as u64));
+        assert_eq!(rows[0].cached_sigs(), Some((-3_i64 as u64, 11_u64)));
+        assert_eq!(rows[0].cached_pixels(), Some(vec![7u8; 32 * 32].as_slice()));
 
-        // 重新扫描把新 mtime 写回来（upsert 不动 phash 两列），指纹就该作废重算
+        // 重新扫描把新 mtime 写回来（upsert 不动指纹三列），缓存就该作废重算
         let mut edited = sample_image("i1", "C:/pics/a.png");
         edited.modified_at = Some("1800".to_string());
         insert_image(&conn, &edited).unwrap();
-        let rows = get_phash_rows(&conn).unwrap();
+        let rows = get_image_sigs(&conn).unwrap();
         assert_eq!(rows[0].phash, Some(-3_i64));
-        assert_eq!(rows[0].cached_hash(), None);
+        assert_eq!(rows[0].cached_sigs(), None);
+        // 哈希都作废了，候选都进不去，像素自然不算数
+        assert_eq!(rows[0].cached_pixels(), None);
+
+        // 半截像素（写坏/换了口径）不能当缓存用，否则比对拿到的两边长度都不一样
+        conn.execute("UPDATE images SET sig_pixels = x'0102' WHERE id = 'i1'", []).unwrap();
+        insert_image(&conn, &row).unwrap();
+        assert_eq!(get_image_sigs(&conn).unwrap()[0].cached_pixels(), None);
     }
 
     #[test]
@@ -170,11 +220,28 @@ mod tests {
         let mut row = sample_image("i1", "C:/pics/a.png");
         row.modified_at = Some("1700".to_string());
         insert_image(&conn, &row).unwrap();
-        save_image_phashes(&conn, &[("i1".to_string(), 7_i64, Some("1700".to_string()))]).unwrap();
+        save_image_sigs(&conn, &[("i1".to_string(), 7_i64, 9_i64, Some("1700".to_string()))]).unwrap();
 
         // 同一份文件再扫一遍：mtime 没变，指纹仍然算数，不该又跑一次 ffmpeg
         insert_image(&conn, &row).unwrap();
-        assert_eq!(get_phash_rows(&conn).unwrap()[0].cached_hash(), Some(7_u64));
+        assert_eq!(get_image_sigs(&conn).unwrap()[0].cached_sigs(), Some((7_u64, 9_u64)));
+    }
+
+    #[test]
+    fn test_partial_cache_is_recomputed_when_dhash_is_missing() {
+        let conn = setup_test_db();
+        let mut row = sample_image("i1", "C:/pics/a.png");
+        row.modified_at = Some("1700".to_string());
+        insert_image(&conn, &row).unwrap();
+        // 早期版本只存 phash：第二路没算过，必须当成没缓存，否则会拿单路结果当双路结论
+        conn.execute(
+            "UPDATE images SET phash = 7, sig_pixels = x'00', sig_modified_at = '1700' WHERE id = 'i1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(get_image_sigs(&conn).unwrap()[0].cached_sigs(), None);
+        // 摘要也要跟着哈希一起认账：没双指纹的光有摘要进不了候选
+        assert_eq!(get_image_sigs(&conn).unwrap()[0].cached_pixels(), None);
     }
 
     #[test]

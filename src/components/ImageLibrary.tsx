@@ -5,12 +5,12 @@ import { ImageGrid } from "./ImageGrid";
 import { ImageToolbar } from "./ImageToolbar";
 import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
-import { SimilarGroupsPanel } from "./SimilarGroupsPanel";
+import { GroupReviewPanel } from "./GroupReviewPanel";
 import { api } from "../api";
 import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
-import { useDuplicates } from "../hooks/useDuplicates";
+import { useDuplicateGroups } from "../hooks/useDuplicateGroups";
 import { useDeleteShortcut } from "../hooks/useDeleteShortcut";
 import { useRangeSelect } from "../hooks/useRangeSelect";
 import { useSimilarDetection } from "../hooks/useSimilarDetection";
@@ -54,11 +54,25 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     return deleted;
   }, [dropLocally]);
 
+  // 重复图检测：后端边核对候选桶边推分组，面板逐组审阅，副本自动勾进多选
   const {
-    duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
-    detecting: detectingDuplicates, detect: handleDetectDuplicates,
-    deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
-  } = useDuplicates(notify, { detect: api.findDuplicateImages, remove: trashImages, unit: "图片" });
+    groups: aliveDuplicateGroups,
+    imageById: duplicateIndex,
+    duplicateIds,
+    groupCount: duplicateGroupCount,
+    skipped: duplicateSkipped,
+    detected: duplicatesDetected,
+    detecting: detectingDuplicates,
+    progress: duplicateProgress,
+    panelOpen: duplicatePanelOpen,
+    setPanelOpen: setDuplicatePanelOpen,
+    detect: handleDetectDuplicates,
+    clear: clearDuplicates,
+    keep: keepDuplicate,
+    autoSelect: autoSelectDuplicates,
+    clearSelection: clearDuplicateSelection,
+    setGroupSelection: selectDuplicateGroup,
+  } = useDuplicateGroups({ images, setSelectMode, setSelectedIds, notify });
 
   // 相似图检测（pHash）：后端边算边推组，面板逐组审阅，新出现的副本自动勾进多选
   const {
@@ -76,12 +90,32 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     clear: clearSimilar,
     keep: keepSimilar,
     autoSelect: autoSelectSimilar,
+    clearSelection: clearSimilarSelection,
+    setGroupSelection: selectSimilarGroup,
     recalculating: similarRecalculating,
     threshold: similarThreshold,
     rethreshold: rethresholdSimilar,
     keepRule: similarKeepRule,
     applyKeepRule: applySimilarKeepRule,
   } = useSimilarDetection({ images, setSelectMode, setSelectedIds, notify });
+
+  // 两个审阅面板都是全屏遮罩，只能开一个：开这一个就把另一个关掉，重跑检测也一样
+  const openDuplicatePanel = useCallback(() => {
+    setSimilarPanelOpen(false);
+    setDuplicatePanelOpen(true);
+  }, [setDuplicatePanelOpen, setSimilarPanelOpen]);
+  const openSimilarPanel = useCallback(() => {
+    setDuplicatePanelOpen(false);
+    setSimilarPanelOpen(true);
+  }, [setDuplicatePanelOpen, setSimilarPanelOpen]);
+  const runDetectDuplicates = useCallback(() => {
+    setSimilarPanelOpen(false);
+    handleDetectDuplicates();
+  }, [handleDetectDuplicates, setSimilarPanelOpen]);
+  const runDetectSimilar = useCallback(() => {
+    setDuplicatePanelOpen(false);
+    handleDetectSimilar();
+  }, [handleDetectSimilar, setDuplicatePanelOpen]);
 
   // 排一次、筛多次：切目录和打字只是从排好的清单里线性筛（19 万条 ≈30ms），
   // 不再每次条件一变就重排整库。Array.filter 保序，结果与"先筛后排"一致。
@@ -173,13 +207,21 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
   }, [filteredImages]);
 
   /** 从分组面板放大：翻页范围就是这一组，逐张比对着决定删谁 */
-  const openSimilarGroup = useCallback((image: Image, groupIds: string[]) => {
-    const list = groupIds.map(id => similarIndex.get(id)).filter((item): item is Image => item !== undefined);
+  const openGroupInViewer = useCallback((image: Image, groupIds: string[], index: Map<string, Image>) => {
+    const list = groupIds.map(id => index.get(id)).filter((item): item is Image => item !== undefined);
     if (list.length === 0) return;
     const at = list.findIndex(item => item.id === image.id);
     setViewerList(list);
     setViewerIndex(at >= 0 ? at : 0);
-  }, [similarIndex]);
+  }, []);
+  const openSimilarGroup = useCallback(
+    (image: Image, groupIds: string[]) => openGroupInViewer(image, groupIds, similarIndex),
+    [openGroupInViewer, similarIndex],
+  );
+  const openDuplicateGroup = useCallback(
+    (image: Image, groupIds: string[]) => openGroupInViewer(image, groupIds, duplicateIndex),
+    [openGroupInViewer, duplicateIndex],
+  );
 
   // 随机一张：直接以整个过滤结果为查看器列表，从随机位置开始看
   const handleRandomPick = useCallback(() => {
@@ -233,20 +275,19 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         generating={generating}
         thumbProgress={thumbProgress}
         withoutThumbnailCount={withoutThumbnailCount}
-        onDetectDuplicates={handleDetectDuplicates}
+        onDetectDuplicates={runDetectDuplicates}
         detectingDuplicates={detectingDuplicates}
+        duplicateProgress={duplicateProgress}
         duplicatesDetected={duplicatesDetected}
         duplicateGroupCount={duplicateGroupCount}
-        duplicateExtrasCount={duplicateExtrasCount}
-        onDeleteDuplicates={handleDeleteDuplicates}
-        deletingDuplicates={deletingDuplicates}
+        onOpenDuplicateGroups={openDuplicatePanel}
         onClearDuplicates={clearDuplicates}
-        onDetectSimilar={handleDetectSimilar}
+        onDetectSimilar={runDetectSimilar}
         detectingSimilar={detectingSimilar}
         similarDetected={similarDetected}
         similarGroupCount={similarGroupCount}
         similarProgress={similarProgress}
-        onOpenSimilarGroups={() => setSimilarPanelOpen(true)}
+        onOpenSimilarGroups={openSimilarPanel}
         onClearSimilar={clearSimilar}
         selectMode={selectMode}
         selectedCount={selectedIds.size}
@@ -273,8 +314,32 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         onMoved={(imageId, newPath) => retargetLocally([[imageId, newPath]])}
         resetKey={selectedDir}
       />
+      {duplicatePanelOpen && (
+        <GroupReviewPanel
+          noun="重复图片"
+          progressLabel="核对候选"
+          groups={aliveDuplicateGroups}
+          imageById={duplicateIndex}
+          selectedIds={selectedIds}
+          onToggle={toggleSelect}
+          onKeep={keepDuplicate}
+          onAutoSelect={autoSelectDuplicates}
+          onClearAll={clearDuplicateSelection}
+          onSelectGroup={selectDuplicateGroup}
+          selectedTotal={selectedIds.size}
+          detecting={detectingDuplicates}
+          progress={duplicateProgress}
+          caveat={duplicateSkipped > 0 ? `另有 ${duplicateSkipped} 张解不出画面，未参与比对` : undefined}
+          onDeleteSelected={handleDeleteSelected}
+          deleting={deletingSelected}
+          onOpenImage={openDuplicateGroup}
+          onClose={() => setDuplicatePanelOpen(false)}
+        />
+      )}
       {similarPanelOpen && (
-        <SimilarGroupsPanel
+        <GroupReviewPanel
+          noun="相似图片"
+          progressLabel="补算指纹"
           groups={aliveSimilarGroups}
           imageById={similarIndex}
           hashById={similarHashes}
@@ -282,6 +347,8 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
           onToggle={toggleSelect}
           onKeep={keepSimilar}
           onAutoSelect={autoSelectSimilar}
+          onClearAll={clearSimilarSelection}
+          onSelectGroup={selectSimilarGroup}
           selectedTotal={selectedIds.size}
           detecting={detectingSimilar}
           recalculating={similarRecalculating}

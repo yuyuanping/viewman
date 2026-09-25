@@ -22,7 +22,7 @@ pub(crate) struct ThumbJob {
 }
 
 /// 缩略图缓存目录：`<app_data>/thumbnails`
-fn thumbnails_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn thumbnails_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("thumbnails");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建缩略图目录失败: {}", e))?;
     Ok(dir)

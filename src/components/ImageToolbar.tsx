@@ -14,11 +14,12 @@ interface ImageToolbarProps {
   withoutThumbnailCount: number;
   onDetectDuplicates: () => void;
   detectingDuplicates: boolean;
+  /** 判据改成解码指纹后要逐张跑 ffmpeg，进度得报出来 */
+  duplicateProgress: { processed: number; total: number; stage: string } | null;
   duplicatesDetected: boolean;
   duplicateGroupCount: number;
-  duplicateExtrasCount: number;
-  onDeleteDuplicates: () => void;
-  deletingDuplicates: boolean;
+  /** 重复组也走分组面板审阅：删除按「删除所选」/Del 那条通路，不再一键清空副本 */
+  onOpenDuplicateGroups: () => void;
   onClearDuplicates: () => void;
   /** 相似图检测（pHash）：分组面板审阅，副本自动勾进多选 */
   onDetectSimilar: () => void;
@@ -43,6 +44,9 @@ interface ImageToolbarProps {
   onRandomPick: () => void;
 }
 
+/** 后端 duplicate-progress 的两趟活儿：补指纹按张数报，核对候选按候选桶报 */
+const DUP_STAGES: Record<string, string> = { sigs: "补指纹", grouping: "核对候选" };
+
 const SORT_OPTIONS: { value: ImageSortField; label: string }[] = [
   { value: "filename", label: "文件名" },
   { value: "file_size", label: "文件大小" },
@@ -61,11 +65,10 @@ export function ImageToolbar({
   withoutThumbnailCount,
   onDetectDuplicates,
   detectingDuplicates,
+  duplicateProgress,
   duplicatesDetected,
   duplicateGroupCount,
-  duplicateExtrasCount,
-  onDeleteDuplicates,
-  deletingDuplicates,
+  onOpenDuplicateGroups,
   onClearDuplicates,
   onDetectSimilar,
   detectingSimilar,
@@ -119,19 +122,45 @@ export function ImageToolbar({
 
       <span className="toolbar-spacer" />
 
-      {!duplicatesDetected && (
+      {/* 审完/删空后组数归零，检测入口要能重新出现 */}
+      {(!duplicatesDetected || duplicateGroupCount === 0) && !detectingDuplicates && (
         <button
           type="button"
           className="toolbar-chip"
           onClick={onDetectDuplicates}
-          disabled={detectingDuplicates || deletingDuplicates}
-          title="按文件大小 + 内容指纹分组比对，找出内容完全相同的重复图片"
+          disabled={detectingDuplicates}
+          title="按解码后的图像内容比对，找出内容相同的重复图片：重存、转格式过的那张也算同一张（不再比文件字节）"
         >
-          {detectingDuplicates ? "比对中…" : "检测重复图片"}
+          检测重复图片
         </button>
       )}
-      {/* 审完/删空后组数归零，检测入口要能重新出现 */}
-      {(!similarDetected || similarGroupCount === 0) && (
+      {/* 检测还在跑就把面板关掉时，工具栏必须留着入口：进度和已出的组都在里面 */}
+      {detectingDuplicates && (
+        <button
+          type="button"
+          className="toolbar-chip"
+          onClick={onOpenDuplicateGroups}
+          title="检测仍在进行，打开面板看进度和已经定下的组"
+        >
+          {`比对中…${duplicateProgress ? ` ${DUP_STAGES[duplicateProgress.stage] ?? "比对"} ${duplicateProgress.processed}/${duplicateProgress.total}` : ""} · 查看`}
+        </button>
+      )}
+      {duplicatesDetected && duplicateGroupCount > 0 && (
+        <>
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={onOpenDuplicateGroups}
+            title="逐组查看重复图片，可改保留哪一张"
+          >
+            {duplicateGroupCount} 组重复 · 查看
+          </button>
+          <button type="button" className="toolbar-chip" onClick={onClearDuplicates} title="清除重复检测结果">
+            ✕
+          </button>
+        </>
+      )}
+      {(!similarDetected || similarGroupCount === 0) && !detectingSimilar && (
         <button
           type="button"
           className="toolbar-chip"
@@ -142,6 +171,17 @@ export function ImageToolbar({
           {detectingSimilar
             ? `比对中…${similarProgress ? ` ${similarProgress.processed}/${similarProgress.total}` : ""}`
             : "检测相似图片"}
+        </button>
+      )}
+      {/* 检测还在跑就把面板关掉时，工具栏必须留着入口：进度和已出的组都在里面 */}
+      {detectingSimilar && (
+        <button
+          type="button"
+          className="toolbar-chip"
+          onClick={onOpenSimilarGroups}
+          title="检测仍在进行，打开面板看进度和已经出来的组"
+        >
+          {`比对中…${similarProgress ? ` ${similarProgress.processed}/${similarProgress.total}` : ""} · 查看`}
         </button>
       )}
       {similarDetected && similarGroupCount > 0 && (
@@ -155,22 +195,6 @@ export function ImageToolbar({
             {similarGroupCount} 组相似 · 查看
           </button>
           <button type="button" className="toolbar-chip" onClick={onClearSimilar} title="清除相似检测结果">
-            ✕
-          </button>
-        </>
-      )}
-      {duplicatesDetected && duplicateGroupCount > 0 && (
-        <>
-          <button
-            type="button"
-            className="toolbar-chip"
-            onClick={onDeleteDuplicates}
-            disabled={deletingDuplicates}
-            title="每组保留最早添加的一张，将其余副本移入回收站"
-          >
-            {deletingDuplicates ? "删除中…" : `${duplicateGroupCount} 组重复 · 删除 ${duplicateExtrasCount} 个副本`}
-          </button>
-          <button type="button" className="toolbar-chip" onClick={onClearDuplicates} disabled={deletingDuplicates} title="清除检测结果">
             ✕
           </button>
         </>

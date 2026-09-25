@@ -46,6 +46,7 @@ interface LibraryToolbarProps {
   onClearHevc: () => void;
   onDetectDuplicates: () => void;
   detectingDuplicates: boolean;
+  duplicateProgress: { processed: number; total: number; stage: string } | null;
   duplicatesDetected: boolean;
   duplicateGroupCount: number;
   duplicateExtrasCount: number;
@@ -67,6 +68,9 @@ interface LibraryToolbarProps {
   /** 打开完整播放历史覆盖层 */
   onOpenHistory: () => void;
 }
+
+/** 后端 video-duplicate-progress 的两趟活儿，进度文案各说各的 */
+const DUP_STAGES: Record<string, string> = { anchor: "补锚点帧", verify: "复核候选" };
 
 const SORT_OPTIONS: { value: SortField; label: string }[] = [
   { value: "filename", label: "文件名" },
@@ -126,6 +130,7 @@ export function LibraryToolbar({
   onClearHevc,
   onDetectDuplicates,
   detectingDuplicates,
+  duplicateProgress,
   duplicatesDetected,
   duplicateGroupCount,
   duplicateExtrasCount,
@@ -292,9 +297,11 @@ export function LibraryToolbar({
           className="toolbar-chip"
           onClick={onDetectDuplicates}
           disabled={detectingDuplicates || deletingDuplicates}
-          title="按文件大小 + 内容指纹分组比对，找出内容完全相同的重复视频"
+          title="按解码后的画面比对，找出同一部片子的多个副本：重压制、重封装、转格式过的也算同一部（不再比文件字节）"
         >
-          {detectingDuplicates ? "比对中…" : "检测重复视频"}
+          {detectingDuplicates
+            ? `比对中…${duplicateProgress ? ` ${DUP_STAGES[duplicateProgress.stage] ?? "比对"} ${duplicateProgress.processed}/${duplicateProgress.total}` : ""}`
+            : "检测重复视频"}
         </button>
       )}
       {duplicatesDetected && duplicateGroupCount > 0 && (

@@ -280,10 +280,10 @@ pub fn build_video(path: &std::path::PathBuf) -> Video {
     }
 }
 
-/// 图片条目：ffprobe 读图片同样能给出宽高，取不到时留空由前端回退显示原图
-pub fn build_image(path: &std::path::PathBuf) -> Image {
-    let metadata = get_metadata(&path.to_string_lossy()).ok();
-    let modified_at = fs::metadata(path)
+/// 文件的修改时间戳（本地时间，秒级）。画面指纹拿它当缓存钥匙：
+/// 时间对不上就说明文件改过，之前算的指纹不能再用。
+pub fn modified_stamp(path: &std::path::Path) -> Option<String> {
+    fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -291,7 +291,13 @@ pub fn build_image(path: &std::path::PathBuf) -> Image {
             chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + d)
                 .format("%Y-%m-%dT%H:%M:%S")
                 .to_string()
-        });
+        })
+}
+
+/// 图片条目：ffprobe 读图片同样能给出宽高，取不到时留空由前端回退显示原图
+pub fn build_image(path: &std::path::PathBuf) -> Image {
+    let metadata = get_metadata(&path.to_string_lossy()).ok();
+    let modified_at = modified_stamp(path);
 
     Image {
         id: uuid::Uuid::new_v4().to_string(),
@@ -321,28 +327,88 @@ pub fn ffmpeg_available() -> bool {
     hidden_command("ffmpeg").arg("-version").output().is_ok()
 }
 
-/// 感知哈希（pHash）：ffmpeg 缩到 32×32 灰度 → 8×8 DCT-II 低频块 → 均值阈值化成 64 位。
-/// 与字节级指纹互补：找"相似但不同"的连拍/截图系列；汉明距离 ≤ 阈值视为相似。
-pub fn image_phash(path: &str) -> Option<u64> {
-    const N: usize = 32;
-    let output = hidden_command("ffmpeg")
-        .args(image_input_opts(path))
+/// 图片指纹：一趟 ffmpeg（32×32 灰度）同时算 pHash 和 dHash，返回 (phash, dhash)。
+/// 两路哈希各管一头：pHash 看整体结构（低频 DCT），dHash 看相邻像素的明暗走向。
+/// 对"版式一样内容不同"的套图/封面，两路都近才算相似，能砍掉单路的误判。
+pub fn image_hashes(path: &str) -> Option<(u64, u64)> {
+    let pixels = gray32(path, None)?;
+    Some(gray_hashes(&pixels))
+}
+
+/// 缩到 32×32 的灰度像素。图片、视频抽帧、缩略图三条路都从这里出发，
+/// 保证比对双方看到的是同一套降采样口径（换了口径，指纹就对不上了）。
+/// `seek` 放在 `-i` 之前：那是输入侧的快进定位，40 分钟的片子也是几十毫秒。
+fn gray32(path: &str, seek: Option<f64>) -> Option<[u8; 32 * 32]> {
+    let bytes = gray_grid(path, 32, seek)?;
+    let mut pixels = [0u8; 32 * 32];
+    pixels.copy_from_slice(&bytes);
+    Some(pixels)
+}
+
+/// 缩成 `n`×`n` 灰度像素。重复图片的缩略比对要换着网格试，所以这条按边长开放。
+pub fn gray_pixels(path: &str, n: usize) -> Option<Vec<u8>> {
+    gray_grid(path, n, None)
+}
+
+fn gray_grid(path: &str, n: usize, seek: Option<f64>) -> Option<Vec<u8>> {
+    let seek_arg = seek.map(|s| format!("{:.3}", s.max(0.0)));
+    let mut cmd = hidden_command("ffmpeg");
+    cmd.args(image_input_opts(path));
+    if let Some(at) = &seek_arg {
+        cmd.args(["-ss", at]);
+    }
+    let mut output = cmd
         .args([
             "-i", path,
-            "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", N, N),
+            "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", n, n),
+            "-frames:v", "1",
             "-f", "rawvideo",
             "-pix_fmt", "gray",
             "-",
         ])
         .output()
         .ok()?;
-    if !output.status.success() || output.stdout.len() < N * N {
+    if !output.status.success() || output.stdout.len() < n * n {
         return None;
     }
-    let mut pixels = [0f64; N * N];
-    for (i, b) in output.stdout.iter().take(N * N).enumerate() {
-        pixels[i] = *b as f64;
+    output.stdout.truncate(n * n);
+    Some(output.stdout)
+}
+
+/// 32×32 灰度 → (pHash, dHash)
+pub fn gray_hashes(pixels: &[u8; 32 * 32]) -> (u64, u64) {
+    let mut floats = [0f64; 32 * 32];
+    for (slot, &byte) in floats.iter_mut().zip(pixels) {
+        *slot = byte as f64;
     }
+    (phash_from_gray(&floats), dhash_from_gray(&floats))
+}
+
+/// 从视频某个时间点抽一帧算双指纹。定位点落在无帧区间时回退首帧再试一次
+/// （和抽封面同一套兜底，别因为 GOP 对齐就白丢一行指纹）。
+pub fn video_frame_hashes(path: &str, seconds: f64) -> Option<(u64, u64)> {
+    let pixels = gray32(path, Some(seconds)).or_else(|| gray32(path, Some(0.0)))?;
+    Some(gray_hashes(&pixels))
+}
+
+/// 一份文件原样缩成 32×32 后的双指纹（视频缩略图当锚点时用这条）
+pub fn image_frame_hashes(path: &str) -> Option<(u64, u64)> {
+    Some(gray_hashes(&gray32(path, None)?))
+}
+
+/// 视频复核用的两个采样点：50% 与 85% 时长处。锚点那一帧由缩略图负责
+/// （见 thumbnail_target_time），这里只补"片子中段和结尾在演什么"。
+/// 时长探测失败的那批退化成固定 5s / 15s，总比三处全取首帧有区分度。
+pub fn video_sample_times(duration: Option<f64>) -> [f64; 2] {
+    match duration {
+        Some(d) if d.is_finite() && d > 0.0 => [d * 0.5, d * 0.85],
+        _ => [5.0, 15.0],
+    }
+}
+
+/// 感知哈希（pHash）：8×8 DCT-II 低频块 → 均值阈值化成 64 位
+fn phash_from_gray(pixels: &[f64; 32 * 32]) -> u64 {
+    const N: usize = 32;
 
     // 8×8 DCT-II：只取低频左上块
     const B: usize = 8;
@@ -382,7 +448,22 @@ pub fn image_phash(path: &str) -> Option<u64> {
             hash = (hash << 1) | if dct[v][u] > mean { 1 } else { 0 };
         }
     }
-    Some(hash)
+    hash
+}
+
+/// 差值哈希（dHash）：8×8 网格里比较每行左右相邻像素的明暗，得 64 位。
+/// 只关心"哪儿比哪儿亮"的走向，对整体亮度/压缩漂移不敏感，正好补 pHash 的短板。
+fn dhash_from_gray(pixels: &[f64; 32 * 32]) -> u64 {
+    const N: usize = 32;
+    // 从 32×32 里等距取 8 行 × 9 列（列多取一位，用来和左邻比）
+    let sample = |row: usize, col: usize| pixels[(row * (N - 1) / 8) * N + (col * (N - 1) / 8)] as i64;
+    let mut hash: u64 = 0;
+    for row in 0..8 {
+        for col in 0..8 {
+            hash = (hash << 1) | if sample(row, col) < sample(row, col + 1) { 1 } else { 0 };
+        }
+    }
+    hash
 }
 
 /// 64 位哈希的汉明距离
@@ -582,6 +663,21 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn test_dhash_reads_the_left_to_right_gradient() {
+        // 每行都是"越往右越亮"：八个比较位全该是 1
+        let mut pixels = [0f64; 32 * 32];
+        for (i, px) in pixels.iter_mut().enumerate() {
+            *px = (i % 32) as f64;
+        }
+        assert_eq!(dhash_from_gray(&pixels), u64::MAX);
+
+        for (i, px) in pixels.iter_mut().enumerate() {
+            *px = (31 - i % 32) as f64;
+        }
+        assert_eq!(dhash_from_gray(&pixels), 0);
+    }
+
+    #[test]
     fn test_is_video_file() {
         assert!(is_video_file(&PathBuf::from("test.mp4")));
         assert!(is_video_file(&PathBuf::from("test.MKV")));
@@ -774,7 +870,8 @@ mod tests {
         let thumb = dir.join("pct-thumb.jpg");
         extract_thumbnail(&png.to_string_lossy(), &thumb, None).unwrap();
         assert!(fs::metadata(&thumb).unwrap().len() > 0, "带 % 的图片应能出封面");
-        assert!(image_phash(&png.to_string_lossy()).is_some(), "带 % 的图片应能算 pHash");
+        let (phash, dhash) = image_hashes(&png.to_string_lossy()).unwrap();
+        assert_ne!((phash, dhash), (0, 0), "带 % 的图片应能算出两枚指纹");
 
         // 视频名里带 % 也照常工作（pattern_type 是 image2 专有选项，不能无条件塞给 ffmpeg）
         let video = dir.join("sample 100%.mp4");
@@ -789,6 +886,54 @@ mod tests {
         assert!(fs::metadata(&vthumb).unwrap().len() > 0);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 重压制过的同一部片子，画面指纹仍该对得上——"不比字节"的全部意义就在这
+    #[test]
+    fn test_video_frame_hashes_tolerate_reencoding() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：本机未安装 ffmpeg");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("viewman_frames_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let render = |name: &str, extra: &[&str]| {
+            let out = dir.join(name);
+            let ok = Command::new("ffmpeg")
+                .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=6", "-pix_fmt", "yuv420p"])
+                .args(extra)
+                .arg(&out)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "生成测试视频失败");
+            out
+        };
+        let original = render("orig.mp4", &["-b:v", "2M"]);
+        // 换码率 + 缩小分辨率：字节面目全非，画面还是那幅画面
+        let reencoded = render("again.mp4", &["-vf", "scale=160:120", "-b:v", "300k"]);
+        let original = original.to_string_lossy().to_string();
+        let reencoded = reencoded.to_string_lossy().to_string();
+
+        for at in [thumbnail_target_time(Some(6.0)), 3.0, 5.1] {
+            let a = video_frame_hashes(&original, at).unwrap();
+            assert_eq!(a, video_frame_hashes(&original, at).unwrap(), "同一处采样点该给确定结果");
+            let b = video_frame_hashes(&reencoded, at).unwrap();
+            let dist = hamming_distance(a.0, b.0) + hamming_distance(a.1, b.1);
+            assert!(dist <= 8, "{at:.1}s 处重压制后双指纹距离 {dist} 太大");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_video_sample_times_spreads_over_the_timeline() {
+        let [mid, tail] = video_sample_times(Some(100.0));
+        assert!((mid - 50.0).abs() < 0.01, "复核点该落在中段");
+        assert!((tail - 85.0).abs() < 0.01, "复核点该落在结尾前");
+        // 时长探测不出来时也要有别于锚点（首帧）的采样位置
+        assert_eq!(video_sample_times(None), [5.0, 15.0]);
+        assert_eq!(video_sample_times(Some(0.0)), [5.0, 15.0]);
     }
 
     #[test]

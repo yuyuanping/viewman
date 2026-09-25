@@ -46,6 +46,124 @@ pub fn set_thumbnail(conn: &Connection, video_id: &str, thumbnail_path: &str) ->
     Ok(())
 }
 
+/// 重复视频检测要读的行。画面指纹不进 Video 模型：几千条清单不该为它多扛几列体积。
+pub struct VideoSig {
+    pub id: String,
+    pub path: String,
+    pub created_at: String,
+    pub duration: Option<f64>,
+    pub thumbnail_path: Option<String>,
+    /// 锚点帧（缩略图那一帧）的双指纹，同一次解码出来，所以成对存
+    pub anchor: Option<(i64, i64)>,
+    /// 中段（50% 时长）复核帧的双指纹，只有锚点对得上的候选才会补算
+    pub mid: Option<(i64, i64)>,
+    /// 结尾（85% 时长）复核帧的双指纹，和中段同趟补算
+    pub tail: Option<(i64, i64)>,
+    /// 算这批指纹时文件的修改时间（videos 表没有 modified_at 列，所以拿实时 mtime 比）
+    pub sig_modified_at: Option<String>,
+}
+
+impl VideoSig {
+    fn fresh(&self, mtime: &str) -> bool {
+        self.sig_modified_at.as_deref() == Some(mtime)
+    }
+
+    pub fn cached_anchor(&self, mtime: &str) -> Option<(u64, u64)> {
+        match (self.anchor, self.fresh(mtime)) {
+            (Some((p, d)), true) => Some((p as u64, d as u64)),
+            _ => None,
+        }
+    }
+
+    /// 两处复核帧：缺任何一处都算没验过（同批补算的，不拆开用）
+    pub fn cached_frames(&self, mtime: &str) -> Option<[(u64, u64); 2]> {
+        match (self.mid, self.tail, self.cached_anchor(mtime)) {
+            (Some(mid), Some(tail), Some(_)) => {
+                Some([(mid.0 as u64, mid.1 as u64), (tail.0 as u64, tail.1 as u64)])
+            }
+            _ => None,
+        }
+    }
+}
+
+fn pair(row: &rusqlite::Row<'_>, phash: usize, dhash: usize) -> Result<Option<(i64, i64)>> {
+    let (p, d): (Option<i64>, Option<i64>) = (row.get(phash)?, row.get(dhash)?);
+    Ok(match (p, d) {
+        (Some(p), Some(d)) => Some((p, d)),
+        _ => None,
+    })
+}
+
+pub fn get_video_sigs(conn: &Connection) -> Result<Vec<VideoSig>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, created_at, duration, thumbnail_path,
+                anchor_phash, anchor_dhash, mid_phash, mid_dhash, tail_phash, tail_dhash,
+                sig_modified_at
+         FROM videos ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(VideoSig {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            created_at: row.get(2)?,
+            duration: row.get(3)?,
+            thumbnail_path: row.get(4)?,
+            anchor: pair(row, 5, 6)?,
+            mid: pair(row, 7, 8)?,
+            tail: pair(row, 9, 10)?,
+            sig_modified_at: row.get(11)?,
+        })
+    })?.collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 写回锚点帧：(video_id, phash, dhash, 指纹对应的文件修改时间)。
+/// 锚点一重算就把两处复核帧清空——它们是照着旧锚点验出来的，留着会把改过的文件判成新鲜。
+pub fn save_video_anchors(
+    conn: &Connection,
+    updates: &[(String, i64, i64, String)],
+) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE videos SET anchor_phash = ?1, anchor_dhash = ?2, sig_modified_at = ?3,
+                mid_phash = NULL, mid_dhash = NULL, tail_phash = NULL, tail_dhash = NULL
+             WHERE id = ?4",
+        )?;
+        for (id, phash, dhash, modified_at) in updates {
+            stmt.execute(params![phash, dhash, modified_at, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// 写回两处复核帧：(video_id, 中段 phash, 中段 dhash, 结尾 phash, 结尾 dhash, 指纹对应的修改时间)
+pub fn save_video_frames(
+    conn: &Connection,
+    updates: &[(String, i64, i64, i64, i64, String)],
+) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE videos SET mid_phash = ?1, mid_dhash = ?2, tail_phash = ?3, tail_dhash = ?4,
+                sig_modified_at = ?5
+             WHERE id = ?6",
+        )?;
+        for (id, mid_p, mid_d, tail_p, tail_d, modified_at) in updates {
+            stmt.execute(params![mid_p, mid_d, tail_p, tail_d, modified_at, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn get_video_path(conn: &Connection, video_id: &str) -> Result<Option<String>> {
     conn.query_row("SELECT path FROM videos WHERE id = ?1", params![video_id], |row| row.get(0))
         .optional()
@@ -241,5 +359,41 @@ mod tests {
         let rows = get_all_videos(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].thumbnail_path, None);
+        // 画面指纹七列也是这条路子补上来的，否则老库启动后一进重复检测就 SQL 报无此列
+        assert_eq!(get_video_sigs(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_video_sig_cache_follows_the_file_mtime() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("v1", "C:/v/a.mp4")).unwrap();
+        save_video_anchors(&conn, &[("v1".to_string(), 7_i64, 9_i64, "1700".to_string())]).unwrap();
+
+        let row = get_video_sigs(&conn).unwrap().remove(0);
+        assert_eq!(row.cached_anchor("1700"), Some((7_u64, 9_u64)));
+        assert_eq!(row.cached_anchor("1800"), None, "mtime 变了就该重算锚点");
+        // 还没复核过：只有锚点时两处复核帧都算没有
+        assert_eq!(row.cached_frames("1700"), None);
+
+        save_video_frames(&conn, &[("v1".to_string(), 1, 2, 3, 4, "1700".to_string())]).unwrap();
+        let row = get_video_sigs(&conn).unwrap().remove(0);
+        assert_eq!(row.cached_frames("1700"), Some([(1_u64, 2), (3, 4)]));
+    }
+
+    /// 锚点是复核的前提：锚点一重算（文件改过），旧复核帧必须一起作废
+    #[test]
+    fn test_recomputing_the_anchor_clears_the_verification_frames() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("v1", "C:/v/a.mp4")).unwrap();
+        save_video_anchors(&conn, &[("v1".to_string(), 7, 9, "1700".to_string())]).unwrap();
+        save_video_frames(&conn, &[("v1".to_string(), 1, 2, 3, 4, "1700".to_string())]).unwrap();
+        assert!(get_video_sigs(&conn).unwrap()[0].cached_frames("1700").is_some());
+
+        save_video_anchors(&conn, &[("v1".to_string(), 11, 12, "1800".to_string())]).unwrap();
+        let row = get_video_sigs(&conn).unwrap().remove(0);
+        assert_eq!(row.cached_anchor("1800"), Some((11_u64, 12)));
+        assert_eq!(row.mid, None, "旧复核帧不能留着");
+        assert_eq!(row.tail, None);
+        assert_eq!(row.cached_frames("1800"), None);
     }
 }

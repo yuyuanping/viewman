@@ -84,7 +84,7 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
   return (
     <article
       className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${similar ? " image-similar" : ""}`}
-      title={duplicate ? "与库内其他图片内容相同（多余副本，可通过工具栏删除）" : similar ? "与库内其他图片视觉相似（连拍/截图系列）" : undefined}
+      title={duplicate ? "与库内其他图片内容相同（多余副本，可在工具栏「重复图片分组」里审阅后删除）" : similar ? "与库内其他图片视觉相似（连拍/截图系列）" : undefined}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenu({ x: e.clientX, y: e.clientY });

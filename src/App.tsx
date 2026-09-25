@@ -96,7 +96,13 @@ function App() {
     duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
     detecting: detectingDuplicates, detect: handleDetectDuplicates,
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
-  } = useDuplicates(notify, { detect: api.findDuplicateVideos, remove: trashVideos, unit: "视频" });
+    progress: duplicateProgress,
+  } = useDuplicates(notify, {
+    detect: async () => ({ groups: await api.findDuplicateVideos() }),
+    remove: trashVideos,
+    unit: "视频",
+    progressEvent: "video-duplicate-progress",
+  });
   const {
     missingIds, clearMissing,
     fakeIds, clearFake, convertFakes, converting,
@@ -488,6 +494,7 @@ function App() {
               onClearHevc={clearHevc}
               onDetectDuplicates={handleDetectDuplicates}
               detectingDuplicates={detectingDuplicates}
+              duplicateProgress={duplicateProgress}
               duplicatesDetected={duplicatesDetected}
               duplicateGroupCount={duplicateGroupCount}
               duplicateExtrasCount={duplicateExtrasCount}

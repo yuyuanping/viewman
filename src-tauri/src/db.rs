@@ -23,7 +23,14 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             file_size INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             thumbnail_path TEXT,
-            video_codec TEXT
+            video_codec TEXT,
+            anchor_phash INTEGER,
+            anchor_dhash INTEGER,
+            mid_phash INTEGER,
+            mid_dhash INTEGER,
+            tail_phash INTEGER,
+            tail_dhash INTEGER,
+            sig_modified_at TEXT
         );
         CREATE TABLE IF NOT EXISTS watch_progress (
             id TEXT PRIMARY KEY,
@@ -47,7 +54,9 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             thumbnail_path TEXT,
             modified_at TEXT,
             phash INTEGER,
-            phash_modified_at TEXT
+            dhash INTEGER,
+            sig_pixels BLOB,
+            sig_modified_at TEXT
         );"
     )
 }
@@ -64,6 +73,23 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
     if !columns.iter().any(|c| c == "video_codec") {
         conn.execute("ALTER TABLE videos ADD COLUMN video_codec TEXT", [])?;
     }
+    // 重复判定用的画面指纹：锚点帧（缩略图那帧）+ 中段/结尾两处复核帧。
+    // 复核帧只对"锚点对得上"的候选才抽，所以六列全允许为空。
+    let has_video_column = |name: &str| columns.iter().any(|c| c == name);
+    for col in [
+        "anchor_phash",
+        "anchor_dhash",
+        "mid_phash",
+        "mid_dhash",
+        "tail_phash",
+        "tail_dhash",
+        "sig_modified_at",
+    ] {
+        if !has_video_column(col) {
+            let kind = if col == "sig_modified_at" { "TEXT" } else { "INTEGER" };
+            conn.execute(&format!("ALTER TABLE videos ADD COLUMN {col} {kind}"), [])?;
+        }
+    }
     drop(stmt);
     // 图片表可能尚未建（PRAGMA 对不存在的表返回空列集），有列且缺 modified_at 才补
     let mut stmt = conn.prepare("PRAGMA table_info(images)")?;
@@ -74,14 +100,27 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE images ADD COLUMN modified_at TEXT", [])?;
     }
     // 相似图指纹缓存：全库 ffmpeg 是小时级的活儿，算过就要落库，别每次检测都从头跑
-    if !image_columns.is_empty() && !image_columns.iter().any(|c| c == "phash") {
+    let has_column = |name: &str| image_columns.iter().any(|c| c == name);
+    if !image_columns.is_empty() && !has_column("phash") {
         conn.execute("ALTER TABLE images ADD COLUMN phash INTEGER", [])?;
     }
-    if !image_columns.is_empty() && !image_columns.iter().any(|c| c == "phash_modified_at") {
-        conn.execute(
-            "ALTER TABLE images ADD COLUMN phash_modified_at TEXT",
-            [],
-        )?;
+    // 时间戳列只管"这组图指纹"，早期版本只存 phash 一枚，名字跟着改了
+    if !image_columns.is_empty() && !has_column("sig_modified_at") {
+        if has_column("phash_modified_at") {
+            conn.execute(
+                "ALTER TABLE images RENAME COLUMN phash_modified_at TO sig_modified_at",
+                [],
+            )?;
+        } else {
+            conn.execute("ALTER TABLE images ADD COLUMN sig_modified_at TEXT", [])?;
+        }
+    }
+    if !image_columns.is_empty() && !has_column("dhash") {
+        conn.execute("ALTER TABLE images ADD COLUMN dhash INTEGER", [])?;
+    }
+    // 重复判定的最后一道看这 1KB 缩略像素：只有哈希撞车的候选才有，允许为空
+    if !image_columns.is_empty() && !has_column("sig_pixels") {
+        conn.execute("ALTER TABLE images ADD COLUMN sig_pixels BLOB", [])?;
     }
     Ok(())
 }
@@ -134,6 +173,32 @@ pub(crate) fn sample_image(id: &str, path: &str) -> crate::models::Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ensure_columns_migrates_the_legacy_signature_cache() {
+        // 老库形状：有 phash + phash_modified_at（只有单路指纹的那个版本），没有 dhash
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        conn.execute("ALTER TABLE images RENAME COLUMN sig_modified_at TO phash_modified_at", []).unwrap();
+        conn.execute("ALTER TABLE images DROP COLUMN dhash", []).unwrap();
+        conn.execute(
+            "INSERT INTO images (id, path, filename, file_size, modified_at, phash, phash_modified_at)
+             VALUES ('i1', 'C:/pics/a.png', 'a.png', 10, '1700', 7, '1700')",
+            [],
+        )
+        .unwrap();
+
+        ensure_columns(&conn).unwrap();
+
+        // 时间戳列沿用老数据（缓存不作废），dhash 补空列等下次检测补算第二路
+        let row = get_image_sigs(&conn).unwrap().remove(0);
+        assert_eq!(row.sig_modified_at.as_deref(), Some("1700"));
+        assert_eq!(row.phash, Some(7));
+        assert_eq!(row.dhash, None);
+        assert_eq!(row.cached_sigs(), None);
+        // 幂等：再跑一次不该报"列已存在"
+        ensure_columns(&conn).unwrap();
+    }
 
     #[test]
     fn test_transaction_rollback_preserves_library() {

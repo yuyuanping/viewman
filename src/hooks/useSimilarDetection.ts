@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import type { SimilarHash, SimilarProgressPayload } from "../api";
 import type { Image } from "../types";
-import { extrasOfGroups, liveGroups, mergeSimilarGroups, selectGroupExtras } from "../similarGroups";
+import { extrasOfGroups, liveGroups, selectGroupExtras } from "../similarGroups";
 import type { HashPair, KeepRule } from "../similarGroups";
 import type { Notify } from "./useToasts";
 
@@ -21,6 +21,7 @@ export const SIMILAR_THRESHOLD_MIN = 4;
 export const SIMILAR_THRESHOLD_MAX = 16;
 
 const NO_HASHES = new Map<string, HashPair>();
+const NO_FAR: Set<string> = new Set();
 
 function toHashById(hashes: SimilarHash[]): Map<string, HashPair> {
   const byId = new Map<string, HashPair>();
@@ -29,12 +30,13 @@ function toHashById(hashes: SimilarHash[]): Map<string, HashPair> {
 }
 
 /**
- * 相似图检测（pHash）：后端每算完一批就推一次已成形的组，这里边收边并，
- * 面板开着就能一路审下去。指纹落在库里，所以换「宽容度」只是重新比对一遍：
- * 分组结果整体换掉（不能并，低阈值时留着高阈值的胖组就是错的）。
+ * 相似图检测（pHash + dHash）：后端每推一次都是当前的完整分组，这里整份换掉——
+ * 口径换了组会缩小，把高阈值的胖组留着就是错的。换宽容度也只是重新比对（指纹已在库里）。
+ * 组尾还挂着"远亲"：有邻居但没连上骨架，列出来给人看，但不自动勾。
  */
 export function useSimilarDetection({ images, setSelectMode, setSelectedIds, notify }: SimilarOptions) {
   const [groups, setGroups] = useState<string[][]>([]);
+  const [farIds, setFarIds] = useState<Set<string>>(NO_FAR);
   const [hashById, setHashById] = useState<Map<string, HashPair>>(NO_HASHES);
   const [chosenKeeps, setChosenKeeps] = useState<Set<string>>(new Set());
   const [threshold, setThreshold] = useState(SIMILAR_THRESHOLD_DEFAULT);
@@ -58,8 +60,8 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
   }, [images, groups]);
 
   const aliveGroups = useMemo(
-    () => liveGroups(groups, imageById, chosenKeeps, keepRule),
-    [groups, imageById, chosenKeeps, keepRule],
+    () => liveGroups(groups, imageById, chosenKeeps, keepRule, farIds),
+    [groups, imageById, chosenKeeps, keepRule, farIds],
   );
   const extras = useMemo(() => extrasOfGroups(aliveGroups), [aliveGroups]);
 
@@ -67,23 +69,37 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     let disposed = false;
     let unlisten: (() => void) | null = null;
     listen<SimilarProgressPayload>("similar-progress", (event) => {
-      const { processed, total, done, groups: fresh } = event.payload;
+      const { processed, total, done, groups: fresh, far } = event.payload;
       setProgress(done || total === 0 ? null : { processed, total });
-      if (fresh.length > 0) setGroups(prev => mergeSimilarGroups(prev, fresh));
+      if (fresh.length > 0) {
+        // 一出组就算有结果：中途关掉面板还能从工具栏点回去，不必等整趟跑完
+        setDetected(true);
+        setGroups(fresh);
+        setFarIds(new Set(far));
+      }
     }).then((fn) => {
       if (disposed) fn(); else unlisten = fn;
     }).catch(() => { /* 事件收不到只是看不到中间进度，检测结束时仍会拿到完整结果 */ });
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
+  /**
+   * 跟着分组结果重推一遍勾选：新冒出来的副本补勾上，已经不算副本的（换了组、
+   * 成了保留张、被降成远亲）撤勾——换宽容度之后留着上一轮的勾就等于按新口径删错图。
+   * 用户手动取消过的那张仍不会被我们擅自勾回去。
+   */
   useEffect(() => {
+    const want = new Set(extras);
     const fresh = extras.filter(id => !autoSelected.current.has(id));
-    for (const id of extras) autoSelected.current.add(id);
-    if (fresh.length === 0) return;
-    setSelectMode(true);
+    const stale = [...autoSelected.current].filter(id => !want.has(id));
+    if (fresh.length === 0 && stale.length === 0) return;
+    for (const id of fresh) autoSelected.current.add(id);
+    for (const id of stale) autoSelected.current.delete(id);
+    if (fresh.length > 0) setSelectMode(true);
     setSelectedIds(prev => {
       const next = new Set(prev);
       for (const id of fresh) next.add(id);
+      for (const id of stale) next.delete(id);
       return next;
     });
   }, [extras, setSelectedIds, setSelectMode]);
@@ -91,6 +107,7 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
   const detect = useCallback(async () => {
     setDetecting(true);
     setGroups([]);
+    setFarIds(NO_FAR);
     setHashById(NO_HASHES);
     setChosenKeeps(new Set());
     autoSelected.current = new Set();
@@ -104,9 +121,11 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
         return;
       }
       setHashById(toHashById(found.hashes));
-      setGroups(prev => mergeSimilarGroups(prev, found.groups));
+      setGroups(found.groups);
+      setFarIds(new Set(found.far));
       setDetected(true);
-      notify(`检测完成：${found.groups.length} 组相似图片，副本已勾上 ${found.groups.reduce((n, g) => n + g.length - 1, 0)} 张。`);
+      const copies = found.groups.reduce((n, g) => n + g.length, 0) - found.far.length - found.groups.length;
+      notify(`检测完成：${found.groups.length} 组相似图片，副本已勾上 ${copies} 张${found.far.length > 0 ? `，另有 ${found.far.length} 张远亲只列出不勾` : ""}。`);
     } catch (e) {
       notify(`相似检测失败：${String(e)}`, "error");
     } finally {
@@ -125,9 +144,9 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
       try {
         const again = await api.findSimilarImages(next);
         setGroups(again.groups);
+        setFarIds(new Set(again.far));
         setHashById(toHashById(again.hashes));
         setChosenKeeps(new Set());
-        autoSelected.current = new Set();
       } catch (e) {
         notify(`重新比对失败：${String(e)}`, "error");
       } finally {
@@ -146,6 +165,7 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
       recalcTimer.current = null;
     }
     setGroups([]);
+    setFarIds(NO_FAR);
     setHashById(NO_HASHES);
     setChosenKeeps(new Set());
     autoSelected.current = new Set();
@@ -154,8 +174,8 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
   }, []);
 
   /** 换某组的保留项：该组勾选跟着翻转，其他组的勾选不动 */
-  const keep = useCallback((at: number, keepId: string) => {
-    const group = aliveGroups.find(item => item.at === at);
+  const keep = useCallback((fromKeep: string, keepId: string) => {
+    const group = aliveGroups.find(item => item.keep === fromKeep);
     if (!group) return;
     setChosenKeeps(prev => {
       const next = new Set(prev);
@@ -173,17 +193,34 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     for (const id of extras) autoSelected.current.add(id);
   }, [extras, setSelectMode, setSelectedIds]);
 
+  /** 一键清空待删清单：面板里的「取消全选」按下去就该什么都不会删 */
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, [setSelectedIds]);
+
+  /** 整组勾上/取消：勾上时保留张也在里面，全组一起进回收站是有意为之 */
+  const setGroupSelection = useCallback((ids: string[], on: boolean) => {
+    if (on) setSelectMode(true);
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (on) next.add(id); else next.delete(id);
+      }
+      return next;
+    });
+  }, [setSelectMode, setSelectedIds]);
+
   /**
    * 换选主规则：各组的保留张会整体搬家，勾选必须跟着整份换掉，
    * 沿用原来的增量勾选会让"已经变成主"的那张还留在待删清单里。
    */
   const applyKeepRule = useCallback((next: KeepRule) => {
     setKeepRule(next);
-    const fresh = extrasOfGroups(liveGroups(groups, imageById, chosenKeeps, next));
+    const fresh = extrasOfGroups(liveGroups(groups, imageById, chosenKeeps, next, farIds));
     autoSelected.current = new Set(fresh);
     setSelectMode(true);
     setSelectedIds(new Set(fresh));
-  }, [groups, imageById, chosenKeeps, setSelectMode, setSelectedIds]);
+  }, [groups, imageById, chosenKeeps, farIds, setSelectMode, setSelectedIds]);
 
   const similarIds = useMemo(
     () => new Set(aliveGroups.flatMap(group => group.ids)),
@@ -209,6 +246,8 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     clear,
     keep,
     autoSelect,
+    clearSelection,
+    setGroupSelection,
     applyKeepRule,
   };
 }

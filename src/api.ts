@@ -59,7 +59,7 @@ export const api = {
     invoke<string>("move_image", { imageId, targetDir }),
   generateImageThumbnails: (imageIds: string[]) =>
     invoke<number>("generate_image_thumbnails", { imageIds }),
-  findDuplicateImages: () => invoke<string[][]>("find_duplicate_images"),
+  findDuplicateImages: () => invoke<DuplicateReport>("find_duplicate_images"),
   /**
    * 相似图检测（pHash）：汉明距离 ≤ threshold 算一组。
    * 指纹落在库里，只有新图/改过的图才重算，所以改阈值只是重新比对，几秒就回。
@@ -77,8 +77,29 @@ export interface SimilarHash {
 
 export interface SimilarResult {
   groups: string[][];
+  /** 挂在组尾的远亲（组员之一）：有邻居但没连上骨架，可见但不自动勾 */
+  far: string[];
   /** 只含成组的图片：孤张不给，免得整库指纹白传一趟 */
   hashes: SimilarHash[];
+}
+
+/** 后端 duplicate-progress 事件负载 */
+export interface DuplicateProgressPayload {
+  /** sigs 阶段是本次需要补算的张数；grouping 阶段是候选桶数（已缓存指纹/像素的不计） */
+  processed: number;
+  total: number;
+  /** sigs = 补算图像指纹，grouping = 逐桶补算缩略像素并定组 */
+  stage: string;
+  /** 累计解不出画面、因此没参与比对的张数（只有图片检测给） */
+  skipped?: number;
+  /** 截至这次已定下的完整分组：只在 grouping 阶段有，整份给、前端整份替换 */
+  groups?: string[][];
+}
+
+/** 重复检测结果：分组 + 解不出画面而被跳过的张数（视频侧还没统计，就不给这个数） */
+export interface DuplicateReport {
+  groups: string[][];
+  skipped?: number;
 }
 
 /** 后端 similar-progress 事件负载 */
@@ -87,8 +108,10 @@ export interface SimilarProgressPayload {
   processed: number;
   total: number;
   done: boolean;
-  /** 这一批碰到过的相似组（完整成员，重叠即视作同一组） */
+  /** 当前的完整分组（口径换了组会缩小，所以整份给，前端整份替换） */
   groups: string[][];
+  /** 挂在组尾的远亲（组员之一）：可见但不自动勾 */
+  far: string[];
 }
 
 /** 后端 scan-progress / image-scan-progress 事件负载（两套库共用同一形状） */

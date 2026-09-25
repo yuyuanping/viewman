@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  extrasOfGroups, hashDistance, liveGroups, mergeSimilarGroups, pickKeep, selectGroupExtras,
+  extrasOfGroups, groupsMatching, hashDistance, liveGroups, pickKeep, selectGroupExtras,
 } from './similarGroups.ts';
 
 test('hashDistance counts differing bits across both halves of the 64-bit hash', () => {
@@ -43,14 +43,14 @@ test('pickKeep ignores members with missing metadata instead of picking them', (
 test('liveGroups prunes members that left the library and drops groups below two', () => {
   const groups = [['a', 'b', 'gone'], ['c', 'missing'], ['d', 'e']];
   assert.deepEqual(liveGroups(groups, imageById), [
-    { at: 0, ids: ['a', 'b'], keep: 'a' },
-    { at: 2, ids: ['d', 'e'], keep: 'd' },
+    { ids: ['a', 'b'], keep: 'a', far: [] },
+    { ids: ['d', 'e'], keep: 'd', far: [] },
   ]);
 });
 
 test('liveGroups puts the biggest group first', () => {
   const groups = [['a', 'b'], ['c', 'd', 'e']];
-  assert.deepEqual(liveGroups(groups, imageById).map(g => g.at), [1, 0]);
+  assert.deepEqual(liveGroups(groups, imageById).map(g => g.keep), ['c', 'a']);
 });
 
 test('liveGroups honors the chosen keeper and falls back when it is gone', () => {
@@ -76,29 +76,6 @@ test('liveGroups lets a manual keeper outrank the rule', () => {
   assert.equal(liveGroups(groups, imageById, new Set(['b']), 'highest')[0].keep, 'b');
 });
 
-test('mergeSimilarGroups grows an existing group without duplicating members', () => {
-  const merged = mergeSimilarGroups([['a', 'b']], [['b', 'a', 'c']]);
-  assert.deepEqual(merged, [['a', 'b', 'c']]);
-});
-
-test('mergeSimilarGroups joins the groups a bridge links into one', () => {
-  // 后端先推了两条独立组，之后一张桥接图把它们连成一组，整组成员再推一次
-  const merged = mergeSimilarGroups([['a', 'b'], ['c', 'd']], [['b', 'c', 'e']]);
-  // 新组员接在身后，原有那条的下标不变：默认保留项仍是组内第一张
-  assert.deepEqual(merged, [['a', 'b', 'c', 'e', 'd']]);
-});
-
-test('mergeSimilarGroups appends genuinely new groups and keeps order', () => {
-  const merged = mergeSimilarGroups([['a', 'b']], [['c', 'd'], ['a', 'b']]);
-  assert.deepEqual(merged, [['a', 'b'], ['c', 'd']]);
-});
-
-test('mergeSimilarGroups does not touch the arrays it was given', () => {
-  const existing = [['a', 'b']];
-  mergeSimilarGroups(existing, [['b', 'c']]);
-  assert.deepEqual(existing, [['a', 'b']]);
-});
-
 test('extrasOfGroups excludes each group keeper', () => {
   const groups = liveGroups([['a', 'b', 'c'], ['d', 'e']], imageById, new Set(['b']));
   assert.deepEqual(extrasOfGroups(groups), ['a', 'c', 'e']);
@@ -106,6 +83,38 @@ test('extrasOfGroups excludes each group keeper', () => {
 
 test('selectGroupExtras flips one group and leaves the others alone', () => {
   const groups = liveGroups([['a', 'b', 'c'], ['d', 'e']], imageById);
-  const target = groups.find(group => group.at === 0);
+  const target = groups.find(group => group.keep === 'a');
   assert.deepEqual([...selectGroupExtras(['c', 'd'], target, 'a')].sort(), ['b', 'c', 'd']);
+});
+
+test('groupsMatching finds a group by filename or path', () => {
+  const byId = new Map([
+    ['a', { id: 'a', filename: '175ffbbe.png', path: 'D:\\QQBot_Data\\group\\images\\175ffbbe.png', file_size: 1, width: 1, height: 1 }],
+    ['b', { id: 'b', filename: 'pet.png', path: 'E:\\精选\\pet.png', file_size: 1, width: 1, height: 1 }],
+    ['c', { id: 'c', filename: 'PET-COPY.JPG', path: 'E:\\精选\\PET-COPY.JPG', file_size: 1, width: 1, height: 1 }],
+  ]);
+  const groups = liveGroups([['b', 'c'], ['a', 'b']], byId);
+  // 命中筛选不能改动组的保留张：面板拿它当 React key 和「留」的入参，串了就翻不到那组
+  assert.deepEqual(groupsMatching(groups, '175FFBBE', byId).map(group => group.keep), ['a']);
+  assert.deepEqual(groupsMatching(groups, '精选', byId).map(group => group.keep), ['b', 'a']);
+  assert.deepEqual(groupsMatching(groups, '  ', byId), groups);
+  assert.deepEqual(groupsMatching(groups, 'nomatch', byId), []);
+});
+
+test('远亲只列出来看，不参与自动勾选', () => {
+  const groups = liveGroups([['a', 'b', 'c']], imageById, undefined, 'earliest', new Set(['c']));
+  assert.deepEqual(groups[0].far, ['c']);
+  assert.deepEqual(extrasOfGroups(groups), ['b']);
+  // 换选主也不该把远亲勾上：它本来就比阈值松一档
+  assert.deepEqual([...selectGroupExtras([], groups[0], 'a')].sort(), ['b']);
+});
+
+test('默认保留张不挑远亲，整组都是远亲时才退回全表', () => {
+  // c 的文件最大，但它是远亲：该留 a 或 b，而不是留一张"看着不太像"的
+  const withSkeleton = liveGroups([['a', 'b', 'c']], imageById, undefined, 'largest', new Set(['c']));
+  assert.equal(withSkeleton[0].keep, 'b');
+  // 整组都是挂来的远亲：主照旧得有一个（否则这张组会被自动勾空），但一张都不勾
+  const allFar = liveGroups([['c', 'd']], imageById, undefined, 'largest', new Set(['c', 'd']));
+  assert.equal(allFar[0].keep, 'd');
+  assert.deepEqual(extrasOfGroups(allFar), []);
 });
