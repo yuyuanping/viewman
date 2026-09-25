@@ -59,6 +59,19 @@ pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
 }
 
+/// 命令返回的错误统一是 String（前端拿到就直接显示），所以满地 `.map_err(|e| e.to_string())`。
+/// 这个 trait 给它一个短名，少写 20 个字符也少一个闭包。
+pub trait MapErrStr<T> {
+    /// `x.map_err(|e| e.to_string())` → `x.map_err_str()`
+    fn map_err_str(self) -> Result<T, String>;
+}
+
+impl<T, E: std::fmt::Display> MapErrStr<T> for Result<T, E> {
+    fn map_err_str(self) -> Result<T, String> {
+        self.map_err(|e| e.to_string())
+    }
+}
+
 /// 检测结果的落盘缓存（都放 app_data 下）：三趟检测——重复图、相似图、重复视频——
 /// 都是"点开一次要等几分钟"的活，关掉应用不该等于把上一趟的结果也丢了。
 pub(crate) const SIMILAR_CACHE: &str = "similar-cache.json";
@@ -66,7 +79,7 @@ pub(crate) const DUPLICATE_CACHE: &str = "duplicate-cache.json";
 pub(crate) const VIDEO_DUPLICATE_CACHE: &str = "video-duplicate-cache.json";
 
 pub(crate) fn cache_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dir = app.path().app_data_dir().map_err_str()?;
     Ok(dir.join(name))
 }
 
@@ -104,7 +117,7 @@ pub(crate) async fn read_cache<T: serde::de::DeserializeOwned + Send + 'static>(
     let path = cache_path(app, name)?;
     tauri::async_runtime::spawn_blocking(move || read_cache_file::<T>(&path))
         .await
-        .map_err(|e| e.to_string())
+        .map_err_str()
 }
 
 /// 删一份检测结果：面板上按 ✕ 是"我不认这份结果"，缓存得跟着作废，不然下次打开又给恢复回来
@@ -112,6 +125,59 @@ pub(crate) fn remove_cache(app: &tauri::AppHandle, name: &str) {
     if let Ok(path) = cache_path(app, name) {
         let _ = std::fs::remove_file(path);
     }
+}
+
+// ── 批量写库的共享设施 ──────────────────────────────────────────────
+// images.rs 与 videos.rs 的检测命令都靠"攒一批 → 抢锁 → 写库 → 清批次"滚动落盘，
+// 抢不到锁或写失败就原样留着等下一轮。两边以前各写一套，现在统一在此。
+
+/// 抢并行累加器的锁。这些 Mutex 里装的就是个普通集合，毒化只说明别处 panic 过、
+/// 内容本身仍然可用；而抢锁时 panic 会顺着 scope 的 join 把整个检测命令带崩——
+/// 检测跑几分钟白跑，界面只看到一条"命令失败"。
+pub(crate) fn lock_ignoring_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 抢锁落库：抢不到（启动扫描正占着同一把锁）或写失败就原样留着这批，返回有没有写进去。
+/// 以前是"抢不到就 clear"，等于这一截 ffmpeg 白跑，下次还得从头算。
+pub(crate) fn flush<T>(
+    app: &tauri::AppHandle,
+    batch: &mut Vec<T>,
+    save: impl Fn(&rusqlite::Connection, &[T]) -> rusqlite::Result<()>,
+) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    match app.state::<AppState>().db.lock() {
+        Ok(conn) if save(&conn, batch).is_ok() => {
+            batch.clear();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 收尾时给没写进去的批次几次重试：扫描的写库是一阵一阵的，等得起
+pub(crate) fn flush_with_retry<T>(
+    app: &tauri::AppHandle,
+    batch: &mut Vec<T>,
+    save: impl Fn(&rusqlite::Connection, &[T]) -> rusqlite::Result<()>,
+) {
+    for _ in 0..10 {
+        if flush(app, batch, &save) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// 并行线程数：按 CPU 核数取，封顶 14（再高也吃不住逐条 spawn ffmpeg 的开销），不超任务总数
+pub(crate) fn workers(total: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 14)
+        .min(total.max(1))
 }
 
 #[cfg(test)]

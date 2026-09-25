@@ -3,7 +3,7 @@ use tauri::{Emitter, Manager, State};
 use crate::db;
 use crate::scanner;
 
-use super::AppState;
+use super::{AppState, MapErrStr};
 
 #[derive(Clone, serde::Serialize)]
 pub struct ThumbnailProgress {
@@ -23,7 +23,7 @@ pub(crate) struct ThumbJob {
 
 /// 缩略图缓存目录：`<app_data>/thumbnails`
 pub(crate) fn thumbnails_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("thumbnails");
+    let dir = app.path().app_data_dir().map_err_str()?.join("thumbnails");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建缩略图目录失败: {}", e))?;
     Ok(dir)
 }
@@ -72,7 +72,7 @@ pub(crate) async fn run_thumbnail_jobs(
                 // 临时名必须以 .jpg 结尾：ffmpeg 按扩展名选封装格式，`.jpg.part` 会直接失败。
                 let part = dir.join(format!("{}.part.jpg", job.id));
                 let result = scanner::extract_thumbnail(&job.source, &part, job.duration)
-                    .and_then(|()| std::fs::rename(&part, &out).map_err(|e| e.to_string()));
+                    .and_then(|()| std::fs::rename(&part, &out).map_err_str());
                 let _ = std::fs::remove_file(&part);
                 result.is_ok()
             };
@@ -98,7 +98,7 @@ pub(crate) async fn run_thumbnail_jobs(
         (generated, failed)
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     let _ = app.emit(
         event,
@@ -116,8 +116,8 @@ pub async fn generate_thumbnails(
     video_ids: Vec<String>,
 ) -> Result<usize, String> {
     let jobs: Vec<ThumbJob> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let all = db::get_all_videos(&conn).map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
+        let all = db::get_all_videos(&conn).map_err_str()?;
         all.into_iter()
             .filter(|v| video_ids.iter().any(|id| id == &v.id))
             // 缓存文件仍在的跳过；文件被删掉的会重新生成
@@ -143,9 +143,9 @@ pub async fn capture_frame(
     position: f64,
 ) -> Result<String, String> {
     let path = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         db::get_video_path(&conn, &video_id)
-            .map_err(|e| e.to_string())?
+            .map_err_str()?
             .ok_or_else(|| format!("Video not found: {}", video_id))?
     };
 
@@ -173,5 +173,5 @@ pub async fn capture_frame(
         Ok(out.to_string_lossy().to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err_str()?
 }

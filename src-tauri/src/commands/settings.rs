@@ -3,7 +3,7 @@ use tauri::State;
 use crate::db;
 
 use super::removal::normalized_dir;
-use super::AppState;
+use super::{AppState, MapErrStr};
 
 pub(crate) const SCAN_ROOTS_KEY: &str = "scan_roots";
 pub(crate) const IMAGE_SCAN_ROOTS_KEY: &str = "image_scan_roots";
@@ -21,8 +21,8 @@ pub(crate) fn roots_key(kind: &str) -> Result<&'static str, String> {
 #[tauri::command]
 pub fn load_scan_roots(state: State<AppState>, kind: String) -> Result<Vec<String>, String> {
     let key = roots_key(&kind)?;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let raw = db::get_setting(&conn, key).map_err(|e| e.to_string())?;
+    let conn = state.db.lock().map_err_str()?;
+    let raw = db::get_setting(&conn, key).map_err_str()?;
     Ok(raw
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default())
@@ -35,15 +35,15 @@ pub fn save_scan_roots(
     roots: Vec<String>,
 ) -> Result<(), String> {
     let key = roots_key(&kind)?;
-    let value = serde_json::to_string(&roots).map_err(|e| e.to_string())?;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, key, &value).map_err(|e| e.to_string())
+    let value = serde_json::to_string(&roots).map_err_str()?;
+    let conn = state.db.lock().map_err_str()?;
+    db::set_setting(&conn, key, &value).map_err_str()
 }
 
 /// 记下扫描根（大小写与结尾分隔符不敏感去重）。
 /// 只要目录能正常读取就立刻记，别等整轮扫描结束——扫到一半被打断，下次启动才能接着扫。
 pub(crate) fn remember_root(conn: &rusqlite::Connection, key: &str, dir: &str) -> Result<(), String> {
-    let raw = db::get_setting(conn, key).map_err(|e| e.to_string())?;
+    let raw = db::get_setting(conn, key).map_err_str()?;
     let mut roots: Vec<String> = raw
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default();
@@ -54,8 +54,8 @@ pub(crate) fn remember_root(conn: &rusqlite::Connection, key: &str, dir: &str) -
         return Ok(());
     }
     roots.push(dir.to_string());
-    let value = serde_json::to_string(&roots).map_err(|e| e.to_string())?;
-    db::set_setting(conn, key, &value).map_err(|e| e.to_string())
+    let value = serde_json::to_string(&roots).map_err_str()?;
+    db::set_setting(conn, key, &value).map_err_str()
 }
 
 #[cfg(test)]

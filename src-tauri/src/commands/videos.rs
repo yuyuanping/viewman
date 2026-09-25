@@ -8,7 +8,7 @@ use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
 use super::thumbnails::clear_thumbnail_cache;
-use super::{read_cache, undeleted_targets, write_cache, AppState, VIDEO_DUPLICATE_CACHE};
+use super::{flush, flush_with_retry, read_cache, undeleted_targets, write_cache, AppState, MapErrStr, VIDEO_DUPLICATE_CACHE};
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
 fn sniff_image_format(header: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -47,8 +47,8 @@ fn unique_path(target: &Path) -> PathBuf {
 
 #[tauri::command]
 pub fn get_videos(state: State<AppState>) -> Result<Vec<Video>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::get_all_videos(&conn).map_err(|e| e.to_string())
+    let conn = state.db.lock().map_err_str()?;
+    db::get_all_videos(&conn).map_err_str()
 }
 
 /// 打开文件并读取文件头：确认可读性，同时用魔数识别"图片伪装成视频"的假视频
@@ -56,9 +56,9 @@ pub fn get_videos(state: State<AppState>) -> Result<Vec<Video>, String> {
 pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<VideoFileStatus, String> {
     use std::io::ErrorKind;
     let path = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         db::get_video_path(&conn, &video_id)
-            .map_err(|e| e.to_string())?
+            .map_err_str()?
             .ok_or_else(|| format!("Video not found: {}", video_id))?
     };
 
@@ -107,11 +107,11 @@ pub async fn delete_videos(
     video_ids: Vec<String>,
 ) -> Result<Vec<String>, String> {
     let targets: Vec<(String, String)> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let mut out = Vec::with_capacity(video_ids.len());
         for video_id in &video_ids {
             let path = db::get_video_path(&conn, video_id)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
                 .ok_or_else(|| format!("Video not found: {}", video_id))?;
             out.push((video_id.clone(), path));
         }
@@ -121,7 +121,7 @@ pub async fn delete_videos(
     let for_files = targets.clone();
     let survivors = tauri::async_runtime::spawn_blocking(move || undeleted_targets(&for_files))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err_str()?;
     let failed: std::collections::HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
     let deleted: Vec<String> = targets
         .iter()
@@ -130,10 +130,10 @@ pub async fn delete_videos(
         .collect();
 
     if !deleted.is_empty() {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        db::delete_videos_by_ids(&tx, &deleted).map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
+        let tx = conn.unchecked_transaction().map_err_str()?;
+        db::delete_videos_by_ids(&tx, &deleted).map_err_str()?;
+        tx.commit().map_err_str()?;
         for id in &deleted {
             clear_thumbnail_cache(&app, id);
         }
@@ -153,9 +153,9 @@ pub fn convert_fake_images(
     let mut result = ConversionResult::default();
     for video_id in video_ids {
         let path = {
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let conn = state.db.lock().map_err_str()?;
             db::get_video_path(&conn, &video_id)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
         };
         let Some(path) = path else {
             result.errors.push(format!("记录不存在，已跳过: {}", video_id));
@@ -182,8 +182,8 @@ pub fn convert_fake_images(
         let removal = state
             .db
             .lock()
-            .map_err(|e| e.to_string())
-            .and_then(|conn| db::delete_video(&conn, &video_id).map_err(|e| e.to_string()));
+            .map_err_str()
+            .and_then(|conn| db::delete_video(&conn, &video_id).map_err_str());
         if let Err(e) = removal {
             // 图片和回收站都已处理，仅删库失败：还原源文件，保持库记录与磁盘一致
             let _ = std::fs::copy(&target, p);
@@ -218,8 +218,8 @@ pub async fn find_static_videos(state: State<'_, AppState>) -> Result<Vec<String
     }
 
     let jobs: Vec<(String, String, Option<f64>)> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_videos_with_max_duration(&conn, SHORT_IMAGE_MAX_SECONDS).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::get_videos_with_max_duration(&conn, SHORT_IMAGE_MAX_SECONDS).map_err_str()?
     };
 
     let ids = tauri::async_runtime::spawn_blocking(move || {
@@ -248,7 +248,7 @@ pub async fn find_static_videos(state: State<'_, AppState>) -> Result<Vec<String
         out
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     Ok(ids)
 }
@@ -268,7 +268,7 @@ pub async fn convert_short_videos(
     }
 
     let jobs: Vec<(String, String, Option<f64>)> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let mut out = Vec::new();
         for id in video_ids {
             match db::get_video_path_and_duration(&conn, &id) {
@@ -334,13 +334,13 @@ pub async fn convert_short_videos(
         (converted, errors)
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     let mut result = ConversionResult { converted: 0, errors };
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         for (id, image) in &converted {
-            db::delete_video(&conn, id).map_err(|e| e.to_string())?;
+            db::delete_video(&conn, id).map_err_str()?;
             // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
             let _ = db::insert_image(&conn, image);
             result.converted += 1;
@@ -375,9 +375,9 @@ pub async fn move_video(
     target_dir: String,
 ) -> Result<String, String> {
     let (old_path, new_path) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let old_path = db::get_video_path(&conn, &video_id)
-            .map_err(|e| e.to_string())?
+            .map_err_str()?
             .ok_or_else(|| format!("Video not found: {}", video_id))?;
         let src = Path::new(&old_path);
         let filename = src
@@ -399,7 +399,7 @@ pub async fn move_video(
         let mut idx = 1;
         while candidate.exists()
             || db::is_path_taken(&conn, &candidate.to_string_lossy(), &video_id)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
         {
             idx += 1;
             if idx > 999 {
@@ -419,7 +419,7 @@ pub async fn move_video(
         move_file(Path::new(&src), Path::new(&dst))
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
     if let Err(e) = move_result {
         return Err(e);
     }
@@ -427,8 +427,8 @@ pub async fn move_video(
     if let Err(e) = state
         .db
         .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|conn| db::update_video_path(&conn, &video_id, &new_path).map_err(|e| e.to_string()))
+        .map_err_str()
+        .and_then(|conn| db::update_video_path(&conn, &video_id, &new_path).map_err_str())
     {
         let _ = move_file(Path::new(&new_path), Path::new(&old_path));
         return Err(format!("更新库记录失败，已还原文件位置: {}", e));
@@ -463,9 +463,9 @@ pub async fn find_hevc_videos(
         return Err("未检测到 ffmpeg/ffprobe，无法识别编码。请安装 ffmpeg 并加入 PATH。".into());
     }
     let jobs: Vec<(String, String)> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         db::videos_without_codec(&conn)
-            .map_err(|e| e.to_string())?
+            .map_err_str()?
             .into_iter()
             .filter(|(_, p)| Path::new(p).exists())
             .collect()
@@ -491,10 +491,10 @@ pub async fn find_hevc_videos(
         );
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
     let ids = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::hevc_video_ids(&conn).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::hevc_video_ids(&conn).map_err_str()?
     };
     Ok(ids)
 }
@@ -512,7 +512,7 @@ pub async fn convert_hevc_videos(
         return Err("未检测到 ffmpeg，无法转码。请安装 ffmpeg 并加入 PATH。".into());
     }
     let jobs: Vec<(String, String)> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let mut out = Vec::new();
         for id in video_ids {
             if let Ok(Some(path)) = db::get_video_path(&conn, &id) {
@@ -521,7 +521,7 @@ pub async fn convert_hevc_videos(
         }
         out
     };
-    let transcoded_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("transcoded");
+    let transcoded_dir = app.path().app_data_dir().map_err_str()?.join("transcoded");
     let total = jobs.len();
     let task_app = app.clone();
 
@@ -585,13 +585,13 @@ pub async fn convert_hevc_videos(
         (done, errors)
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         for (id, path, size) in &done {
-            db::update_video_location(&conn, id, path, *size).map_err(|e| e.to_string())?;
-            db::set_video_codec(&conn, id, "h264").map_err(|e| e.to_string())?;
+            db::update_video_location(&conn, id, path, *size).map_err_str()?;
+            db::set_video_codec(&conn, id, "h264").map_err_str()?;
         }
     }
     let _ = app.emit(
@@ -712,27 +712,14 @@ fn ensure_anchors(
         }
         let done = processed + 1;
         if done % EMIT_EVERY == 0 || done == total {
-            flush_anchors(app, &mut fresh);
+            flush(app, &mut fresh, |conn, rows| db::save_video_anchors(conn, rows));
             let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: done, total, stage: "anchor" });
         }
     }
-    retry_flush(app, &mut fresh, flush_anchors);
+    flush_with_retry(app, &mut fresh, |conn, rows| db::save_video_anchors(conn, rows));
 }
 
-/// 攒的一批锚点写回库：抢不到锁（启动扫描正占着）或写失败就原样留着，返回有没有写进去。
-/// 抢不到就 clear 等于这些 ffmpeg 白跑，下次还得从头算。
-fn flush_anchors(app: &tauri::AppHandle, updates: &mut Vec<(String, i64, i64, String)>) -> bool {
-    if updates.is_empty() {
-        return true;
-    }
-    match app.state::<AppState>().db.lock() {
-        Ok(conn) if db::save_video_anchors(&conn, updates).is_ok() => {
-            updates.clear();
-            true
-        }
-        _ => false,
-    }
-}
+// flush_anchors / retry_flush / flush_frames 已删，改用 commands.rs 共享的 flush / flush_with_retry
 
 /// 候选才走的第二趟：每个时间点一次 ffmpeg 快进定位（约 0.3s/处），
 /// 所以这一趟的代价只落在锚点对得上的那几条上。
@@ -764,34 +751,11 @@ fn ensure_frames(
         }
         let done = processed + 1;
         if done % EMIT_EVERY == 0 || done == total {
-            flush_frames(app, &mut fresh);
+            flush(app, &mut fresh, |conn, rows| db::save_video_frames(conn, rows));
             let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: done, total, stage: "verify" });
         }
     }
-    retry_flush(app, &mut fresh, flush_frames);
-}
-
-/// 收尾时给没写进去的批次几次重试：扫描的写库是一阵一阵的，等得起
-fn retry_flush<T>(app: &tauri::AppHandle, batch: &mut Vec<T>, flush: fn(&tauri::AppHandle, &mut Vec<T>) -> bool) {
-    for _ in 0..10 {
-        if flush(app, batch) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-}
-
-fn flush_frames(app: &tauri::AppHandle, updates: &mut Vec<(String, i64, i64, i64, i64, String)>) -> bool {
-    if updates.is_empty() {
-        return true;
-    }
-    match app.state::<AppState>().db.lock() {
-        Ok(conn) if db::save_video_frames(&conn, updates).is_ok() => {
-            updates.clear();
-            true
-        }
-        _ => false,
-    }
+    flush_with_retry(app, &mut fresh, |conn, rows| db::save_video_frames(conn, rows));
 }
 
 /// 找出画面相同的重复视频组：不再比文件字节（重压制、重封装过就漏判），
@@ -809,8 +773,8 @@ pub async fn find_duplicate_videos(
     }
     // 磁盘上已经不存在的条目不参与判定；mtime 同时当指纹缓存的钥匙用
     let all_rows: Vec<db::VideoSig> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_video_sigs(&conn).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::get_video_sigs(&conn).map_err_str()?
     };
     // 缓存的过期判断按"库里的记录数"，所以要在丢掉读不到 mtime 的那些之前数
     let library_count = all_rows.len();
@@ -821,7 +785,7 @@ pub async fn find_duplicate_videos(
             Some((row, mtime))
         })
         .collect();
-    let thumb_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("thumbnails");
+    let thumb_dir = app.path().app_data_dir().map_err_str()?.join("thumbnails");
 
     let groups = tauri::async_runtime::spawn_blocking(move || {
         let _ = std::fs::create_dir_all(&thumb_dir);
@@ -882,7 +846,7 @@ pub async fn find_duplicate_videos(
         groups
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     Ok(groups)
 }
@@ -914,22 +878,22 @@ pub async fn get_playable_path(
     video_id: String,
 ) -> Result<String, String> {
     let path = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         db::get_video_path(&conn, &video_id)
-            .map_err(|e| e.to_string())?
+            .map_err_str()?
             .ok_or_else(|| format!("Video not found: {}", video_id))?
     };
 
     let probe_path = path.clone();
     let codec = tauri::async_runtime::spawn_blocking(move || scanner::video_codec_name(&probe_path))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err_str()?;
     if codec.as_deref() != Some("hevc") {
         return Ok(path);
     }
 
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("transcoded");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = app.path().app_data_dir().map_err_str()?.join("transcoded");
+    std::fs::create_dir_all(&dir).map_err_str()?;
     let out = dir.join(format!("{}.mp4", video_id));
     if out.exists() {
         let fresh = std::fs::metadata(&path)
@@ -944,7 +908,7 @@ pub async fn get_playable_path(
     let out_str = out.to_string_lossy().to_string();
     let job = tauri::async_runtime::spawn_blocking(move || scanner::transcode_to_h264(&src, &out))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err_str()?;
     if job.is_ok() {
         Ok(out_str)
     } else {

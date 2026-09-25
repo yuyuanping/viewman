@@ -8,7 +8,7 @@ use crate::models::{ScanOutcome, Video};
 use crate::scanner;
 
 use super::settings::{remember_root, SCAN_ROOTS_KEY};
-use super::AppState;
+use super::{AppState, MapErrStr};
 
 #[derive(Clone, serde::Serialize)]
 pub struct ScanProgress {
@@ -36,8 +36,8 @@ pub async fn scan_directory(
     dir: String,
 ) -> Result<ScanOutcome<Video>, String> {
     let existing_videos = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_all_videos(&conn).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::get_all_videos(&conn).map_err_str()?
     };
 
     let dir_path = std::path::PathBuf::from(&dir);
@@ -118,15 +118,15 @@ pub async fn scan_directory(
             summary
         })
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err_str()??;
 
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         // 新条目已在探测时逐条落库，这里只清外部已删除的失效条目
         if !stale_ids.is_empty() {
-            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            db::delete_videos_by_ids(&tx, &stale_ids).map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
+            let tx = conn.unchecked_transaction().map_err_str()?;
+            db::delete_videos_by_ids(&tx, &stale_ids).map_err_str()?;
+            tx.commit().map_err_str()?;
         }
     }
 

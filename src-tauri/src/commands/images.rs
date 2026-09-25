@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tauri::{Emitter, Manager, State};
 
+use crate::commands::{flush, flush_with_retry, lock_ignoring_poison, workers};
 use crate::db;
 use crate::models::{Image, ScanOutcome};
 use crate::scanner;
@@ -14,13 +15,13 @@ use super::scan::{
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbJob};
 use super::videos::move_file;
-use super::{read_cache, remove_cache, undeleted_targets, write_cache, AppState};
+use super::{read_cache, remove_cache, undeleted_targets, write_cache, AppState, MapErrStr};
 use super::{DUPLICATE_CACHE, SIMILAR_CACHE, VIDEO_DUPLICATE_CACHE};
 
 #[tauri::command]
 pub fn get_images(state: State<AppState>) -> Result<Vec<Image>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::get_all_images(&conn).map_err(|e| e.to_string())
+    let conn = state.db.lock().map_err_str()?;
+    db::get_all_images(&conn).map_err_str()
 }
 
 /// 递归扫描图片目录并增量更新图片库：新文件探测尺寸，扫描时已消失的文件从库里清掉。
@@ -32,8 +33,8 @@ pub async fn scan_image_directory(
     dir: String,
 ) -> Result<ScanOutcome<Image>, String> {
     let existing_images = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_all_images(&conn).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::get_all_images(&conn).map_err_str()?
     };
 
     let dir_path = PathBuf::from(&dir);
@@ -114,15 +115,15 @@ pub async fn scan_image_directory(
             Ok((images, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }))
         })
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err_str()??;
 
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         // 新条目已在探测时逐张落库，这里只清外部已删除的失效条目
         if !stale_ids.is_empty() {
-            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            db::delete_images_by_ids(&tx, &stale_ids).map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
+            let tx = conn.unchecked_transaction().map_err_str()?;
+            db::delete_images_by_ids(&tx, &stale_ids).map_err_str()?;
+            tx.commit().map_err_str()?;
         }
     }
 
@@ -230,11 +231,11 @@ pub async fn delete_images(
     image_ids: Vec<String>,
 ) -> Result<Vec<String>, String> {
     let targets: Vec<(String, String)> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let mut out = Vec::with_capacity(image_ids.len());
         for image_id in &image_ids {
             let path = db::get_image_path(&conn, image_id)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
                 .ok_or_else(|| format!("Image not found: {}", image_id))?;
             out.push((image_id.clone(), path));
         }
@@ -244,7 +245,7 @@ pub async fn delete_images(
     let for_files = targets.clone();
     let survivors = tauri::async_runtime::spawn_blocking(move || undeleted_targets(&for_files))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err_str()?;
     let failed: HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
     let deleted: Vec<String> = targets
         .iter()
@@ -253,10 +254,10 @@ pub async fn delete_images(
         .collect();
 
     if !deleted.is_empty() {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        db::delete_images_by_ids(&tx, &deleted).map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
+        let tx = conn.unchecked_transaction().map_err_str()?;
+        db::delete_images_by_ids(&tx, &deleted).map_err_str()?;
+        tx.commit().map_err_str()?;
         for id in &deleted {
             clear_thumbnail_cache(&app, id);
         }
@@ -274,9 +275,9 @@ pub async fn move_image(
     target_dir: String,
 ) -> Result<String, String> {
     let (old_path, new_path) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let old_path = db::get_image_path(&conn, &image_id)
-            .map_err(|e| e.to_string())?
+            .map_err_str()?
             .ok_or_else(|| format!("Image not found: {}", image_id))?;
         let src = Path::new(&old_path);
         let filename = src
@@ -298,7 +299,7 @@ pub async fn move_image(
         let mut idx = 1;
         while candidate.exists()
             || db::is_image_path_taken(&conn, &candidate.to_string_lossy(), &image_id)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
         {
             idx += 1;
             if idx > 999 {
@@ -318,7 +319,7 @@ pub async fn move_image(
         move_file(Path::new(&src), Path::new(&dst))
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
     if let Err(e) = move_result {
         return Err(e);
     }
@@ -326,8 +327,8 @@ pub async fn move_image(
     if let Err(e) = state
         .db
         .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|conn| db::update_image_path(&conn, &image_id, &new_path).map_err(|e| e.to_string()))
+        .map_err_str()
+        .and_then(|conn| db::update_image_path(&conn, &image_id, &new_path).map_err_str())
     {
         let _ = move_file(Path::new(&new_path), Path::new(&old_path));
         return Err(format!("更新库记录失败，已还原文件位置: {}", e));
@@ -343,8 +344,8 @@ pub async fn generate_image_thumbnails(
     image_ids: Vec<String>,
 ) -> Result<usize, String> {
     let jobs: Vec<ThumbJob> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let all = db::get_all_images(&conn).map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
+        let all = db::get_all_images(&conn).map_err_str()?;
         all.into_iter()
             .filter(|i| image_ids.iter().any(|id| id == &i.id))
             .filter(|i| !cached_thumbnail_usable(&i.thumbnail_path))
@@ -378,45 +379,7 @@ pub struct DuplicateReport {
 /// 攒着落库的一批双指纹：(image_id, phash, dhash, 指纹对应的文件修改时间)
 type SigUpdate = (String, i64, i64, Option<String>);
 
-fn workers(total: usize) -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
-        .clamp(1, 14)
-        .min(total.max(1))
-}
-
-/// 抢并行累加器的锁。这些 Mutex 里装的就是个普通集合，毒化只说明别处 panic 过、
-/// 内容本身仍然可用；而抢锁时 panic 会顺着 scope 的 join 把整个检测命令带崩——
-/// 检测跑几分钟白跑，界面只看到一条"命令失败"。
-fn lock_ignoring_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// 抢锁落库：抢不到（启动扫描正占着同一把锁）或写失败就原样留着这批，返回有没有写进去。
-/// 以前是"抢不到就 clear"，等于这一截 ffmpeg 白跑，下次还得从头算。
-fn flush<T>(app: &tauri::AppHandle, batch: &mut Vec<T>, save: impl Fn(&rusqlite::Connection, &[T]) -> rusqlite::Result<()>) -> bool {
-    if batch.is_empty() {
-        return true;
-    }
-    match app.state::<AppState>().db.lock() {
-        Ok(conn) if save(&conn, batch).is_ok() => {
-            batch.clear();
-            true
-        }
-        _ => false,
-    }
-}
-
-/// 收尾时给没写进去的批次几次重试：扫描的写库是一阵一阵的，等得起
-fn flush_with_retry<T>(app: &tauri::AppHandle, batch: &mut Vec<T>, save: impl Fn(&rusqlite::Connection, &[T]) -> rusqlite::Result<()>) {
-    for _ in 0..10 {
-        if flush(app, batch, &save) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-}
+// flush / flush_with_retry / workers / lock_ignoring_poison 已提到 commands.rs 共享
 
 // 缓存的文件名、原子落盘、读不回来当没有：这三件事三趟检测共用一套，实现在 commands.rs。
 
@@ -818,8 +781,8 @@ pub async fn find_duplicate_images(
     }
     // 文件已经不在磁盘上的条目不参与判定
     let mut rows: Vec<db::ImageSig> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_image_sigs(&conn).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::get_image_sigs(&conn).map_err_str()?
     };
     let library_count = rows.len();
     rows.retain(|row| Path::new(&row.path).exists());
@@ -847,7 +810,7 @@ pub async fn find_duplicate_images(
         report
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     Ok(report)
 }
@@ -1197,8 +1160,8 @@ pub async fn find_similar_images(
 
     // 文件已经不在磁盘上的条目不参与聚类，也不用再白跑一遍解码
     let mut rows: Vec<db::ImageSig> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::get_image_sigs(&conn).map_err(|e| e.to_string())?
+        let conn = state.db.lock().map_err_str()?;
+        db::get_image_sigs(&conn).map_err_str()?
     };
     // 缓存的过期判断按"库里的记录数"，所以要在过滤之前数
     let library_count = rows.len();
@@ -1266,7 +1229,7 @@ pub async fn find_similar_images(
         result
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err_str()?;
 
     Ok(result)
 }

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::commands::MapErrStr;
+
 static EXE_NAMES: &[&str] = &["PotPlayer.exe", "PotPlayerMini.exe", "PotPlayerMini64.exe"];
 static INI_NAMES: &[&str] = &["PotPlayer.ini", "PotPlayerMini.ini"];
 
@@ -90,7 +92,7 @@ pub fn get_status(video_path: &str) -> PotPlayerStatus {
 
 pub fn enable_titlebar_time() -> Result<(), String> {
     let ini_path = find_or_create_ini()?;
-    let content = std::fs::read_to_string(&ini_path).map_err(|e| e.to_string())?;
+    let content = std::fs::read_to_string(&ini_path).map_err_str()?;
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
     const TARGET_KEY: &str = "ShowCurrentTimeInTitle";
@@ -120,7 +122,7 @@ pub fn enable_titlebar_time() -> Result<(), String> {
                 let parts: Vec<&str> = trimmed.splitn(2, '=').collect();
                 if parts.len() == 2 && parts[1].trim() != "1" {
                     lines[i] = format!("{}={}", parts[0], 1);
-                    std::fs::write(&ini_path, lines.join("\r\n")).map_err(|e| e.to_string())?;
+                    std::fs::write(&ini_path, lines.join("\r\n")).map_err_str()?;
                     return Ok(());
                 }
                 return Ok(());
@@ -133,7 +135,7 @@ pub fn enable_titlebar_time() -> Result<(), String> {
         lines.push(format!("{}={}", TARGET_KEY, 1));
     }
 
-    std::fs::write(&ini_path, lines.join("\r\n")).map_err(|e| e.to_string())
+    std::fs::write(&ini_path, lines.join("\r\n")).map_err_str()
 }
 
 fn find_or_create_ini() -> Result<PathBuf, String> {
@@ -149,12 +151,12 @@ fn find_or_create_ini() -> Result<PathBuf, String> {
     } else {
         let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not found".to_string())?;
         let d = PathBuf::from(&appdata).join("PotPlayer");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&d).map_err_str()?;
         (d, "PotPlayerMini.ini".to_string())
     };
 
     let path = dir.join(&ini_name);
-    std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    std::fs::write(&path, "").map_err_str()?;
     Ok(path)
 }
 

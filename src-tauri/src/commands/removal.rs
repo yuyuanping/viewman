@@ -4,7 +4,7 @@ use crate::db;
 
 use super::settings::roots_key;
 use super::thumbnails::clear_thumbnail_cache;
-use super::AppState;
+use super::{AppState, MapErrStr};
 
 /// 统一比较形式：小写 + 分隔符一律按 '\' 处理（Windows 路径大小写不敏感）
 fn lowered(path: &str) -> String {
@@ -50,31 +50,31 @@ pub fn remove_media_directory(
     let video = kind == "video";
 
     let removed_ids: Vec<String> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
         let ids: Vec<String> = if video {
             db::get_all_videos(&conn)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
                 .into_iter()
                 .filter(|v| path_under(&v.path, &dir))
                 .map(|v| v.id)
                 .collect()
         } else {
             db::get_all_images(&conn)
-                .map_err(|e| e.to_string())?
+                .map_err_str()?
                 .into_iter()
                 .filter(|i| path_under(&i.path, &dir))
                 .map(|i| i.id)
                 .collect()
         };
         // 与扫描一致：整批删除要么全部生效，要么全部回滚
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let tx = conn.unchecked_transaction().map_err_str()?;
         if video {
             db::delete_videos_by_ids(&tx, &ids)
         } else {
             db::delete_images_by_ids(&tx, &ids)
         }
-        .map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
+        .map_err_str()?;
+        tx.commit().map_err_str()?;
         ids
     };
 
@@ -83,8 +83,8 @@ pub fn remove_media_directory(
     }
 
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let raw = db::get_setting(&conn, key).map_err(|e| e.to_string())?;
+        let conn = state.db.lock().map_err_str()?;
+        let raw = db::get_setting(&conn, key).map_err_str()?;
         let roots: Vec<String> = raw
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
             .unwrap_or_default();
@@ -94,8 +94,8 @@ pub fn remove_media_directory(
                 .into_iter()
                 .filter(|r| !forgotten.contains(r))
                 .collect();
-            let value = serde_json::to_string(&kept).map_err(|e| e.to_string())?;
-            db::set_setting(&conn, key, &value).map_err(|e| e.to_string())?;
+            let value = serde_json::to_string(&kept).map_err_str()?;
+            db::set_setting(&conn, key, &value).map_err_str()?;
         }
     }
 
