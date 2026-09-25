@@ -7,6 +7,7 @@ import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
 import { GroupReviewPanel } from "./GroupReviewPanel";
 import { api } from "../api";
+import { STALE_RESULT_NOTE } from "../detectionCache";
 import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
@@ -61,6 +62,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     duplicateIds,
     groupCount: duplicateGroupCount,
     skipped: duplicateSkipped,
+    stale: duplicateStale,
     detected: duplicatesDetected,
     detecting: detectingDuplicates,
     progress: duplicateProgress,
@@ -81,6 +83,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     hashById: similarHashes,
     similarIds,
     groupCount: similarGroupCount,
+    stale: similarStale,
     detected: similarDetected,
     detecting: detectingSimilar,
     progress: similarProgress,
@@ -116,6 +119,13 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     setDuplicatePanelOpen(false);
     handleDetectSimilar();
   }, [handleDetectSimilar, setDuplicatePanelOpen]);
+
+  /** 面板标题后面那串小提示：恢复出来的旧结果要说清楚，免得被当成这一轮刚算的 */
+  const duplicateCaveat = [
+    duplicateSkipped > 0 ? `另有 ${duplicateSkipped} 张解不出画面，未参与比对` : "",
+    duplicateStale ? STALE_RESULT_NOTE : "",
+  ].filter(Boolean).join("；") || undefined;
+  const similarCaveat = similarStale ? STALE_RESULT_NOTE : undefined;
 
   // 排一次、筛多次：切目录和打字只是从排好的清单里线性筛（19 万条 ≈30ms），
   // 不再每次条件一变就重排整库。Array.filter 保序，结果与"先筛后排"一致。
@@ -329,7 +339,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
           selectedTotal={selectedIds.size}
           detecting={detectingDuplicates}
           progress={duplicateProgress}
-          caveat={duplicateSkipped > 0 ? `另有 ${duplicateSkipped} 张解不出画面，未参与比对` : undefined}
+          caveat={duplicateCaveat}
           onDeleteSelected={handleDeleteSelected}
           deleting={deletingSelected}
           onOpenImage={openDuplicateGroup}
@@ -353,6 +363,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
           detecting={detectingSimilar}
           recalculating={similarRecalculating}
           progress={similarProgress}
+          caveat={similarCaveat}
           threshold={similarThreshold}
           onThreshold={rethresholdSimilar}
           keepRule={similarKeepRule}

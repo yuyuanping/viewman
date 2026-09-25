@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import type { SimilarHash, SimilarProgressPayload } from "../api";
+import { restoredResultStale } from "../detectionCache";
 import type { Image } from "../types";
 import { extrasOfGroups, liveGroups, selectGroupExtras } from "../similarGroups";
 import type { HashPair, KeepRule } from "../similarGroups";
@@ -46,9 +47,15 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
   const [recalculating, setRecalculating] = useState(false);
   const [progress, setProgress] = useState<{ processed: number; total: number } | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  /** 从缓存恢复的那一轮别自动勾副本：那是上一趟的结果，凭什么一打开就把人待删清单填满 */
+  const [autoTick, setAutoTick] = useState(true);
+  /** 非 null = 现在看的是上一趟存的分组，值是它记下时的库内记录数；现跑一次就清成 null */
+  const [restoredCount, setRestoredCount] = useState<number | null>(null);
   /** 已经自动勾过的副本：只补勾新冒出来的，免得把用户手动取消的又勾回来 */
   const autoSelected = useRef<Set<string>>(new Set());
   const recalcTimer = useRef<number | null>(null);
+  /** 这一轮是不是已经自己点过检测了：缓存回得慢的话别把刚跑出来的结果盖掉 */
+  const ranLive = useRef(false);
 
   /** 只索引相似组里那几百张，避免为 19 万条清单建一张全库 Map */
   const imageById = useMemo(() => {
@@ -83,12 +90,34 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
+  /** 打开应用先接着上一趟的结果看：检测动辄几分钟，不该是"想看就得再跑一遍" */
+  useEffect(() => {
+    api.getSimilarCache().then(cached => {
+      if (!cached || cached.result.groups.length === 0) return;
+      // 缓存回得晚于用户自己点的检测，就别把刚跑出来的结果盖回去
+      if (ranLive.current) return;
+      setAutoTick(false);
+      setRestoredCount(cached.libraryCount);
+      setThreshold(cached.threshold);
+      setHashById(toHashById(cached.result.hashes));
+      setGroups(cached.result.groups);
+      setFarIds(new Set(cached.result.far));
+      setDetected(true);
+    }).catch(() => { /* 读不到缓存就是还没跑过检测 */ });
+  }, []);
+
   /**
    * 跟着分组结果重推一遍勾选：新冒出来的副本补勾上，已经不算副本的（换了组、
    * 成了保留张、被降成远亲）撤勾——换宽容度之后留着上一轮的勾就等于按新口径删错图。
    * 用户手动取消过的那张仍不会被我们擅自勾回去。
+   * 从缓存恢复的那一份不勾（autoTick 关掉），只把这几张记成"已经处理过"，
+   * 免得稍后清单算完又把它们当新冒出来的补勾上去。
    */
   useEffect(() => {
+    if (!autoTick) {
+      for (const id of extras) autoSelected.current.add(id);
+      return;
+    }
     const want = new Set(extras);
     const fresh = extras.filter(id => !autoSelected.current.has(id));
     const stale = [...autoSelected.current].filter(id => !want.has(id));
@@ -102,10 +131,12 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
       for (const id of stale) next.delete(id);
       return next;
     });
-  }, [extras, setSelectedIds, setSelectMode]);
+  }, [extras, autoTick, setSelectedIds, setSelectMode]);
 
   const detect = useCallback(async () => {
     setDetecting(true);
+    setAutoTick(true);
+    ranLive.current = true;
     setGroups([]);
     setFarIds(NO_FAR);
     setHashById(NO_HASHES);
@@ -114,6 +145,8 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     setPanelOpen(true);
     try {
       const found = await api.findSimilarImages(threshold);
+      // 这一份是照着当前库算出来的，不再挂"上次结果"的牌子
+      setRestoredCount(null);
       if (found.groups.length === 0) {
         setDetected(false);
         setPanelOpen(false);
@@ -134,15 +167,19 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     }
   }, [notify, threshold]);
 
-  /** 换宽容度：指纹都在库里了，只是重新比对一遍，所以结果整份换掉 */
+  /** 换宽容度：指纹都在库里了，只是重新比对一遍，所以结果整份换掉。这是用户主动重算，勾选照旧跟上新口径 */
   const rethreshold = useCallback((next: number) => {
     setThreshold(next);
+    setAutoTick(true);
+    ranLive.current = true;
+    autoSelected.current = new Set();
     if (recalcTimer.current !== null) window.clearTimeout(recalcTimer.current);
     recalcTimer.current = window.setTimeout(async () => {
       recalcTimer.current = null;
       setRecalculating(true);
       try {
         const again = await api.findSimilarImages(next);
+        setRestoredCount(null);
         setGroups(again.groups);
         setFarIds(new Set(again.far));
         setHashById(toHashById(again.hashes));
@@ -171,6 +208,10 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     autoSelected.current = new Set();
     setDetected(false);
     setPanelOpen(false);
+    setRestoredCount(null);
+    setAutoTick(true);
+    // 面板上按"清空结果"就是连缓存一起作废，不然下次打开又原样复活
+    api.clearDetectionCache("similar").catch(() => { /* 清不掉只是重启后还能看到旧结果 */ });
   }, []);
 
   /** 换某组的保留项：该组勾选跟着翻转，其他组的勾选不动 */
@@ -186,8 +227,12 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     setSelectedIds(prev => selectGroupExtras(prev, group, keepId));
   }, [aliveGroups, setSelectedIds]);
 
+  /** 看的是上一趟存的分组，且之后库里又添过图：这份分组未必含新添的那批（少掉的不算问题） */
+  const stale = restoredResultStale(restoredCount, images.length);
+
   /** 每组按当前规则的保留张之外的全部勾上 */
   const autoSelect = useCallback(() => {
+    setAutoTick(true);
     setSelectMode(true);
     setSelectedIds(new Set(extras));
     for (const id of extras) autoSelected.current.add(id);
@@ -241,6 +286,7 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
     setPanelOpen,
     threshold,
     keepRule,
+    stale,
     detect,
     rethreshold,
     clear,

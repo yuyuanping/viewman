@@ -46,6 +46,13 @@ fn is_content_change(kind: &EventKind) -> bool {
     }
 }
 
+/// 抢锁时忽略毒化：这几个锁里装的都是普通集合/连接，毒化只说明别处 panic 过，
+/// 内容本身还能用。而在这条后台线程上 panic 的代价是整个自动扫描静默失效——
+/// 那比拿到一份刚被别处打断的数据糟得多。
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 启动后台监视线程。watcher 建不起来只打日志——不影响手动扫描。
 pub(crate) fn spawn(app: tauri::AppHandle) {
     let roots = read_roots(&app);
@@ -61,7 +68,7 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
 
     let watched: Mutex<HashSet<(PathBuf, &'static str)>> = Mutex::new(HashSet::new());
     {
-        let mut w = watched.lock().unwrap();
+        let mut w = lock(&watched);
         for (kind, root) in &roots {
             if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
                 w.insert((root.clone(), kind));
@@ -69,16 +76,19 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
         }
     }
 
-    std::thread::Builder::new()
+    // 线程起不来也只是没有自动扫描，别把启动流程一起带走
+    if let Err(e) = std::thread::Builder::new()
         .name("dir-watcher".into())
         .spawn(move || event_loop(app, rx, watched, watcher))
-        .expect("failed to spawn dir watcher thread");
+    {
+        eprintln!("目录监视线程起不来（不影响手动扫描）：{e}");
+    }
 }
 
 /// 读出全部扫描根：(类型, 根) 列表
 fn read_roots(app: &tauri::AppHandle) -> Vec<(&'static str, PathBuf)> {
     let state = app.state::<AppState>();
-    let conn = state.db.lock().unwrap();
+    let conn = lock(&state.db);
     let mut out = Vec::new();
     for (key, kind) in [(VIDEO_ROOTS_KEY, "video"), (IMAGE_ROOTS_KEY, "image")] {
         if let Ok(Some(raw)) = crate::db::get_setting(&conn, key) {
@@ -139,7 +149,7 @@ fn classify(
     if !is_content_change(&ev.kind) {
         return None;
     }
-    let w = watched.lock().unwrap();
+    let w = lock(watched);
     for (root, kind) in w.iter() {
         for path in &ev.paths {
             if path.starts_with(root) {
@@ -183,7 +193,7 @@ fn refresh_watch_list(
 ) {
     let current: HashSet<(PathBuf, &'static str)> =
         read_roots(app).into_iter().map(|(k, r)| (r, k)).collect();
-    let mut w = watched.lock().unwrap();
+    let mut w = lock(watched);
     // 新增：watch 成功才入表（difference 结果先收走，别在借用 w 的循环里改 w）
     let added: Vec<(PathBuf, &'static str)> = current.difference(&w).cloned().collect();
     for (root, kind) in added {

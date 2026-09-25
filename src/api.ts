@@ -66,7 +66,36 @@ export const api = {
    * 除了分组，还带回组内各成员的指纹（拆成两个 32 位），面板据此算"距保留张几位"。
    */
   findSimilarImages: (threshold: number) => invoke<SimilarResult>("find_similar_images", { threshold }),
+  /**
+   * 上一趟检测的落盘结果（没有则 null）。检测一趟动辄几分钟，重启后先看缓存里的组，
+   * 数字对不上 libraryCount 就说明库动过、结果不含新增的那批，界面得提示一句。
+   */
+  getSimilarCache: () => invoke<SimilarCache | null>("get_similar_cache"),
+  getDuplicateCache: () => invoke<DuplicateCache | null>("get_duplicate_cache"),
+  /** 视频侧同理：上一趟重复视频检测的落盘结果（打开应用时先恢复出来看） */
+  getVideoDuplicateCache: () => invoke<VideoDuplicateCache | null>("get_video_duplicate_cache"),
+  /** 面板按 ✕ 清结果：缓存一起删，不然下次打开又被恢复回来 */
+  clearDetectionCache: (which: DetectionKind) => invoke<void>("clear_detection_cache", { which }),
 };
+
+export type DetectionKind = "similar" | "duplicate" | "videoDuplicate";
+
+export interface SimilarCache {
+  threshold: number;
+  libraryCount: number;
+  result: SimilarResult;
+}
+
+export interface DuplicateCache {
+  libraryCount: number;
+  report: DuplicateReport;
+}
+
+/** 重复视频的缓存只有分组：视频侧没有指纹面板，不需要回传每条的指纹 */
+export interface VideoDuplicateCache {
+  libraryCount: number;
+  groups: string[][];
+}
 
 /** 一张图的 64 位指纹，高低 32 位分开传（JS 位运算只有 32 位） */
 export interface SimilarHash {

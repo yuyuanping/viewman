@@ -8,7 +8,7 @@ use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
 use super::thumbnails::clear_thumbnail_cache;
-use super::{undeleted_targets, AppState};
+use super::{read_cache, undeleted_targets, write_cache, AppState, VIDEO_DUPLICATE_CACHE};
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
 fn sniff_image_format(header: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -808,16 +808,19 @@ pub async fn find_duplicate_videos(
         return Err("未检测到 ffmpeg，无法比对视频画面。请安装 ffmpeg 并加入 PATH。".into());
     }
     // 磁盘上已经不存在的条目不参与判定；mtime 同时当指纹缓存的钥匙用
-    let rows: Vec<(db::VideoSig, String)> = {
+    let all_rows: Vec<db::VideoSig> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_video_sigs(&conn).map_err(|e| e.to_string())?
-    }
-    .into_iter()
-    .filter_map(|row| {
-        let mtime = scanner::modified_stamp(Path::new(&row.path))?;
-        Some((row, mtime))
-    })
-    .collect();
+    };
+    // 缓存的过期判断按"库里的记录数"，所以要在丢掉读不到 mtime 的那些之前数
+    let library_count = all_rows.len();
+    let rows: Vec<(db::VideoSig, String)> = all_rows
+        .into_iter()
+        .filter_map(|row| {
+            let mtime = scanner::modified_stamp(Path::new(&row.path))?;
+            Some((row, mtime))
+        })
+        .collect();
     let thumb_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("thumbnails");
 
     let groups = tauri::async_runtime::spawn_blocking(move || {
@@ -866,12 +869,39 @@ pub async fn find_duplicate_videos(
                 Some((rows[i].0.id.clone(), rows[i].0.created_at.clone(), [anchor, mid, tail]))
             })
             .collect();
-        group_by_frames(&judged)
+        let groups = group_by_frames(&judged);
+        // 这一趟热跑也要几分钟，落一份缓存，重启后直接接着看
+        write_cache(
+            &app,
+            VIDEO_DUPLICATE_CACHE,
+            &VideoDuplicateCache {
+                library_count,
+                groups: groups.clone(),
+            },
+        );
+        groups
     })
     .await
     .map_err(|e| e.to_string())?;
 
     Ok(groups)
+}
+
+/// 重复视频检测的落盘缓存：`<app_data>/video-duplicate-cache.json`。
+/// 与图片侧同一个理由：跑一趟要等几分钟，重启后先把上一趟的组恢复出来看。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDuplicateCache {
+    pub library_count: usize,
+    pub groups: Vec<Vec<String>>,
+}
+
+/// 上一趟的重复视频结果（没有则 null）。恢复出来的名单会照现在的库裁一遍再显示
+#[tauri::command]
+pub async fn get_video_duplicate_cache(
+    app: tauri::AppHandle,
+) -> Result<Option<VideoDuplicateCache>, String> {
+    read_cache(&app, VIDEO_DUPLICATE_CACHE).await
 }
 
 /// 给内置播放器提供可播放路径：WebView2 没有 HEVC 解码器，遇到 hevc 源

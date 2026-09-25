@@ -64,6 +64,10 @@ pub fn run() {
             commands::generate_image_thumbnails,
             commands::find_duplicate_images,
             commands::find_similar_images,
+            commands::get_similar_cache,
+            commands::get_duplicate_cache,
+            commands::get_video_duplicate_cache,
+            commands::clear_detection_cache,
             commands::remove_media_directory,
             commands::capture_frame,
         ])

@@ -14,7 +14,8 @@ use super::scan::{
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbJob};
 use super::videos::move_file;
-use super::{undeleted_targets, AppState};
+use super::{read_cache, remove_cache, undeleted_targets, write_cache, AppState};
+use super::{DUPLICATE_CACHE, SIMILAR_CACHE, VIDEO_DUPLICATE_CACHE};
 
 #[tauri::command]
 pub fn get_images(state: State<AppState>) -> Result<Vec<Image>, String> {
@@ -368,7 +369,7 @@ struct DuplicateProgress {
 }
 
 /// 检测结论：分组 + 解不出画面而被跳过的张数
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct DuplicateReport {
     pub groups: Vec<Vec<String>>,
     pub skipped: usize,
@@ -383,6 +384,13 @@ fn workers(total: usize) -> usize {
         .unwrap_or(2)
         .clamp(1, 14)
         .min(total.max(1))
+}
+
+/// 抢并行累加器的锁。这些 Mutex 里装的就是个普通集合，毒化只说明别处 panic 过、
+/// 内容本身仍然可用；而抢锁时 panic 会顺着 scope 的 join 把整个检测命令带崩——
+/// 检测跑几分钟白跑，界面只看到一条"命令失败"。
+fn lock_ignoring_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 抢锁落库：抢不到（启动扫描正占着同一把锁）或写失败就原样留着这批，返回有没有写进去。
@@ -408,6 +416,47 @@ fn flush_with_retry<T>(app: &tauri::AppHandle, batch: &mut Vec<T>, save: impl Fn
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+}
+
+// 缓存的文件名、原子落盘、读不回来当没有：这三件事三趟检测共用一套，实现在 commands.rs。
+
+/// 缓存里记着"存这份结果时库里有多少条记录"，数量对不上就说明库变了，界面据此提示过期
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimilarCache {
+    pub threshold: u32,
+    pub library_count: usize,
+    pub result: SimilarResult,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateCache {
+    pub library_count: usize,
+    pub report: DuplicateReport,
+}
+
+#[tauri::command]
+pub async fn get_similar_cache(app: tauri::AppHandle) -> Result<Option<SimilarCache>, String> {
+    read_cache(&app, SIMILAR_CACHE).await
+}
+
+#[tauri::command]
+pub async fn get_duplicate_cache(app: tauri::AppHandle) -> Result<Option<DuplicateCache>, String> {
+    read_cache(&app, DUPLICATE_CACHE).await
+}
+
+/// 结果面板上按 ✕ 是"我不认这份结果"：缓存得跟着删，不然下次打开又给恢复回来
+#[tauri::command]
+pub async fn clear_detection_cache(app: tauri::AppHandle, which: String) -> Result<(), String> {
+    let name = match which.as_str() {
+        "similar" => SIMILAR_CACHE,
+        "duplicate" => DUPLICATE_CACHE,
+        "videoDuplicate" => VIDEO_DUPLICATE_CACHE,
+        other => return Err(format!("未知的检测结果：{other}")),
+    };
+    remove_cache(&app, name);
+    Ok(())
 }
 
 /// 只对还缺双指纹的行跑 ffmpeg，攒一批落一次库并推一次进度。
@@ -445,7 +494,7 @@ fn ensure_sigs(
                     let row = &rows[index];
                     match scanner::image_hashes(&row.path) {
                         Some((phash, dhash)) => {
-                            hits.lock().unwrap().push((index, phash, dhash));
+                            lock_ignoring_poison(&hits).push((index, phash, dhash));
                             batch.push((row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone()));
                         }
                         None => {
@@ -464,16 +513,16 @@ fn ensure_sigs(
                     }
                 }
                 if !batch.is_empty() {
-                    pending.lock().unwrap().append(&mut batch);
+                    lock_ignoring_poison(&pending).append(&mut batch);
                 }
             });
         }
     });
 
-    for (index, phash, dhash) in std::mem::take(hits.get_mut().unwrap()) {
+    for (index, phash, dhash) in std::mem::take(hits.get_mut().unwrap_or_else(|e| e.into_inner())) {
         pairs[index] = Some((phash, dhash));
     }
-    let mut leftover = std::mem::take(pending.get_mut().unwrap());
+    let mut leftover = std::mem::take(pending.get_mut().unwrap_or_else(|e| e.into_inner()));
     flush_with_retry(app, &mut leftover, |conn, rows| db::save_image_sigs(conn, rows));
     failed.into_inner()
 }
@@ -545,7 +594,7 @@ fn group_pass(
                     if pool.len() > 1 {
                         let fresh = group_bucket(rows, pool);
                         if !fresh.is_empty() {
-                            collected.lock().unwrap().extend(fresh);
+                            lock_ignoring_poison(&collected).extend(fresh);
                         }
                     }
                     if batch.len() >= FLUSH_EVERY {
@@ -553,7 +602,7 @@ fn group_pass(
                     }
                     let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if processed % EMIT_EVERY == 0 || processed == total {
-                        let groups = collected.lock().unwrap().clone();
+                        let groups = lock_ignoring_poison(&collected).clone();
                         let _ = app.emit(
                             "duplicate-progress",
                             DuplicateProgress {
@@ -567,15 +616,15 @@ fn group_pass(
                     }
                 }
                 if !batch.is_empty() {
-                    pending.lock().unwrap().append(&mut batch);
+                    lock_ignoring_poison(&pending).append(&mut batch);
                 }
             });
         }
     });
 
-    let mut leftover = std::mem::take(pending.get_mut().unwrap());
+    let mut leftover = std::mem::take(pending.get_mut().unwrap_or_else(|e| e.into_inner()));
     flush_with_retry(app, &mut leftover, |conn, rows| db::save_image_pixels(conn, rows));
-    let mut groups = std::mem::take(collected.get_mut().unwrap());
+    let mut groups = std::mem::take(collected.get_mut().unwrap_or_else(|e| e.into_inner()));
     groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
     (groups, skipped + failed.into_inner())
 }
@@ -736,6 +785,8 @@ fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
                 local
             }));
         }
+        // scope 退出时本来就会把子线程的 panic 再抛一遍，这里的 unwrap 只是照实取值；
+        // 子线程里唯一的 panic 来源（抢锁）已经在 lock_ignoring_poison 里堵掉了
         handles
             .into_iter()
             .map(|h| h.join().unwrap())
@@ -766,15 +817,14 @@ pub async fn find_duplicate_images(
         return Err("未检测到 ffmpeg，无法比对图片内容。请安装 ffmpeg 并加入 PATH。".into());
     }
     // 文件已经不在磁盘上的条目不参与判定
-    let rows: Vec<db::ImageSig> = {
+    let mut rows: Vec<db::ImageSig> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_image_sigs(&conn).map_err(|e| e.to_string())?
-    }
-    .into_iter()
-    .filter(|row| Path::new(&row.path).exists())
-    .collect();
+    };
+    let library_count = rows.len();
+    rows.retain(|row| Path::new(&row.path).exists());
 
-    let (groups, skipped) = tauri::async_runtime::spawn_blocking(move || {
+    let report = tauri::async_runtime::spawn_blocking(move || {
         let mut pairs: Vec<Option<(u64, u64)>> = rows.iter().map(|row| row.cached_sigs()).collect();
         let need_sigs: Vec<usize> = (0..rows.len()).filter(|&i| pairs[i].is_none()).collect();
         let skipped = ensure_sigs(&app, &rows, &need_sigs, pairs.as_mut_slice());
@@ -784,12 +834,22 @@ pub async fn find_duplicate_images(
 
         // 补像素和定组合成一趟：每核对完一个候选池就推一次当前分组
         let (groups, skipped) = group_pass(&app, &rows, candidates, skipped);
-        (groups, skipped)
+        let report = DuplicateReport { groups, skipped };
+        // 这一趟热跑也要九分钟，落一份缓存，重启后直接接着看
+        write_cache(
+            &app,
+            DUPLICATE_CACHE,
+            &DuplicateCache {
+                library_count,
+                report: report.clone(),
+            },
+        );
+        report
     })
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(DuplicateReport { groups, skipped })
+    Ok(report)
 }
 
 /// 相似图检测的进度事件负载（事件名 similar-progress）
@@ -805,7 +865,7 @@ pub struct SimilarProgress {
 }
 
 /// 一张成组图片的指纹：u64 拆成两个 u32，前端按 JS number 做异或数 1，不必碰 BigInt
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SimilarHit {
     pub id: String,
     pub lo: u32,
@@ -813,7 +873,7 @@ pub struct SimilarHit {
 }
 
 /// 检测结论：分组 + 远亲名单 + 组内各成员的指纹。带上指纹，面板才能按"距保留张多远"排序
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SimilarResult {
     pub groups: Vec<Vec<String>>,
     pub far: Vec<String>,
@@ -928,6 +988,7 @@ impl<'a> SimilarGraph<'a> {
                     local
                 }));
             }
+            // 同上：子线程只会算一段边表，没有会 panic 的操作，scope 也兜着这一层
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
 
@@ -1135,13 +1196,13 @@ pub async fn find_similar_images(
     }
 
     // 文件已经不在磁盘上的条目不参与聚类，也不用再白跑一遍解码
-    let rows: Vec<db::ImageSig> = {
+    let mut rows: Vec<db::ImageSig> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::get_image_sigs(&conn).map_err(|e| e.to_string())?
-    }
-    .into_iter()
-    .filter(|row| Path::new(&row.path).exists())
-    .collect();
+    };
+    // 缓存的过期判断按"库里的记录数"，所以要在过滤之前数
+    let library_count = rows.len();
+    rows.retain(|row| Path::new(&row.path).exists());
 
     let result = tauri::async_runtime::spawn_blocking(move || -> SimilarResult {
         let mut graph = SimilarGraph::new(threshold);
@@ -1187,11 +1248,22 @@ pub async fn find_similar_images(
         graph.scan();
         partition = graph.partition();
         emit_similar_progress(&app, processed, total, true, &graph, &partition);
-        SimilarResult {
+        let result = SimilarResult {
             groups: graph.member_ids(&partition),
             far: graph.far_ids(&partition),
             hashes: graph.signatures(&partition),
-        }
+        };
+        // 落一份缓存：重启应用后打开面板直接就是这些组，不必再等一趟
+        write_cache(
+            &app,
+            SIMILAR_CACHE,
+            &SimilarCache {
+                threshold,
+                library_count,
+                result: result.clone(),
+            },
+        );
+        result
     })
     .await
     .map_err(|e| e.to_string())?;

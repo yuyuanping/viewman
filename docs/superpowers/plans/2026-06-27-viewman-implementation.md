@@ -1,5 +1,11 @@
 # ViewMan Implementation Plan
 
+> **状态（2026-09 追记）**：本计划的 Task 1–10 已全部落地，下方步骤里的文件清单按当初的设想写，
+> 实际结构已经演进——hooks 按职责拆到 `src/hooks/*`，纯逻辑（分组、过滤、网格窗口、扫描合并…）抽到
+> `src/*.ts` 并配了 `*.test.mjs`（`npm test`），图片库 / 相似检测 / PotPlayer 联动 / HEVC 与静图短视频
+> 转换都属于计划外新增。step 级 checkbox 保留原样，功能口径与后续追记以
+> `docs/superpowers/specs/2026-06-27-viewman-design.md` 的「当前实现范围」一节为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a Tauri v2 desktop app that manages local videos and saves watch progress.

@@ -19,6 +19,7 @@ import { useFileCheck } from "./hooks/useFileCheck";
 import { useDeleteShortcut } from "./hooks/useDeleteShortcut";
 import { useRangeSelect } from "./hooks/useRangeSelect";
 import { api } from "./api";
+import { STALE_RESULT_NOTE } from "./detectionCache";
 import { loadScanRoots } from "./scanRootStore";
 import { countUnderDir, isUnderDir } from "./scanRoots";
 import type { Image, MediaKind, ScanOutcome, Video } from "./types";
@@ -92,17 +93,27 @@ function App() {
     dropVideosLocally(deleted);
     return deleted;
   }, [dropVideosLocally]);
+  /** 作废视频侧的重复检测缓存：与图片侧同一个命令，只是换一份缓存文件 */
+  const clearVideoDuplicateCache = useCallback(() => {
+    api.clearDetectionCache("videoDuplicate").catch(() => { /* 清不掉只是重启后还能看到旧结果 */ });
+  }, []);
   const {
     duplicateGroupCount, duplicateExtrasCount, duplicateIds, duplicatesDetected,
     detecting: detectingDuplicates, detect: handleDetectDuplicates,
     deleting: deletingDuplicates, deleteExtras: handleDeleteDuplicates, clear: clearDuplicates,
-    progress: duplicateProgress,
+    progress: duplicateProgress, stale: duplicateStale,
   } = useDuplicates(notify, {
     detect: async () => ({ groups: await api.findDuplicateVideos() }),
     remove: trashVideos,
     unit: "视频",
     progressEvent: "video-duplicate-progress",
+    // 上一趟的重复视频结果落盘存着：打开应用先恢复出来看，恢复的那份会照现在的库裁一遍
+    liveItems: videos,
+    loadCache: api.getVideoDuplicateCache,
+    clearCache: clearVideoDuplicateCache,
   });
+  /** 恢复出来的重复视频结果在工具栏上说清来源，免得被当成这一轮刚比对的 */
+  const duplicateCaveat = duplicateStale ? STALE_RESULT_NOTE : undefined;
   const {
     missingIds, clearMissing,
     fakeIds, clearFake, convertFakes, converting,
@@ -501,6 +512,7 @@ function App() {
               onDeleteDuplicates={handleDeleteDuplicates}
               deletingDuplicates={deletingDuplicates}
               onClearDuplicates={clearDuplicates}
+              duplicateCaveat={duplicateCaveat}
               selectMode={selectMode}
               selectedCount={selectedIds.size}
               allSelected={allSelected}

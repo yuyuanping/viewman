@@ -53,6 +53,8 @@ interface LibraryToolbarProps {
   onDeleteDuplicates: () => void;
   deletingDuplicates: boolean;
   onClearDuplicates: () => void;
+  /** 重复结果的保留意见（"这份是上次检测存下的"之类）：不说清会被当成这一轮刚比对的 */
+  duplicateCaveat?: string;
   selectMode: boolean;
   selectedCount: number;
   allSelected: boolean;
@@ -137,6 +139,7 @@ export function LibraryToolbar({
   onDeleteDuplicates,
   deletingDuplicates,
   onClearDuplicates,
+  duplicateCaveat,
   selectMode,
   selectedCount,
   allSelected,
@@ -315,6 +318,9 @@ export function LibraryToolbar({
           >
             {deletingDuplicates ? "删除中…" : `${duplicateGroupCount} 组重复 · 删除 ${duplicateExtrasCount} 个副本`}
           </button>
+          {duplicateCaveat && (
+            <span className="text-xs text-gray-400" title={duplicateCaveat}>{duplicateCaveat}</span>
+          )}
           <button type="button" className="toolbar-chip" onClick={onClearDuplicates} disabled={deletingDuplicates} title="清除检测结果">
             ✕
           </button>

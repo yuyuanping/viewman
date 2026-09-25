@@ -1,5 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use tauri::Manager;
 
 mod images;
 mod players;
@@ -55,4 +57,154 @@ pub(crate) fn undeleted_targets(targets: &[(String, String)]) -> Vec<(String, St
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
+}
+
+/// 检测结果的落盘缓存（都放 app_data 下）：三趟检测——重复图、相似图、重复视频——
+/// 都是"点开一次要等几分钟"的活，关掉应用不该等于把上一趟的结果也丢了。
+pub(crate) const SIMILAR_CACHE: &str = "similar-cache.json";
+pub(crate) const DUPLICATE_CACHE: &str = "duplicate-cache.json";
+pub(crate) const VIDEO_DUPLICATE_CACHE: &str = "video-duplicate-cache.json";
+
+pub(crate) fn cache_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join(name))
+}
+
+/// 先写临时文件再改名：中途关掉应用也不会留下半份 JSON（读回来要么完整要么没有）。
+/// 收路径而不是 AppHandle，单测就能拿临时目录直接验这套读写。
+pub(crate) fn write_cache_file<T: serde::Serialize>(path: &Path, value: &T) {
+    let Ok(json) = serde_json::to_string(value) else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// 读不回来（没这份 / 只写了一半 / 老版本的字段对不上）一律当"没有缓存"，界面自然会重跑一趟
+pub(crate) fn read_cache_file<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// 写一份检测结果。调用点都在 spawn_blocking 里（本来就是阻塞上下文），直接写盘即可
+pub(crate) fn write_cache<T: serde::Serialize>(app: &tauri::AppHandle, name: &str, value: &T) {
+    let Ok(path) = cache_path(app, name) else { return };
+    write_cache_file(&path, value);
+}
+
+/// 读一份检测结果。相似缓存能到几 MB（每张成组图的 id + 指纹都在里面），
+/// 所以读盘和解析都挪到阻塞线程池，别占着 async runtime 的线程。
+pub(crate) async fn read_cache<T: serde::de::DeserializeOwned + Send + 'static>(
+    app: &tauri::AppHandle,
+    name: &str,
+) -> Result<Option<T>, String> {
+    let path = cache_path(app, name)?;
+    tauri::async_runtime::spawn_blocking(move || read_cache_file::<T>(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 删一份检测结果：面板上按 ✕ 是"我不认这份结果"，缓存得跟着作废，不然下次打开又给恢复回来
+pub(crate) fn remove_cache(app: &tauri::AppHandle, name: &str) {
+    if let Ok(path) = cache_path(app, name) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 落一份缓存的形状在临时目录里验：不碰真实 app_data，并行跑也不会互撞
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("viewman-{name}-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    #[serde(rename_all = "camelCase")]
+    struct Payload {
+        library_count: usize,
+        groups: Vec<Vec<String>>,
+    }
+
+    #[test]
+    fn test_cache_file_round_trips_and_leaves_no_temp_behind() {
+        let path = scratch("round-trip");
+        let payload = Payload { library_count: 7, groups: vec![vec!["a".to_string(), "b".to_string()]] };
+
+        write_cache_file(&path, &payload);
+
+        assert_eq!(read_cache_file::<Payload>(&path), Some(payload));
+        // 临时文件必须已经被改名走：留一份在盘上，下次写失败时读到的就是过期内容
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cache_file_replaces_the_previous_result() {
+        let path = scratch("replace");
+        write_cache_file(&path, &Payload { library_count: 1, groups: Vec::new() });
+
+        write_cache_file(&path, &Payload { library_count: 9, groups: vec![vec!["z".to_string()]] });
+
+        let back = read_cache_file::<Payload>(&path).expect("第二次写的结果该读得回来");
+        assert_eq!(back.library_count, 9);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_read_cache_file_treats_missing_and_broken_json_as_no_cache() {
+        // 没跑过检测：读不到就是 null，界面按"没结果"处理
+        assert_eq!(read_cache_file::<Payload>(&scratch("missing")), None);
+
+        // 半份 JSON（写途中被动过）不能当缓存用，否则界面会拿到一个空结果
+        let broken = scratch("broken");
+        std::fs::write(&broken, "{ \"libraryCount\": 3, \"grou").unwrap();
+        assert_eq!(read_cache_file::<Payload>(&broken), None);
+
+        let empty = scratch("empty");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(read_cache_file::<Payload>(&empty), None);
+
+        let _ = std::fs::remove_file(&broken);
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    #[test]
+    fn test_similar_cache_json_keeps_the_keys_the_frontend_reads() {
+        // 前端按 libraryCount / threshold / result 读，指纹按 lo/hi 算距离——
+        // 改字段名就是改跨语言接口，这个测试是那道闸
+        let cache = SimilarCache {
+            threshold: 10,
+            library_count: 3,
+            result: SimilarResult {
+                groups: vec![vec!["a".to_string(), "b".to_string()]],
+                far: Vec::new(),
+                hashes: vec![SimilarHit { id: "a".to_string(), lo: 1, hi: 2 }],
+            },
+        };
+
+        let json = serde_json::to_string(&cache).unwrap();
+
+        assert!(json.contains("\"libraryCount\":3"), "{json}");
+        assert!(json.contains("\"threshold\":10"), "{json}");
+        assert!(json.contains("\"groups\":[[\"a\",\"b\"]]"), "{json}");
+        assert!(json.contains("\"hashes\":[{\"id\":\"a\",\"lo\":1,\"hi\":2}]"), "{json}");
+    }
+
+    #[test]
+    fn test_video_duplicate_cache_json_keeps_the_keys_the_frontend_reads() {
+        let cache = VideoDuplicateCache {
+            library_count: 2,
+            groups: vec![vec!["v1".to_string(), "v2".to_string()]],
+        };
+
+        let json = serde_json::to_string(&cache).unwrap();
+
+        assert!(json.contains("\"libraryCount\":2"), "{json}");
+        assert!(json.contains("\"groups\":[[\"v1\",\"v2\"]]"), "{json}");
+    }
 }
