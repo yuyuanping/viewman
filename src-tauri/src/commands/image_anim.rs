@@ -7,11 +7,9 @@ use crate::db;
 
 use super::{AppState, MapErrStr};
 
-/// 只有多帧容器才有"动图"可言：jpg/bmp 开都不用开，按扩展名先筛一轮
-const ANIMATED_CANDIDATES: &[&str] = &["png", "gif", "webp", "avif"];
-
 /// 扫描库里的多帧动图（GIF / APNG / 动态 WebP / AVIF 序列），返回命中的图片 id。
-/// 判据全部走文件头结构解析，不依赖 ffmpeg；结果由前端高亮并勾选，删除仍走回收站那条通路。
+/// 判据全部走文件头结构解析，不依赖 ffmpeg，也不依赖扩展名——QQ 等下载器
+/// 常把 GIF 存成 .jpg，按扩展名预筛会把这类文件整个漏掉。
 #[tauri::command]
 pub async fn find_animated_images(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let jobs: Vec<(String, String)> = {
@@ -19,14 +17,6 @@ pub async fn find_animated_images(state: State<'_, AppState>) -> Result<Vec<Stri
         db::get_all_images(&conn)
             .map_err_str()?
             .into_iter()
-            .filter(|img| {
-                Path::new(&img.path)
-                    .extension()
-                    .map(|e| {
-                        ANIMATED_CANDIDATES.iter().any(|c| e.eq_ignore_ascii_case(c))
-                    })
-                    .unwrap_or(false)
-            })
             .map(|img| (img.id, img.path))
             .collect()
     };
@@ -372,6 +362,11 @@ mod tests {
         let p = dir.join("a.gif");
         std::fs::write(&p, gif_frames(3)).unwrap();
         assert!(is_animated(&p), "盘上的多帧 GIF 该被判为动图");
+
+        // QQ 等下载器把 GIF 存成 .jpg：扩展名不参与判据，只看内容
+        let mislabeled = dir.join("b.jpg");
+        std::fs::write(&mislabeled, gif_frames(3)).unwrap();
+        assert!(is_animated(&mislabeled), "扩展名错标成 .jpg 的多帧 GIF 该被判为动图");
 
         let missing = dir.join("nope.gif");
         assert!(!is_animated(&missing), "文件不存在按非动图处理，不该报错");
