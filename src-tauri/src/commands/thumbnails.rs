@@ -85,7 +85,8 @@ pub(crate) fn clear_thumbnail_cache(app: &tauri::AppHandle, id: &str) {
     }
 }
 
-/// 逐张生成封面并立即写库。抽帧过程不持有数据库锁，中途关闭应用已完成的部分不丢。
+/// 封面批量生成：有界 worker 池并行抽帧，每张完成立即写库。
+/// 抽帧过程不持有数据库锁，中途关闭应用已完成的部分不丢。
 /// 视频与图片共用这条通路，差异只在事件名与 `persist` 写的是哪张表。
 pub(crate) async fn run_thumbnail_jobs(
     app: &tauri::AppHandle,
@@ -123,43 +124,74 @@ pub(crate) async fn run_thumbnail_jobs(
 
     let task_app = app.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || -> (usize, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tauri::Manager;
+
+        // worker 数封顶 4：视频抽帧靠 seek，并发再高只会让机械盘来回找磁头，
+        // SSD 也吃不到更多收益（ffmpeg 本身单核就够）
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .min(4);
         let state = task_app.state::<AppState>();
-        let mut generated = 0usize;
-        let mut failed = 0usize;
-        for (index, job) in jobs.iter().enumerate() {
-            let out = dir.join(format!("{}.jpg", job.id));
-            // 上次中途关闭留下的孤儿文件：直接登记，不重新抽帧
-            let existing_ok = std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
-            let ok = existing_ok || {
-                // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张 jpg。
-                // 临时名必须以 .jpg 结尾：ffmpeg 按扩展名选封装格式，`.jpg.part` 会直接失败。
-                let part = dir.join(format!("{}.part.jpg", job.id));
-                let result = scanner::extract_thumbnail(&job.source, &part, job.duration)
-                    .and_then(|()| std::fs::rename(&part, &out).map_err_str());
-                let _ = std::fs::remove_file(&part);
-                result.is_ok()
-            };
-            if ok {
-                if let Ok(conn) = state.db.lock() {
-                    let _ = persist(&conn, &job.id, &out.to_string_lossy());
-                }
-                generated += 1;
-            } else {
-                failed += 1;
+        let next_index = AtomicUsize::new(0);
+        let processed = AtomicUsize::new(0);
+        let emitted = AtomicUsize::new(0);
+        let generated = AtomicUsize::new(0);
+        let failed = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next_index.fetch_add(1, Ordering::SeqCst);
+                        if index >= jobs.len() {
+                            break;
+                        }
+                        let job = &jobs[index];
+                        let out = dir.join(format!("{}.jpg", job.id));
+                        // 上次中途关闭留下的孤儿文件：直接登记，不重新抽帧
+                        let existing_ok =
+                            std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
+                        let ok = existing_ok || {
+                            // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张 jpg。
+                            // 临时名必须以 .jpg 结尾：ffmpeg 按扩展名选封装格式，
+                            // `.jpg.part` 会直接失败。临时名带 id，多 worker 互不踩
+                            let part = dir.join(format!("{}.part.jpg", job.id));
+                            let result = scanner::extract_thumbnail(&job.source, &part, job.duration)
+                                .and_then(|()| std::fs::rename(&part, &out).map_err_str());
+                            let _ = std::fs::remove_file(&part);
+                            result.is_ok()
+                        };
+                        if ok {
+                            if let Ok(conn) = state.db.lock() {
+                                let _ = persist(&conn, &job.id, &out.to_string_lossy());
+                            }
+                            generated.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            failed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        let at = processed.fetch_add(1, Ordering::SeqCst) + 1;
+                        // 多 worker 下完成顺序和序号无关，后开工的可能先算完：
+                        // 序号没超过已发过的最大值就不发，进度条不能回跳
+                        if at > emitted.fetch_max(at, Ordering::SeqCst) {
+                            let _ = task_app.emit(
+                                event,
+                                ThumbnailProgress {
+                                    processed: at,
+                                    total,
+                                    done: false,
+                                    generated: generated.load(Ordering::SeqCst),
+                                    failed: failed.load(Ordering::SeqCst),
+                                },
+                            );
+                        }
+                    }
+                });
             }
-            let _ = task_app.emit(
-                event,
-                ThumbnailProgress {
-                    processed: index + 1,
-                    total,
-                    done: false,
-                    generated,
-                    failed,
-                },
-            );
-        }
-        (generated, failed)
+        });
+
+        (generated.load(Ordering::SeqCst), failed.load(Ordering::SeqCst))
     })
     .await;
 

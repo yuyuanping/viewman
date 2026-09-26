@@ -128,6 +128,11 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
 pub fn init_db(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // WAL + NORMAL：封面批处理逐张 persist、扫描落大事务都是频繁写，WAL 显著提升
+    // 写吞吐；NORMAL 下崩溃最多丢最后一个事务而不是损坏库——正好配合断点续跑
+    // 主动制造"进程被杀"的场景，库本身必须经得起杀。
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     create_tables(&conn)?;
     ensure_columns(&conn)?;
     Ok(conn)
@@ -173,6 +178,20 @@ pub(crate) fn sample_image(id: &str, path: &str) -> crate::models::Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_init_db_enables_wal_on_file_db() {
+        // 内存库测不出 journal_mode（永远返回 memory），必须走真实文件
+        let path = std::env::temp_dir().join(format!("viewman-wal-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let conn = init_db(path.to_str().unwrap()).unwrap();
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
 
     #[test]
     fn test_ensure_columns_migrates_the_legacy_signature_cache() {
