@@ -38,12 +38,12 @@ struct PendingScan {
 
 /// 变化事件是否值得触发扫描（忽略纯元数据/属性变化）
 fn is_content_change(kind: &EventKind) -> bool {
-    match kind {
-        EventKind::Create(_) => true,
-        EventKind::Remove(_) => true,
-        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_)) => true,
-        _ => false,
-    }
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_))
+    )
 }
 
 /// 抢锁时忽略毒化：这几个锁里装的都是普通集合/连接，毒化只说明别处 panic 过，

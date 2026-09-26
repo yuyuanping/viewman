@@ -75,7 +75,7 @@ pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<Vide
             message: Some("该路径指向文件夹而不是视频文件".into()),
         });
     }
-    match std::fs::File::open(&p) {
+    match std::fs::File::open(p) {
         Ok(mut file) => {
             let mut header = [0u8; 16];
             let n = file.read(&mut header).unwrap_or(0);
@@ -420,9 +420,7 @@ pub async fn move_video(
     })
     .await
     .map_err_str()?;
-    if let Err(e) = move_result {
-        return Err(e);
-    }
+    move_result?;
 
     if let Err(e) = state
         .db

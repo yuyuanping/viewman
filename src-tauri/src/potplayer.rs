@@ -47,7 +47,7 @@ fn find_via_registry() -> Option<PathBuf> {
 }
 
 pub fn launch(path: &str, seek: Option<f64>) -> Result<(), String> {
-    let exe = find_potplayer().ok_or_else(|| "PotPlayer not found")?;
+    let exe = find_potplayer().ok_or("PotPlayer not found")?;
     let mut cmd = Command::new(&exe);
     cmd.arg(path);
     if let Some(s) = seek {
@@ -106,11 +106,10 @@ pub fn enable_titlebar_time() -> Result<(), String> {
             osd_start = Some(i);
             continue;
         }
-        if osd_start.is_some() && osd_end.is_none() {
-            if trimmed.starts_with('[') {
+        if osd_start.is_some() && osd_end.is_none()
+            && trimmed.starts_with('[') {
                 osd_end = Some(i);
             }
-        }
     }
 
     if let Some(start) = osd_start {
@@ -190,8 +189,11 @@ fn find_ini_file() -> Option<PathBuf> {
     None
 }
 
+#[allow(clippy::upper_case_acronyms)] // Win32 API 惯例名
 type HWND = *mut std::ffi::c_void;
+#[allow(clippy::upper_case_acronyms)] // Win32 API 惯例名
 type BOOL = i32;
+#[allow(clippy::upper_case_acronyms)] // Win32 API 惯例名
 type LPARAM = isize;
 
 const TRUE: BOOL = 1;

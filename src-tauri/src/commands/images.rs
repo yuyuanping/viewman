@@ -16,6 +16,9 @@ use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thum
 use super::videos::move_file;
 use super::{undeleted_targets, AppState, MapErrStr};
 
+/// 扫描任务的完整产出：新文件、可清理的旧 id、告警、摘要。
+type ImageScanOutcome = Result<(Vec<Image>, Vec<String>, Vec<String>, ScanSummary), String>;
+
 #[tauri::command]
 pub fn get_images(state: State<AppState>) -> Result<Vec<Image>, String> {
     let conn = state.db.lock().map_err_str()?;
@@ -39,7 +42,7 @@ pub async fn scan_image_directory(
     let dir_for_task = dir.clone();
     let task_app = app.clone();
     let (images, stale_ids, warnings, summary) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Image>, Vec<String>, Vec<String>, ScanSummary), String> {
+        tauri::async_runtime::spawn_blocking(move || -> ImageScanOutcome {
             // 根目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
             let walk = match scanner::scan_image_directory_recursive(&dir_path) {
                 Ok(w) => w,
@@ -318,9 +321,7 @@ pub async fn move_image(
     })
     .await
     .map_err_str()?;
-    if let Err(e) = move_result {
-        return Err(e);
-    }
+    move_result?;
 
     if let Err(e) = state
         .db

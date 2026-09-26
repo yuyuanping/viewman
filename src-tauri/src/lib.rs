@@ -21,7 +21,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let db_path = get_db_path(&app.handle());
+            let db_path = get_db_path(app.handle());
             let conn = init_db(&db_path.to_string_lossy())
                 .expect("failed to initialize database");
             app.manage(AppState {

@@ -10,6 +10,9 @@ use crate::scanner;
 use super::settings::{remember_root, SCAN_ROOTS_KEY};
 use super::{AppState, MapErrStr};
 
+/// 扫描任务的完整产出：新文件、可清理的旧 id、告警、摘要。
+type VideoScanOutcome = Result<(Vec<Video>, Vec<String>, Vec<String>, ScanSummary), String>;
+
 #[derive(Clone, serde::Serialize)]
 pub struct ScanProgress {
     pub processed: usize,
@@ -44,7 +47,7 @@ pub async fn scan_directory(
     let dir_for_task = dir.clone();
     let task_app = app.clone();
     let (videos, stale_ids, warnings, summary) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Video>, Vec<String>, Vec<String>, ScanSummary), String> {
+        tauri::async_runtime::spawn_blocking(move || -> VideoScanOutcome {
             // 根目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
             let walk = match scanner::scan_directory_recursive(&dir_path) {
                 Ok(w) => w,
@@ -114,8 +117,8 @@ pub async fn scan_directory(
             }
             // added = 探测成功的条目里没在旧库出现过的；refreshed = 命中旧库被刷新的
             let added = videos.iter().filter(|v| !by_path.contains_key(&v.path.to_lowercase())).count();
-            let summary = Ok((videos, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }));
-            summary
+            
+            Ok((videos, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }))
         })
         .await
         .map_err_str()??;
@@ -159,6 +162,7 @@ pub(crate) fn capped_walk_warnings(warnings: Vec<String>) -> Vec<String> {
 /// 1. 整片没读到的子树（权限不足、网络盘掉线、有意不跟随的链接目录）里的记录不算失效；
 ///    这类目录一多，逐条比前缀不划算，直接放弃本轮清理；
 /// 2. 要清的数量远超本轮扫到的文件数，更像目录没读全而不是用户真删了——放弃清理并告警。
+///
 /// 清库会连带缩略图缓存一起没了且不可回退，拿不准时宁可留着等下一轮。
 pub(crate) fn plan_stale_ids(
     existing: &[(String, String)],

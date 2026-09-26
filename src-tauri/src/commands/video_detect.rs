@@ -7,6 +7,9 @@ use crate::scanner;
 
 use super::{flush, flush_with_retry, read_cache, write_cache, AppState, MapErrStr, VIDEO_DUPLICATE_CACHE};
 
+/// 单个采样条目：路径、待比对 id、三处采样帧的 (phash, dhash)。
+type FrameEntry = (String, String, [(u64, u64); 3]);
+
 /// 重复视频的进度事件负载（事件名 video-duplicate-progress）。
 /// 两趟各报一次：`anchor` 补算锚点帧指纹，`verify` 给候选补抽中段/结尾两处复核帧。
 #[derive(Clone, serde::Serialize)]
@@ -58,8 +61,8 @@ fn cluster_by(len: usize, same: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>
 
 /// 以"最早添加的那条"为保留原件，逐个拿三处采样点核对：过线的进组，
 /// 过不了线的留给下一轮另起一组（所以一组内任意两条都是直接比对过的）。
-fn group_by_frames(entries: &[(String, String, [(u64, u64); 3])]) -> Vec<Vec<String>> {
-    let mut pool: Vec<(String, String, [(u64, u64); 3])> = entries.to_vec();
+fn group_by_frames(entries: &[FrameEntry]) -> Vec<Vec<String>> {
+    let mut pool: Vec<FrameEntry> = entries.to_vec();
     pool.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let mut groups: Vec<Vec<String>> = Vec::new();
     while !pool.is_empty() {
@@ -118,11 +121,11 @@ fn ensure_anchors(
         }
         let done = processed + 1;
         if done % EMIT_EVERY == 0 || done == total {
-            flush(app, &mut fresh, |conn, rows| db::save_video_anchors(conn, rows));
+            flush(app, &mut fresh, db::save_video_anchors);
             let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: done, total, stage: "anchor" });
         }
     }
-    flush_with_retry(app, &mut fresh, |conn, rows| db::save_video_anchors(conn, rows));
+    flush_with_retry(app, &mut fresh, db::save_video_anchors);
 }
 
 // flush_anchors / retry_flush / flush_frames 已删，改用 commands.rs 共享的 flush / flush_with_retry
@@ -157,11 +160,11 @@ fn ensure_frames(
         }
         let done = processed + 1;
         if done % EMIT_EVERY == 0 || done == total {
-            flush(app, &mut fresh, |conn, rows| db::save_video_frames(conn, rows));
+            flush(app, &mut fresh, db::save_video_frames);
             let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: done, total, stage: "verify" });
         }
     }
-    flush_with_retry(app, &mut fresh, |conn, rows| db::save_video_frames(conn, rows));
+    flush_with_retry(app, &mut fresh, db::save_video_frames);
 }
 
 /// 找出画面相同的重复视频组：不再比文件字节（重压制、重封装过就漏判），
@@ -231,7 +234,7 @@ pub async fn find_duplicate_videos(
             .collect();
         ensure_frames(&app, &rows, &need_frames, frames.as_mut_slice());
 
-        let judged: Vec<(String, String, [(u64, u64); 3])> = candidates
+        let judged: Vec<FrameEntry> = candidates
             .iter()
             .filter_map(|&i| {
                 let anchor = anchors[i]?;

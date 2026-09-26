@@ -25,7 +25,7 @@ pub fn get_progress(conn: &Connection, video_id: &str) -> Result<Option<WatchPro
     })?;
     match rows.next() {
         Some(Ok(progress)) => Ok(Some(progress)),
-        Some(Err(e)) => Err(e.into()),
+        Some(Err(e)) => Err(e),
         None => Ok(None),
     }
 }

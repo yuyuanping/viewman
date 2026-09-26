@@ -112,7 +112,7 @@ fn ensure_sigs(
                     let row = &rows[index];
                     match scanner::image_hashes(&row.path) {
                         Some((phash, dhash)) => {
-                            lock_ignoring_poison(&hits).push((index, phash, dhash));
+                            lock_ignoring_poison(hits).push((index, phash, dhash));
                             batch.push((row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone()));
                         }
                         None => {
@@ -120,7 +120,7 @@ fn ensure_sigs(
                         }
                     }
                     if batch.len() >= FLUSH_EVERY {
-                        let _ = flush(app, &mut batch, |conn, rows| db::save_image_sigs(conn, rows));
+                        let _ = flush(app, &mut batch, db::save_image_sigs);
                     }
                     let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if processed % EMIT_EVERY == 0 || processed == total {
@@ -131,7 +131,7 @@ fn ensure_sigs(
                     }
                 }
                 if !batch.is_empty() {
-                    lock_ignoring_poison(&pending).append(&mut batch);
+                    lock_ignoring_poison(pending).append(&mut batch);
                 }
             });
         }
@@ -141,7 +141,7 @@ fn ensure_sigs(
         pairs[index] = Some((phash, dhash));
     }
     let mut leftover = std::mem::take(pending.get_mut().unwrap_or_else(|e| e.into_inner()));
-    flush_with_retry(app, &mut leftover, |conn, rows| db::save_image_sigs(conn, rows));
+    flush_with_retry(app, &mut leftover, db::save_image_sigs);
     failed.into_inner()
 }
 
@@ -212,15 +212,15 @@ fn group_pass(
                     if pool.len() > 1 {
                         let fresh = group_bucket(rows, pool);
                         if !fresh.is_empty() {
-                            lock_ignoring_poison(&collected).extend(fresh);
+                            lock_ignoring_poison(collected).extend(fresh);
                         }
                     }
                     if batch.len() >= FLUSH_EVERY {
-                        let _ = flush(app, &mut batch, |conn, rows| db::save_image_pixels(conn, rows));
+                        let _ = flush(app, &mut batch, db::save_image_pixels);
                     }
                     let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if processed % EMIT_EVERY == 0 || processed == total {
-                        let groups = lock_ignoring_poison(&collected).clone();
+                        let groups = lock_ignoring_poison(collected).clone();
                         let _ = app.emit(
                             "duplicate-progress",
                             DuplicateProgress {
@@ -234,14 +234,14 @@ fn group_pass(
                     }
                 }
                 if !batch.is_empty() {
-                    lock_ignoring_poison(&pending).append(&mut batch);
+                    lock_ignoring_poison(pending).append(&mut batch);
                 }
             });
         }
     });
 
     let mut leftover = std::mem::take(pending.get_mut().unwrap_or_else(|e| e.into_inner()));
-    flush_with_retry(app, &mut leftover, |conn, rows| db::save_image_pixels(conn, rows));
+    flush_with_retry(app, &mut leftover, db::save_image_pixels);
     let mut groups = std::mem::take(collected.get_mut().unwrap_or_else(|e| e.into_inner()));
     groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
     (groups, skipped + failed.into_inner())
@@ -321,7 +321,7 @@ fn close_against(
         return true;
     }
     // 差得太远的对不配花两次 ffmpeg：这一趟候选量是老口径的百倍，省掉的都是白省
-    if pixel_gap(&a.pixels, &b.pixels).map_or(true, |(mean, _)| mean > RESCUE_MEAN_MAX) {
+    if pixel_gap(&a.pixels, &b.pixels).is_none_or(|(mean, _)| mean > RESCUE_MEAN_MAX) {
         return false;
     }
     for &n in &PIX_RESCUE_GRIDS {
@@ -392,8 +392,8 @@ fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
                 let mut i = slot;
                 while i < total {
                     let (pi, di) = (reps[i].1, reps[i].2);
-                    for j in 0..i {
-                        let dd = (pi ^ reps[j].1).count_ones().max((di ^ reps[j].2).count_ones());
+                    for (j, r) in reps.iter().enumerate().take(i) {
+                        let dd = (pi ^ r.1).count_ones().max((di ^ r.2).count_ones());
                         if dd <= gate {
                             local.push((i as u32, j as u32));
                         }
@@ -407,8 +407,7 @@ fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
         // 子线程里唯一的 panic 来源（抢锁）已经在 lock_ignoring_poison 里堵掉了
         handles
             .into_iter()
-            .map(|h| h.join().unwrap())
-            .flatten()
+            .flat_map(|h| h.join().unwrap())
             .collect()
     });
 
@@ -417,8 +416,8 @@ fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
         uf.union(a as usize, b as usize);
     }
     let mut pools: HashMap<usize, Vec<usize>> = HashMap::new();
-    for rep in 0..total {
-        pools.entry(uf.find(rep)).or_default().push(reps[rep].0);
+    for (rep, r) in reps.iter().enumerate() {
+        pools.entry(uf.find(rep)).or_default().push(r.0);
     }
     pools.into_values().filter(|pool| pool.len() > 1).collect()
 }
@@ -594,8 +593,7 @@ impl<'a> SimilarGraph<'a> {
                     let mut i = from + ti;
                     while i < total {
                         let (pi, di) = hashes[i];
-                        for j in 0..i {
-                            let (pj, dj) = hashes[j];
+                        for (j, &(pj, dj)) in hashes.iter().enumerate().take(i) {
                             let dd = (pi ^ pj).count_ones().max((di ^ dj).count_ones());
                             if dd <= threshold {
                                 local.push((i as u32, j as u32, dd));
@@ -846,7 +844,7 @@ pub async fn find_similar_images(
                 fresh.push((row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone()));
             }
             processed += 1;
-            if processed % FLUSH_EVERY == 0 || processed == total {
+            if processed.is_multiple_of(FLUSH_EVERY) || processed == total {
                 if let Ok(conn) = app.state::<AppState>().db.lock() {
                     let _ = db::save_image_sigs(&conn, &fresh);
                 }

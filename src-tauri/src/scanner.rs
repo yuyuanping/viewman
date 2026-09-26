@@ -264,7 +264,7 @@ fn file_size_of(path: &Path) -> i64 {
     fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
 }
 
-pub fn build_video(path: &std::path::PathBuf) -> Video {
+pub fn build_video(path: &Path) -> Video {
     let metadata = get_metadata(&path.to_string_lossy()).ok();
 
     Video {
@@ -295,7 +295,7 @@ pub fn modified_stamp(path: &std::path::Path) -> Option<String> {
 }
 
 /// 图片条目：ffprobe 读图片同样能给出宽高，取不到时留空由前端回退显示原图
-pub fn build_image(path: &std::path::PathBuf) -> Image {
+pub fn build_image(path: &Path) -> Image {
     let metadata = get_metadata(&path.to_string_lossy()).ok();
     let modified_at = modified_stamp(path);
 
@@ -407,6 +407,8 @@ pub fn video_sample_times(duration: Option<f64>) -> [f64; 2] {
 }
 
 /// 感知哈希（pHash）：8×8 DCT-II 低频块 → 均值阈值化成 64 位
+// DCT 按行列 dct[v][u] 索引是数学惯例，改成迭代器反而失真，故放行索引循环
+#[allow(clippy::needless_range_loop)]
 fn phash_from_gray(pixels: &[f64; 32 * 32]) -> u64 {
     const N: usize = 32;
 
@@ -559,7 +561,7 @@ pub fn unique_frame_count(video_path: &str) -> Option<usize> {
     let mut count = None;
     for line in text.lines() {
         if let Some(rest) = line.trim_start().strip_prefix("frame=") {
-            if let Some(num) = rest.trim().split_whitespace().next() {
+            if let Some(num) = rest.split_whitespace().next() {
                 if let Ok(n) = num.parse::<usize>() {
                     count = Some(n);
                 }
