@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
-import { buildDirTree } from "../dirTree";
+import { buildDirTree, buildDirTreeFromCounts } from "../dirTree";
 import type { DirNode, MediaItem } from "../dirTree";
 
 interface DirTreeProps {
-  items: MediaItem[];
+  /** 全量清单建树（视频库还在用） */
+  items?: MediaItem[];
+  /** 「父目录 → 直接文件数」平表建树（图片库，库不再整表下发） */
+  dirCounts?: Array<[string, number]>;
   rootLabel: string;
   selectedDir: string | null;
   onSelectDir: (dir: string | null) => void;
@@ -70,8 +73,13 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
   );
 }
 
-export function DirTree({ items, rootLabel, selectedDir, onSelectDir }: DirTreeProps) {
-  const tree = useMemo(() => buildDirTree(items, rootLabel), [items, rootLabel]);
+export function DirTree({ items, dirCounts, rootLabel, selectedDir, onSelectDir }: DirTreeProps) {
+  const tree = useMemo(
+    () => dirCounts
+      ? buildDirTreeFromCounts(dirCounts, rootLabel)
+      : buildDirTree(items ?? [], rootLabel),
+    [dirCounts, items, rootLabel],
+  );
 
   return (
     <div className="flex flex-col gap-0.5 overflow-y-auto flex-1">

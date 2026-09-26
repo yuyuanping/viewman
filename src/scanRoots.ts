@@ -36,6 +36,28 @@ export function countUnderDirs(items: { path: string }[], dirs: string[]): numbe
   return counts;
 }
 
+/** 平表（父目录 → 直接文件数）挂在 dir 下的计数：目录自身直接挂的 + 子树里的 */
+function countUnderDirInCounts(dirCounts: Array<[string, number]>, dir: string): number {
+  const parent = dedupeKey(dir);
+  if (!parent) return 0;
+  let n = 0;
+  for (const [sub, count] of dirCounts) {
+    const key = sub.toLowerCase().replace(/\//g, "\\");
+    if (key === parent || key.startsWith(parent + "\\")) n += count;
+  }
+  return n;
+}
+
+/** countUnderDirs 的平表版：图片库不再整表下发，按目录计数聚合 */
+export function countUnderDirsFromCounts(dirCounts: Array<[string, number]>, dirs: string[]): number[] {
+  return dirs.map(dir => countUnderDirInCounts(dirCounts, dir));
+}
+
+/** countUnderDir 的平表版：移除扫描根前的影响范围提示 */
+export function countUnderDirFromCounts(dirCounts: Array<[string, number]>, dir: string): number {
+  return countUnderDirInCounts(dirCounts, dir);
+}
+
 /** 解析并规范化扫描目录清单：去重（大小写不敏感，Windows 路径）、剔除非字符串与空值 */
 export function parseScanRoots(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];

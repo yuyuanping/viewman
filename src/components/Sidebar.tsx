@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import type { ImageStatsPayload } from "../api";
 import { DirTree } from "./DirTree";
 import { RecentlyPlayedList } from "./RecentlyPlayedList";
-import { countUnderDirs } from "../scanRoots";
+import { countUnderDirs, countUnderDirsFromCounts } from "../scanRoots";
 import type { RescanStatus } from "../hooks/useVideos";
-import type { Image, MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
+import type { MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
 
 interface SidebarProps {
   tab: MediaKind;
@@ -21,7 +22,7 @@ interface SidebarProps {
   rescanStatus: RescanStatus | null;
   usePotPlayer: boolean;
   onTogglePotPlayer: () => void;
-  images: Image[];
+  images: ImageStatsPayload | null;
   selectedImageDir: string | null;
   onSelectImageDir: (dir: string | null) => void;
   onScanImageDirectory: (dir: string) => Promise<void>;
@@ -55,9 +56,14 @@ export function Sidebar({
   const activeLoading = isImageTab ? imageLoading : loading;
   const activeScanProgress = isImageTab ? imageScanProgress : scanProgress;
   const activeRescanStatus = isImageTab ? imageRescanStatus : rescanStatus;
-  // 每个扫描根挂了多少条：整库统计只在库内容变化时重算，选目录/切标签不再跟着算
-  const activeItems = isImageTab ? images : videos;
-  const rootCounts = useMemo(() => countUnderDirs(activeItems, roots), [activeItems, roots]);
+  // 每个扫描根挂了多少条：视频侧按全量清单算，图片侧从统计平表聚合
+  // （库不再整表下发）。只在库内容变化时重算，选目录/切标签不再跟着算
+  const rootCounts = useMemo(
+    () => isImageTab
+      ? countUnderDirsFromCounts(images?.dirs ?? [], roots)
+      : countUnderDirs(videos, roots),
+    [isImageTab, images, videos, roots],
+  );
 
   const handleScan = async () => {
     setOperationError(null);
@@ -101,7 +107,7 @@ export function Sidebar({
           视频 <span className="media-tab-count">{videos.length}</span>
         </button>
         <button role="tab" type="button" aria-selected={isImageTab} className={`media-tab${isImageTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("image")}>
-          图片 <span className="media-tab-count">{images.length}</span>
+          图片 <span className="media-tab-count">{images?.total ?? 0}</span>
         </button>
       </div>
       <button
@@ -177,7 +183,7 @@ export function Sidebar({
       <span className="text-xs text-gray-400 font-medium">目录</span>
       {isImageTab ? (
         <DirTree
-          items={images}
+          dirCounts={images?.dirs}
           rootLabel="所有图片"
           selectedDir={selectedImageDir}
           onSelectDir={onSelectImageDir}

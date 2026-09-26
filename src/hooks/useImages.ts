@@ -1,43 +1,37 @@
 import { useState, useCallback } from "react";
 import { api } from "../api";
-import type { Image, ScanOutcome } from "../types";
-import { mergeById } from "../scanMerge";
+import type { ImageStatsPayload } from "../api";
 import type { RescanStatus } from "./useVideos";
 import { loadScanRoots } from "../scanRootStore";
 
-/** 图片库数据层：与视频库各一份清单、各一张表，互不收录对方的文件 */
+/**
+ * 图片库数据层。库不再整表下发：前端只持有两样东西——
+ * `libraryVersion`（库内容代次，ImageLibrary 靠它重拉当前视图）和
+ * `imageStats`（侧栏目录树/计数徽章用的聚合）。目录与搜索过滤都在后端。
+ */
 export function useImages() {
-  const [images, setImages] = useState<Image[]>([]);
+  const [imageStats, setImageStats] = useState<ImageStatsPayload | null>(null);
+  const [libraryVersion, setLibraryVersion] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rescanStatus, setRescanStatus] = useState<RescanStatus | null>(null);
 
+  /** 库内容变了：统计重拉、代次前进让 ImageLibrary 重拉视图 */
   const refresh = useCallback(async () => {
-    setImages(await api.getImages());
+    setLibraryVersion(v => v + 1);
+    setImageStats(await api.getImageStats());
   }, []);
 
-  /** 删除后就地剔除本地清单：整库有 20 万条，重拉一次要过桥 70MB JSON 再重建目录树 */
-  const dropLocally = useCallback((ids: Iterable<string>) => {
-    const gone = new Set(ids);
-    if (gone.size === 0) return;
-    setImages(prev => prev.filter(image => !gone.has(image.id)));
-  }, []);
-
-  /** 合并一轮图片扫描的增量：只动这轮真正新增/刷新/失效的那几条 */
-  const applyScan = useCallback((outcome: ScanOutcome<Image>) => {
-    if (outcome.items.length > 0) setImages(prev => mergeById(prev, outcome.items));
-    dropLocally(outcome.removed_ids);
-  }, [dropLocally]);
-
-  /** 执行一次图片目录扫描并就地合并增量；返回错误信息（null = 成功）。loading 由调用方管理 */
+  /** 扫描完成后库已在后端更新，这里只负责让前端重新拉取；返回错误信息（null = 成功） */
   const runScan = useCallback(async (dir: string): Promise<string | null> => {
     try {
-      applyScan(await api.scanImageDirectory(dir));
+      await api.scanImageDirectory(dir);
+      await refresh();
       return null;
     } catch (e) {
       return `图片扫描失败，未完成更新：${String(e)}`;
     }
-  }, [applyScan]);
+  }, [refresh]);
 
   /** 扫描根由后端在能读到目录时即刻记下，扫到一半被打断，下次启动会自己接着扫 */
   const scanDirectory = useCallback(async (dir: string) => {
@@ -86,17 +80,6 @@ export function useImages() {
     }
   }, [refresh]);
 
-  /** 移动后就地套用新路径。一次调用改多条：逐张 setImages 会把整表复制 N 遍 */
-  const retargetLocally = useCallback((updates: Array<[imageId: string, newPath: string]>) => {
-    if (updates.length === 0) return;
-    const byId = new Map(updates);
-    setImages(prev => prev.map(image => {
-      const next = byId.get(image.id);
-      if (next === undefined) return image;
-      return { ...image, path: next, filename: next.split(/[\\/]/).pop() ?? image.filename };
-    }));
-  }, []);
-
   const initialRun = useCallback(async () => {
     await loadImages();
     await rescanAll();
@@ -105,7 +88,7 @@ export function useImages() {
   const clearError = useCallback(() => setError(null), []);
 
   return {
-    images, loading, error, rescanStatus, clearError,
-    scanDirectory, loadImages, initialRun, applyScan, dropLocally, retargetLocally,
+    imageStats, libraryVersion, loading, error, rescanStatus, clearError,
+    scanDirectory, loadImages, initialRun, refresh,
   };
 }

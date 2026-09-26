@@ -25,6 +25,38 @@ pub fn get_images(state: State<AppState>) -> Result<Vec<Image>, String> {
     db::get_all_images(&conn).map_err_str()
 }
 
+/// 图片库视图：目录前缀 + 文件名子串过滤下推到 SQL，前端不再整表过桥
+#[tauri::command]
+pub fn get_image_view(
+    state: State<AppState>,
+    dir: Option<String>,
+    search: String,
+) -> Result<db::ImageView, String> {
+    let conn = state.db.lock().map_err_str()?;
+    db::get_image_view(&conn, dir.as_deref(), &search).map_err_str()
+}
+
+/// 图片库统计：总数、缺封面数、每父目录直接文件数（目录树与每根计数的数据源）
+#[tauri::command]
+pub fn get_image_stats(state: State<AppState>) -> Result<db::ImageStats, String> {
+    let conn = state.db.lock().map_err_str()?;
+    db::get_image_stats(&conn).map_err_str()
+}
+
+/// 缺封面图片的 id 集：封面批任务的待办清单
+#[tauri::command]
+pub fn get_missing_image_thumbnail_ids(state: State<AppState>) -> Result<Vec<String>, String> {
+    let conn = state.db.lock().map_err_str()?;
+    db::get_missing_image_thumbnail_ids(&conn).map_err_str()
+}
+
+/// 按 id 批量取图：检测面板元数据与"id 还活着吗"的收敛判定
+#[tauri::command]
+pub fn get_images_by_ids(state: State<AppState>, ids: Vec<String>) -> Result<Vec<Image>, String> {
+    let conn = state.db.lock().map_err_str()?;
+    db::get_images_by_ids(&conn, &ids).map_err_str()
+}
+
 /// 递归扫描图片目录并增量更新图片库：新文件探测尺寸，扫描时已消失的文件从库里清掉。
 /// 与视频扫描各走各的表，同一个目录可以被两边分别收录。
 #[tauri::command]

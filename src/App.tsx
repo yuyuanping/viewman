@@ -21,7 +21,7 @@ import { useRangeSelect } from "./hooks/useRangeSelect";
 import { api } from "./api";
 import { STALE_RESULT_NOTE } from "./detectionCache";
 import { loadScanRoots } from "./scanRootStore";
-import { countUnderDir, isUnderDir } from "./scanRoots";
+import { countUnderDir, countUnderDirFromCounts, isUnderDir } from "./scanRoots";
 import type { Image, MediaKind, ScanOutcome, Video } from "./types";
 import type { SortField, SortDirection, WatchState } from "./libraryFilter";
 import { filterMedia, filterByWatchState, filterByMedia, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
@@ -35,9 +35,9 @@ const TAB_PREF_KEY = "viewman.mediaTab";
 function App() {
   const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus, applyScan: applyVideoScan, dropLocally: dropVideosLocally, retargetLocally: retargetVideosLocally } = useVideos();
   const {
-    images, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
+    imageStats, libraryVersion, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
     rescanStatus: imagesRescanStatus, scanDirectory: scanImageDirectory, loadImages, initialRun: loadImageLibrary,
-    applyScan: applyImageScan, dropLocally: dropImagesLocally, retargetLocally: retargetImagesLocally,
+    refresh: refreshImagesQuietly,
   } = useImages();
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer();
   const { launch: launchInPotPlayer, error: potPlayerError, clearError: clearPotPlayerError } = usePotPlayer(saveProgress);
@@ -79,7 +79,8 @@ function App() {
   const { scanProgress: imageScanProgress, resetScanProgress: resetImageScanProgress } =
     useScanProgress(imagesRescanStatus, setNotice, "image-scan-progress");
   const { thumbProgress, generating, generateAll: handleGenerateThumbnails } = useThumbnailGeneration(
-    videos, loadVideos, notify,
+    useCallback(() => Promise.resolve(videos.filter(v => !v.thumbnail_path).map(v => v.id)), [videos]),
+    loadVideos, notify,
     { generate: api.generateThumbnails, resume: api.resumeVideoThumbnails, event: "thumbnail-progress", unit: "视频" },
   );
   const {
@@ -141,14 +142,17 @@ function App() {
         .then(fn => { if (disposed) fn(); else unlisteners.push(fn); })
         .catch(() => undefined);
     void bind<Video>("videos-changed", applyVideoScan);
-    void bind<Image>("images-changed", applyImageScan);
+    // 图片增量已由后端直接落库，前端只需要重拉统计与当前视图（不闪 loading）
+    void bind<Image>("images-changed", () => void refreshImagesQuietly());
     return () => { disposed = true; for (const fn of unlisteners) fn(); };
-  }, [applyVideoScan, applyImageScan]);
+  }, [applyVideoScan, refreshImagesQuietly]);
 
   /** 移除目录：只清除应用内的记录与封面缓存，磁盘文件保持原样 */
   const handleRemoveRoot = useCallback(async (dir: string) => {
     const kind = tab;
-    const count = countUnderDir(kind === "image" ? images : videos, dir);
+    const count = kind === "image"
+      ? countUnderDirFromCounts(imageStats?.dirs ?? [], dir)
+      : countUnderDir(videos, dir);
     const detail = count > 0
       ? `将清除该目录下 ${count} 个条目的库内记录（磁盘上的文件不会被删除），并停止自动扫描。`
       : "库内没有挂在它下面的条目，将只停止自动扫描。";
@@ -164,7 +168,7 @@ function App() {
     } finally {
       setRemovingRoot(false);
     }
-  }, [tab, images, videos, selectedDir, selectedImageDir, loadImages, loadVideos, refreshScanRoots, notify]);
+  }, [tab, imageStats, videos, selectedDir, selectedImageDir, loadImages, loadVideos, refreshScanRoots, notify]);
 
   const handleScan = useCallback(async (dir: string) => {
     resetScanProgress();
@@ -423,7 +427,7 @@ function App() {
         rescanStatus={rescanStatus}
         usePotPlayer={useExternalPlayer}
         onTogglePotPlayer={togglePotPlayer}
-        images={images}
+        images={imageStats}
         selectedImageDir={selectedImageDir}
         onSelectImageDir={setSelectedImageDir}
         onScanImageDirectory={handleImageScan}
@@ -449,11 +453,10 @@ function App() {
         )}
         {tab === "image" ? (
           <ImageLibrary
-            images={images}
+            libraryVersion={libraryVersion}
+            stats={imageStats}
+            refreshLibrary={refreshImagesQuietly}
             selectedDir={selectedImageDir}
-            reloadImages={loadImages}
-            dropLocally={dropImagesLocally}
-            retargetLocally={retargetImagesLocally}
             onScanDirectory={handlePickImageDirectory}
             notify={notify}
           />

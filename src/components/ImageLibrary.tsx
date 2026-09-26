@@ -7,6 +7,7 @@ import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
 import { GroupReviewPanel } from "./GroupReviewPanel";
 import { api } from "../api";
+import type { ImageStatsPayload } from "../api";
 import { STALE_RESULT_NOTE } from "../detectionCache";
 import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
@@ -15,24 +16,28 @@ import { useDuplicateGroups } from "../hooks/useDuplicateGroups";
 import { useDeleteShortcut } from "../hooks/useDeleteShortcut";
 import { useRangeSelect } from "../hooks/useRangeSelect";
 import { useSimilarDetection } from "../hooks/useSimilarDetection";
-import { filterMedia, selectedDirectoryLabel, sortMedia } from "../libraryFilter";
+import { selectedDirectoryLabel, sortMedia } from "../libraryFilter";
 import type { SortDirection } from "../libraryFilter";
 
 interface ImageLibraryProps {
-  images: Image[];
+  /** 库内容代次：扫描/删除/移动之后由数据层推进，这里据此重拉当前视图 */
+  libraryVersion: number;
+  /** 侧栏聚合统计：缺封面计数从这来 */
+  stats: ImageStatsPayload | null;
+  /** 库内容变了之后的重拉（统计在数据层，视图在这里） */
+  refreshLibrary: () => Promise<void>;
   selectedDir: string | null;
-  reloadImages: () => Promise<void>;
-  /** 按 id 就地剔除本地清单（删除成功后用，省掉整库重拉） */
-  dropLocally: (imageIds: string[]) => void;
-  /** 移动成功后就地套用后端返回的新路径 */
-  retargetLocally: (updates: Array<[imageId: string, newPath: string]>) => void;
   onScanDirectory: () => void;
   notify: Notify;
 }
 
+/** 搜索词防抖：19 万级库里每次键击都打后端没必要，停手 250ms 再查 */
+const SEARCH_DEBOUNCE_MS = 250;
+
 /** 图片库页面：与视频库各自的搜索、排序、多选与工具，共享的只是筛选/排序这类纯函数 */
-export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, retargetLocally, onScanDirectory, notify }: ImageLibraryProps) {
+export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDir, onScanDirectory, notify }: ImageLibraryProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sortField, setSortField] = useState<ImageSortField>("filename");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [selectMode, setSelectMode] = useState(false);
@@ -41,23 +46,45 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
   // 打开查看器时的列表快照：翻页范围固定，不受后续刷新影响
   const [viewerList, setViewerList] = useState<Image[]>([]);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  // 当前视图（后端按目录+搜索过滤后的行）与它的聚合计数
+  const [view, setView] = useState<Image[]>([]);
+  const [viewStats, setViewStats] = useState<{ total: number; totalSize: number }>({ total: 0, totalSize: 0 });
   // 动图检测：多帧图片（GIF/APNG/动态 WebP/AVIF）命中后高亮，勾选进多选批量清理
   const [animatedIds, setAnimatedIds] = useState<Set<string>>(new Set());
   const [detectingAnimated, setDetectingAnimated] = useState(false);
   const [animatedDetected, setAnimatedDetected] = useState(false);
 
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // 视图拉取：目录/搜索/代次任一变化就重查。cancelled 标记挡住竞态——
+  // 慢的旧响应回来不能盖掉新的
+  useEffect(() => {
+    let cancelled = false;
+    api.getImageView(selectedDir, debouncedSearch)
+      .then(res => {
+        if (cancelled) return;
+        setView(res.items);
+        setViewStats({ total: res.total, totalSize: res.total_size });
+      })
+      .catch(e => notify(`读取图片列表失败：${String(e)}`, "error"));
+    return () => { cancelled = true; };
+  }, [selectedDir, debouncedSearch, libraryVersion, notify]);
+
   const { thumbProgress, generating, generateAll } = useThumbnailGeneration(
-    images, reloadImages, notify,
+    () => api.getMissingImageThumbnailIds(), refreshLibrary, notify,
     { generate: api.generateImageThumbnails, resume: api.resumeImageThumbnails, event: "image-thumbnail-progress", unit: "图片" },
   );
 
-  /** 一批图片进回收站，返回真正删掉的 id 并同步本地清单 */
+  /** 一批图片进回收站，返回真正删掉的 id；库内容已变，视图与统计交给 refreshLibrary 重拉 */
   const trashImages = useCallback(async (imageIds: string[]) => {
     if (imageIds.length === 0) return [];
     const deleted = await api.deleteImages(imageIds);
-    dropLocally(deleted);
+    await refreshLibrary();
     return deleted;
-  }, [dropLocally]);
+  }, [refreshLibrary]);
 
   // 重复图检测：后端边核对候选桶边推分组，面板逐组审阅，副本自动勾进多选
   const {
@@ -78,7 +105,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     autoSelect: autoSelectDuplicates,
     clearSelection: clearDuplicateSelection,
     setGroupSelection: selectDuplicateGroup,
-  } = useDuplicateGroups({ images, setSelectMode, setSelectedIds, notify });
+  } = useDuplicateGroups({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, setSelectMode, setSelectedIds, notify });
 
   // 相似图检测（pHash）：后端边算边推组，面板逐组审阅，新出现的副本自动勾进多选
   const {
@@ -104,7 +131,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     rethreshold: rethresholdSimilar,
     keepRule: similarKeepRule,
     applyKeepRule: applySimilarKeepRule,
-  } = useSimilarDetection({ images, setSelectMode, setSelectedIds, notify });
+  } = useSimilarDetection({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, setSelectMode, setSelectedIds, notify });
 
   // 两个审阅面板都是全屏遮罩，只能开一个：开这一个就把另一个关掉，重跑检测也一样
   const openDuplicatePanel = useCallback(() => {
@@ -122,7 +149,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
   const runDetectSimilar = useCallback(() => {
     setDuplicatePanelOpen(false);
     handleDetectSimilar();
-  }, [handleDetectSimilar, setDuplicatePanelOpen]);
+  }, [handleDetectSimilar, setSimilarPanelOpen]);
 
   /** 面板标题后面那串小提示：恢复出来的旧结果要说清楚，免得被当成这一轮刚算的 */
   const duplicateCaveat = [
@@ -131,21 +158,17 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
   ].filter(Boolean).join("；") || undefined;
   const similarCaveat = similarStale ? STALE_RESULT_NOTE : undefined;
 
-  // 排一次、筛多次：切目录和打字只是从排好的清单里线性筛（19 万条 ≈30ms），
-  // 不再每次条件一变就重排整库。Array.filter 保序，结果与"先筛后排"一致。
-  const sortedImages = useMemo(
-    () => sortMedia(images, sortField, sortDirection),
-    [images, sortField, sortDirection],
-  );
+  // 目录+搜索过滤在后端做完了，前端只排一次序。排序留在前端：
+  // SQLite 没有等价于 Intl.Collator 的中文拼音排序，硬下推会改变排序语义
   const filteredImages = useMemo(
-    () => filterMedia(sortedImages, selectedDir, searchQuery),
-    [sortedImages, selectedDir, searchQuery],
+    () => sortMedia(view, sortField, sortDirection),
+    [view, sortField, sortDirection],
   );
 
   // 筛选条件一变，勾选但已不在视图里的项不再可见，直接清空选择避免"隐形删除"
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [selectedDir, searchQuery]);
+  }, [selectedDir, debouncedSearch]);
 
   const toggleDirection = useCallback(() => {
     setSortDirection(prev => (prev === "asc" ? "desc" : "asc"));
@@ -194,15 +217,21 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     setAnimatedDetected(false);
   }, []);
 
-  // 删过之后 id 从库里消失，检测计数跟着收敛，别让工具栏一直报旧数
+  // 删过之后 id 从库里消失，检测计数跟着收敛，别让工具栏一直报旧数。
+  // 库里没有全量清单了，"还活着吗"交给后端按 id 查；库代次一动就复核一遍
   useEffect(() => {
-    setAnimatedIds(prev => {
-      if (prev.size === 0) return prev;
-      const alive = new Set(images.map(i => i.id));
-      const next = new Set([...prev].filter(id => alive.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [images]);
+    if (animatedIds.size === 0) return;
+    let disposed = false;
+    api.getImagesByIds([...animatedIds]).then(rows => {
+      if (disposed) return;
+      const alive = new Set(rows.map(r => r.id));
+      setAnimatedIds(prev => {
+        const next = new Set([...prev].filter(id => alive.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
+    }).catch(() => { /* 查不动就先留着旧计数 */ });
+    return () => { disposed = true; };
+  }, [libraryVersion, animatedIds]);
 
   const handleDeleteSelected = useCallback(async () => {
     const ids = [...selectedIds];
@@ -239,21 +268,21 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     if (!dir) return;
     if (!confirm(`将选中的 ${ids.length} 张图片移动到:\n${dir}`)) return;
     setMovingSelected(true);
-    const moved: Array<[string, string]> = [];
+    let ok = 0;
     let failed = 0;
     for (const id of ids) {
       try {
-        moved.push([id, await api.moveImage(id, dir)]);
+        await api.moveImage(id, dir);
+        ok += 1;
       } catch {
         failed += 1;
       }
     }
-    retargetLocally(moved);
+    await refreshLibrary();
     setSelectedIds(new Set());
-    const ok = moved.length;
     notify(failed > 0 ? `已移动 ${ok} 张，${failed} 张失败（可能被占用或目标重名冲突）` : `已将 ${ok} 张图片移动到目标文件夹。`, failed > 0 ? "error" : "info");
     setMovingSelected(false);
-  }, [selectedIds, retargetLocally, notify]);
+  }, [selectedIds, refreshLibrary, notify]);
 
   const openViewer = useCallback((image: Image) => {
     const index = filteredImages.findIndex(i => i.id === image.id);
@@ -301,21 +330,16 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     notify("已将图片移入回收站。");
   }, [viewerList, trashImages, notify]);
 
-  const withoutThumbnailCount = useMemo(
-    () => images.filter(i => !i.thumbnail_path).length,
-    [images],
-  );
-
   return (
     <>
       <SearchBar
         value={searchQuery}
         onChange={setSearchQuery}
-        total={filteredImages.length}
+        total={viewStats.total}
         title="图片库"
         unit="图片"
         measure="张"
-        totalSize={filteredImages.reduce((s, i) => s + i.file_size, 0)}
+        totalSize={viewStats.totalSize}
       />
       <div className="flex justify-between items-center text-xs text-gray-400 shrink-0">
         <span className="truncate" title={selectedDir || "所有图片"}>{selectedDirectoryLabel(selectedDir, "所有图片")}</span>
@@ -329,7 +353,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         onGenerateThumbnails={generateAll}
         generating={generating}
         thumbProgress={thumbProgress}
-        withoutThumbnailCount={withoutThumbnailCount}
+        withoutThumbnailCount={stats?.missing_thumbnails ?? 0}
         onDetectDuplicates={runDetectDuplicates}
         detectingDuplicates={detectingDuplicates}
         duplicateProgress={duplicateProgress}
@@ -372,8 +396,8 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         onToggleSelect={selectAt}
         onOpen={openViewer}
         onScanDirectory={onScanDirectory}
-        onDeleted={(imageId) => dropLocally([imageId])}
-        onMoved={(imageId, newPath) => retargetLocally([[imageId, newPath]])}
+        onDeleted={() => refreshLibrary()}
+        onMoved={() => refreshLibrary()}
         resetKey={selectedDir}
       />
       {duplicatePanelOpen && (

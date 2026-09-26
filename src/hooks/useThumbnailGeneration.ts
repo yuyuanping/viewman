@@ -3,11 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import type { ThumbnailProgressPayload } from "../api";
 import type { Notify } from "./useToasts";
 
-interface ThumbnailItem {
-  id: string;
-  thumbnail_path?: string | null;
-}
-
 interface ThumbnailOptions {
   /** 后端批量生成命令，视频与图片各自一张表 */
   generate: (ids: string[]) => Promise<number>;
@@ -18,9 +13,13 @@ interface ThumbnailOptions {
   unit: string;
 }
 
-/** 封面生成：订阅进度事件 + 一键为全部缺封面的条目生成 */
-export function useThumbnailGeneration<T extends ThumbnailItem>(
-  items: T[],
+/**
+ * 封面生成：订阅进度事件 + 一键为全部缺封面的条目生成。
+ * 待办 id 由调用方给出——视频侧从全量清单里筛，图片侧直接问后端
+ * （库不再整表下发，前端没有可筛的清单）。
+ */
+export function useThumbnailGeneration(
+  getPendingIds: () => Promise<string[]>,
   reload: () => Promise<void>,
   notify: Notify,
   { generate, resume, event, unit }: ThumbnailOptions,
@@ -52,7 +51,7 @@ export function useThumbnailGeneration<T extends ThumbnailItem>(
   }, [resume, reload, notify, unit]);
 
   const generateAll = useCallback(async () => {
-    const pending = items.filter(item => !item.thumbnail_path).map(item => item.id);
+    const pending = await getPendingIds();
     if (pending.length === 0) {
       notify(`所有${unit}都已有封面。`);
       return;
@@ -69,7 +68,7 @@ export function useThumbnailGeneration<T extends ThumbnailItem>(
     } finally {
       setThumbProgress(null);
     }
-  }, [items, reload, notify, generate, unit]);
+  }, [getPendingIds, reload, notify, generate, unit]);
 
   return { thumbProgress, generating: thumbProgress !== null, generateAll };
 }

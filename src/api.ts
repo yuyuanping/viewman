@@ -54,6 +54,15 @@ export const api = {
   removeMediaDirectory: (kind: MediaKind, dir: string) =>
     invoke<number>("remove_media_directory", { kind, dir }),
   getImages: () => invoke<Image[]>("get_images"),
+  /** 图片库视图：目录前缀 + 文件名子串过滤已在后端做完，行序未定（排序在前端做） */
+  getImageView: (dir: string | null, search: string) =>
+    invoke<ImageViewPayload>("get_image_view", { dir, search }),
+  /** 图片库统计：总数、缺封面数、每父目录直接文件数（目录树与每根计数的数据源） */
+  getImageStats: () => invoke<ImageStatsPayload>("get_image_stats"),
+  /** 缺封面图片的 id 集：封面批任务的待办清单 */
+  getMissingImageThumbnailIds: () => invoke<string[]>("get_missing_image_thumbnail_ids"),
+  /** 按 id 批量取图：检测面板元数据与"id 还活着吗"的收敛判定 */
+  getImagesByIds: (ids: string[]) => invoke<Image[]>("get_images_by_ids", { ids }),
   scanImageDirectory: (dir: string) => invoke<ScanOutcome<Image>>("scan_image_directory", { dir }),
   /** 批量删除图片：一次回收站事务 + 一次库事务，返回真正删掉的 id */
   deleteImages: (imageIds: string[]) => invoke<string[]>("delete_images", { imageIds }),
@@ -84,6 +93,20 @@ export const api = {
 };
 
 export type DetectionKind = "similar" | "duplicate" | "videoDuplicate";
+
+/** 图片库视图的一页：当前目录/搜索条件下的全部行 + 聚合（计数、总大小） */
+export interface ImageViewPayload {
+  items: Image[];
+  total: number;
+  total_size: number;
+}
+
+/** 图片库统计：dirs 是「父目录 → 该目录直接文件数」的平表，目录树和每根计数都从它算 */
+export interface ImageStatsPayload {
+  total: number;
+  missing_thumbnails: number;
+  dirs: Array<[string, number]>;
+}
 
 export interface SimilarCache {
   threshold: number;

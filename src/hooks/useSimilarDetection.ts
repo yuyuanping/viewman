@@ -10,7 +10,10 @@ import type { HashPair, KeepRule } from "../similarGroups";
 import type { Notify } from "./useToasts";
 
 interface SimilarOptions {
-  images: Image[];
+  /** 按 id 取图：库不再整表下发，面板里成组那几百张的元数据现查现用 */
+  fetchImagesByIds: (ids: string[]) => Promise<Image[]>;
+  /** 当前库内总数：恢复出来的旧结果拿它判断过没过期 */
+  libraryTotal: number;
   setSelectMode: (on: boolean) => void;
   setSelectedIds: Dispatch<SetStateAction<Set<string>>>;
   notify: Notify;
@@ -23,6 +26,7 @@ export const SIMILAR_THRESHOLD_MAX = 16;
 
 const NO_HASHES = new Map<string, HashPair>();
 const NO_FAR: Set<string> = new Set();
+const NO_INDEX = new Map<string, Image>();
 
 function toHashById(hashes: SimilarHash[]): Map<string, HashPair> {
   const byId = new Map<string, HashPair>();
@@ -35,7 +39,7 @@ function toHashById(hashes: SimilarHash[]): Map<string, HashPair> {
  * 口径换了组会缩小，把高阈值的胖组留着就是错的。换宽容度也只是重新比对（指纹已在库里）。
  * 组尾还挂着"远亲"：有邻居但没连上骨架，列出来给人看，但不自动勾。
  */
-export function useSimilarDetection({ images, setSelectMode, setSelectedIds, notify }: SimilarOptions) {
+export function useSimilarDetection({ fetchImagesByIds, libraryTotal, setSelectMode, setSelectedIds, notify }: SimilarOptions) {
   const [groups, setGroups] = useState<string[][]>([]);
   const [farIds, setFarIds] = useState<Set<string>>(NO_FAR);
   const [hashById, setHashById] = useState<Map<string, HashPair>>(NO_HASHES);
@@ -57,14 +61,21 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
   /** 这一轮是不是已经自己点过检测了：缓存回得慢的话别把刚跑出来的结果盖掉 */
   const ranLive = useRef(false);
 
-  /** 只索引相似组里那几百张，避免为 19 万条清单建一张全库 Map */
-  const imageById = useMemo(() => {
-    const wanted = new Set(groups.flat());
-    if (wanted.size === 0) return new Map<string, Image>();
-    const byId = new Map<string, Image>();
-    for (const image of images) if (wanted.has(image.id)) byId.set(image.id, image);
-    return byId;
-  }, [images, groups]);
+  /** 只索引相似组里那几百张：元数据按 id 现查，不为全库建 Map */
+  const [imageById, setImageById] = useState<Map<string, Image>>(NO_INDEX);
+  useEffect(() => {
+    const wanted = [...new Set(groups.flat())];
+    if (wanted.length === 0) {
+      setImageById(NO_INDEX);
+      return;
+    }
+    let disposed = false;
+    fetchImagesByIds(wanted).then(rows => {
+      if (disposed) return;
+      setImageById(new Map(rows.map(image => [image.id, image])));
+    }).catch(() => { /* 查不到就先空着，面板只是显示不出缩略图 */ });
+    return () => { disposed = true; };
+  }, [groups, fetchImagesByIds]);
 
   const aliveGroups = useMemo(
     () => liveGroups(groups, imageById, chosenKeeps, keepRule, farIds),
@@ -228,7 +239,7 @@ export function useSimilarDetection({ images, setSelectMode, setSelectedIds, not
   }, [aliveGroups, setSelectedIds]);
 
   /** 看的是上一趟存的分组，且之后库里又添过图：这份分组未必含新添的那批（少掉的不算问题） */
-  const stale = restoredResultStale(restoredCount, images.length);
+  const stale = restoredResultStale(restoredCount, libraryTotal);
 
   /** 每组按当前规则的保留张之外的全部勾上 */
   const autoSelect = useCallback(() => {

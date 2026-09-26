@@ -46,3 +46,39 @@ export function buildDirTree(items: MediaItem[], rootLabel: string): DirNode {
 
   return root;
 }
+
+/**
+ * 由后端「父目录 → 该目录直接文件数」的平表建树。
+ * 与 buildDirTree 的计数语义完全一致：某个目录的计数 = 直接挂在它下面的文件数
+ * + 全部后代目录的文件数。按目录而不是按文件遍历——目录数是千级，文件数是十万级。
+ * 平表的键不包含"没有父目录的裸文件名"（后端就跳过了），根计数是平表之和。
+ */
+export function buildDirTreeFromCounts(dirCounts: Array<[string, number]>, rootLabel: string): DirNode {
+  const root: DirNode = { path: "", name: rootLabel, itemCount: 0, children: [] };
+  const byPath = new Map<string, DirNode>([["", root]]);
+
+  for (const [dir, count] of dirCounts) {
+    if (!dir) continue;
+    const parts = dir.split("\\");
+
+    let parent = root;
+    let accumulated = "";
+    for (const p of parts) {
+      accumulated += (accumulated ? "\\" : "") + p;
+      let child = byPath.get(accumulated);
+      if (!child) {
+        child = { path: accumulated, name: p, itemCount: 0, children: [] };
+        byPath.set(accumulated, child);
+        parent.children.push(child);
+      }
+      child.itemCount += count;
+      parent = child;
+    }
+  }
+
+  for (const node of byPath.values()) {
+    if (node.children.length > 1) node.children.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  return root;
+}
