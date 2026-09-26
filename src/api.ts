@@ -38,6 +38,8 @@ export const api = {
     invoke<string>("move_video", { videoId, targetDir }),
   generateThumbnails: (videoIds: string[]) =>
     invoke<number>("generate_thumbnails", { videoIds }),
+  /** 启动续跑：登记上次中断留下的孤儿封面并接着生成，返回是否做了恢复 */
+  resumeVideoThumbnails: () => invoke<boolean>("resume_thumbnails", { kind: "video" }),
   /** 播放器截图：截当前帧存到视频同目录，返回输出路径 */
   captureFrame: (videoId: string, position: number) =>
     invoke<string>("capture_frame", { videoId, position }),
@@ -59,6 +61,7 @@ export const api = {
     invoke<string>("move_image", { imageId, targetDir }),
   generateImageThumbnails: (imageIds: string[]) =>
     invoke<number>("generate_image_thumbnails", { imageIds }),
+  resumeImageThumbnails: () => invoke<boolean>("resume_thumbnails", { kind: "image" }),
   /** 动图检测：按文件头结构数帧（GIF/APNG/动态 WebP/AVIF 序列），返回多帧图片的 id */
   findAnimatedImages: () => invoke<string[]>("find_animated_images"),
   findDuplicateImages: () => invoke<DuplicateReport>("find_duplicate_images"),

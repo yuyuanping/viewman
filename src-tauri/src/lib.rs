@@ -26,6 +26,7 @@ pub fn run() {
                 .expect("failed to initialize database");
             app.manage(AppState {
                 db: std::sync::Mutex::new(conn),
+                thumb_running: std::sync::Mutex::new(std::collections::HashSet::new()),
             });
             // 扫描根目录监视：文件变化防抖后自动增量扫描（失败不影响手动扫描）
             watcher::spawn(app.handle().clone());
@@ -57,6 +58,7 @@ pub fn run() {
             commands::potplayer_status,
             commands::enable_potplayer_titlebar,
             commands::generate_thumbnails,
+            commands::resume_thumbnails,
             commands::get_images,
             commands::scan_image_directory,
             commands::delete_images,

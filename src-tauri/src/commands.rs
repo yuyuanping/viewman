@@ -63,6 +63,9 @@ pub(crate) fn undeleted_targets(targets: &[(String, String)]) -> Vec<(String, St
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
+    /// 正在跑封面批次的库（按进度事件名占位）：挡住同一库的两个批次并发——
+    /// 启动自动续跑和用户手动点击撞上、StrictMode 双挂载各调一次续跑，都靠它兜住
+    pub thumb_running: Mutex<std::collections::HashSet<&'static str>>,
 }
 
 /// 命令返回的错误统一是 String（前端拿到就直接显示），所以满地 `.map_err(|e| e.to_string())`。

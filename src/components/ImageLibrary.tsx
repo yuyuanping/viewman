@@ -48,7 +48,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
 
   const { thumbProgress, generating, generateAll } = useThumbnailGeneration(
     images, reloadImages, notify,
-    { generate: api.generateImageThumbnails, event: "image-thumbnail-progress", unit: "图片" },
+    { generate: api.generateImageThumbnails, resume: api.resumeImageThumbnails, event: "image-thumbnail-progress", unit: "图片" },
   );
 
   /** 一批图片进回收站，返回真正删掉的 id 并同步本地清单 */

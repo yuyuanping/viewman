@@ -80,7 +80,7 @@ function App() {
     useScanProgress(imagesRescanStatus, setNotice, "image-scan-progress");
   const { thumbProgress, generating, generateAll: handleGenerateThumbnails } = useThumbnailGeneration(
     videos, loadVideos, notify,
-    { generate: api.generateThumbnails, event: "thumbnail-progress", unit: "视频" },
+    { generate: api.generateThumbnails, resume: api.resumeVideoThumbnails, event: "thumbnail-progress", unit: "视频" },
   );
   const {
     hevcCount, hevcDetected, detecting: detectingHevc, detectProgress: hevcDetectProgress, detect: handleDetectHevc,
