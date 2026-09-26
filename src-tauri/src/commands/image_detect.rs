@@ -375,6 +375,9 @@ const DUP_GATE: u32 = 4;
 /// 用两枚感知哈希圈候选池：先做一次全量两两比对（和相似检测同一套按行分片，
 /// 18.3 万枚实测 13 秒），再把"两路距离都 ≤ 门槛"的边并成池。
 /// 池只是候选名单，最后仍由缩略像素定组——所以这里宁松勿紧，但不放过就等于不判。
+// O(n²) 比对热路径：索引写法实测比迭代器 take(i) 快 2.3%（18.6 万枚 A/B），
+// LLVM 对朴素索引循环的优化更好，风格让位给性能
+#[allow(clippy::needless_range_loop)]
 fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
     let reps: Vec<(usize, u64, u64)> = pairs
         .iter()
@@ -392,8 +395,8 @@ fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
                 let mut i = slot;
                 while i < total {
                     let (pi, di) = (reps[i].1, reps[i].2);
-                    for (j, r) in reps.iter().enumerate().take(i) {
-                        let dd = (pi ^ r.1).count_ones().max((di ^ r.2).count_ones());
+                    for j in 0..i {
+                        let dd = (pi ^ reps[j].1).count_ones().max((di ^ reps[j].2).count_ones());
                         if dd <= gate {
                             local.push((i as u32, j as u32));
                         }
@@ -572,6 +575,8 @@ impl<'a> SimilarGraph<'a> {
 
     /// 给还没比对过的那批代表补边。每行 i 只和 j<i 比，所以一对只算一次；
     /// 行与行之间互不依赖，按线程分片。全库 18.6 万枚实测 11.6 秒（14 线程）。
+    // 同 candidate_pools：O(n²) 热路径，索引写法实测快 2.3%
+    #[allow(clippy::needless_range_loop)]
     fn scan(&mut self) {
         let from = self.scanned;
         let total = self.reps.len();
@@ -593,7 +598,8 @@ impl<'a> SimilarGraph<'a> {
                     let mut i = from + ti;
                     while i < total {
                         let (pi, di) = hashes[i];
-                        for (j, &(pj, dj)) in hashes.iter().enumerate().take(i) {
+                        for j in 0..i {
+                            let (pj, dj) = hashes[j];
                             let dd = (pi ^ pj).count_ones().max((di ^ dj).count_ones());
                             if dd <= threshold {
                                 local.push((i as u32, j as u32, dd));
@@ -891,7 +897,6 @@ pub async fn find_similar_images(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{sample_image, setup_test_db};
     use std::fs;
 
     fn grid(value: u8) -> Vec<u8> {
@@ -956,7 +961,7 @@ mod tests {
     #[test]
     fn test_pixels_close_rejects_mismatched_grids() {
         // 两边长度都不等（换了采样口径/写坏的缓存）时不比对，直接算不像
-        assert!(!pixels_close(&grid(10), &vec![10; 4]));
+        assert!(!pixels_close(&grid(10), &[10; 4]));
         assert!(!pixels_close(&[], &[]));
     }
 
@@ -1243,5 +1248,253 @@ mod tests {
         let a = sigs.iter().find(|hit| hit.id == "a").unwrap();
         // 高低 32 位拆开后要能拼回原值
         assert_eq!(((a.hi as u64) << 32) | a.lo as u64, 0xFFFF_FFFF_0000_0001);
+    }
+
+    /// 确定性伪随机（xorshift64*）：两次跑拿到完全同一批指纹，A/B 才可比
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// candidate_pools 的迭代器写法复刻（clippy 939cb85 引入的形态），
+    /// 生产已回退为索引写法，此函数留作性能对照，逻辑与当时一字不差。
+    #[allow(clippy::needless_range_loop)]
+    fn candidate_pools_iterator_form(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Vec<usize>> {
+        let reps: Vec<(usize, u64, u64)> = pairs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pair)| pair.map(|(phash, dhash)| (index, phash, dhash)))
+            .collect();
+        let total = reps.len();
+        let edges: Vec<(u32, u32)> = std::thread::scope(|s| {
+            let threads = workers(total);
+            let mut handles = Vec::with_capacity(threads);
+            for slot in 0..threads {
+                let reps = reps.as_slice();
+                handles.push(s.spawn(move || {
+                    let mut local: Vec<(u32, u32)> = Vec::new();
+                    let mut i = slot;
+                    while i < total {
+                        let (pi, di) = (reps[i].1, reps[i].2);
+                        for j in 0..i {
+                            let dd = (pi ^ reps[j].1).count_ones().max((di ^ reps[j].2).count_ones());
+                            if dd <= gate {
+                                local.push((i as u32, j as u32));
+                            }
+                        }
+                        i += threads;
+                    }
+                    local
+                }));
+            }
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+
+        let mut uf = UnionFind::new(total);
+        for (a, b) in edges {
+            uf.union(a as usize, b as usize);
+        }
+        let mut pools: HashMap<usize, Vec<usize>> = HashMap::new();
+        for rep in 0..total {
+            pools.entry(uf.find(rep)).or_default().push(reps[rep].0);
+        }
+        pools.into_values().filter(|pool| pool.len() > 1).collect()
+    }
+
+    /// 分组清单归一化（组内组间都排序），供新旧实现比对等价性
+    fn norm_pools(mut pools: Vec<Vec<usize>>) -> Vec<Vec<usize>> {
+        for pool in &mut pools {
+            pool.sort_unstable();
+        }
+        pools.sort();
+        pools
+    }
+
+    /// scan 内层比对循环的两种写法复刻（单线程，隔离多线程噪声）：
+    /// indexed = 索引式 `for j in 0..i`（生产写法），iterator = 迭代器式 `enumerate().take(i)`
+    /// （clippy 曾改写成后者，18.6 万枚实测慢 2.3% 后回退——此对照留作该 allow 的依据）
+    #[allow(clippy::needless_range_loop)] // 对照组就是索引写法，改了就测不到东西
+    #[inline(never)]
+    fn loop_indexed(hashes: &[(u64, u64)], threshold: u32) -> usize {
+        let total = hashes.len();
+        let mut edges = 0usize;
+        for i in 1..total {
+            let (pi, di) = hashes[i];
+            for j in 0..i {
+                let (pj, dj) = hashes[j];
+                if (pi ^ pj).count_ones().max((di ^ dj).count_ones()) <= threshold {
+                    edges += 1;
+                }
+            }
+        }
+        edges
+    }
+
+    #[inline(never)]
+    fn loop_iterator(hashes: &[(u64, u64)], threshold: u32) -> usize {
+        let total = hashes.len();
+        let mut edges = 0usize;
+        let mut i = 1;
+        while i < total {
+            let (pi, di) = hashes[i];
+            for (j, &(pj, dj)) in hashes.iter().enumerate().take(i) {
+                let _ = j;
+                if (pi ^ pj).count_ones().max((di ^ dj).count_ones()) <= threshold {
+                    edges += 1;
+                }
+            }
+            i += 1;
+        }
+        edges
+    }
+
+    /// 性能实测：18.6 万枚指纹（历史基线同规模）。手动跑，不进常规回归：
+    /// `cargo test --release perf_detection_186k -- --ignored --nocapture`（bash 下先 `ulimit -s 65536`）
+    #[test]
+    #[ignore]
+    fn perf_detection_186k() {
+        use std::time::Instant;
+        const N: usize = 186_000;
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+
+        // 前 90% 孤张（双 64 位随机串），后 10% 挂在孤张上各翻 1~3 位：
+        // 随机对落在 gate 内的概率可忽略，所以边几乎全部来自簇——贴近真库"大量孤张+少量重复簇"
+        let mut hashes: Vec<(u64, u64)> = vec![(0, 0); N];
+        let pure = N * 9 / 10;
+        for h in hashes.iter_mut().take(pure) {
+            *h = (rng.next(), rng.next());
+        }
+        for i in pure..N {
+            let (mut p, mut d) = hashes[rng.below(pure as u64) as usize];
+            for _ in 0..rng.below(3) + 1 {
+                p ^= 1 << rng.below(64);
+            }
+            for _ in 0..rng.below(3) + 1 {
+                d ^= 1 << rng.below(64);
+            }
+            hashes[i] = (p, d);
+        }
+        let pairs: Vec<Option<(u64, u64)>> = hashes.iter().copied().map(Some).collect();
+
+        // ── A/B 1：candidate_pools 全链路（多线程 + 比对 + 并查集），交替各跑两次取最小 ──
+        let (mut t_new, mut t_old) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        let mut pools_new = Vec::new();
+        let mut pools_old = Vec::new();
+        for round in 0..3 {
+            let t = Instant::now();
+            let p = candidate_pools(&pairs, DUP_GATE);
+            let d = t.elapsed();
+            if round == 0 || d < t_new {
+                t_new = d;
+                pools_new = p;
+            }
+            let t = Instant::now();
+            let p = candidate_pools_iterator_form(&pairs, DUP_GATE);
+            let d = t.elapsed();
+            if round == 0 || d < t_old {
+                t_old = d;
+                pools_old = p;
+            }
+            let _ = round;
+        }
+        assert_eq!(
+            norm_pools(pools_new.clone()),
+            norm_pools(pools_old.clone()),
+            "新旧 candidate_pools 分组结果必须一致"
+        );
+        // t_new = 索引(生产)，t_old = 迭代器：正值表示迭代器比生产慢
+        let speedup = (t_old.as_secs_f64() / t_new.as_secs_f64() - 1.0) * 100.0;
+        println!(
+            "[perf] candidate_pools N={N} workers={}: 索引(生产) {:.2?} | 迭代器 {:.2?} | 迭代器写法 {:+.1}%",
+            workers(N),
+            t_new,
+            t_old,
+            speedup
+        );
+        println!(
+            "[perf] 候选池 {} 个，共 {} 张进入像素层（占比 {:.1}%）",
+            pools_new.len(),
+            pools_new.iter().map(|p| p.len()).sum::<usize>(),
+            pools_new.iter().map(|p| p.len()).sum::<usize>() as f64 / N as f64 * 100.0
+        );
+
+        // ── A/B 2：scan 内层循环两种写法，单线程隔离线程调度噪声，交替各跑三次取最小 ──
+        // 随机孤张在阈值 10 下零边，纯随机测不出东西——每 1000 行植入第 0 行的近副本保底成边
+        let mut probe = hashes[..60_000].to_vec();
+        let (seed_p, seed_d) = probe[0];
+        for i in (1000..60_000).step_by(1000) {
+            let (mut p, mut d) = (seed_p, seed_d);
+            p ^= 1 << rng.below(8);
+            d ^= 1 << rng.below(8);
+            probe[i] = (p, d);
+        }
+        let probe = probe.as_slice();
+        assert_eq!(
+            loop_indexed(probe, 10),
+            loop_iterator(probe, 10),
+            "两种循环写法产出的边数必须一致"
+        );
+        let mut it_t = std::time::Duration::MAX;
+        let mut ix_t = std::time::Duration::MAX;
+        for round in 0..3 {
+            let t = Instant::now();
+            let n = loop_iterator(probe, 10);
+            let d = t.elapsed();
+            if round == 0 || d < it_t {
+                it_t = d;
+            }
+            assert!(n > 0);
+            let t = Instant::now();
+            let n = loop_indexed(probe, 10);
+            let d = t.elapsed();
+            if round == 0 || d < ix_t {
+                ix_t = d;
+            }
+            assert!(n > 0);
+        }
+        println!(
+            "[perf] scan 内层循环(单线程, N=6万): 索引(生产) {:.2?} | 迭代器 {:.2?} | 迭代器写法 {:+.1}%",
+            ix_t,
+            it_t,
+            (it_t.as_secs_f64() / ix_t.as_secs_f64() - 1.0) * 100.0
+        );
+
+        // ── 端到端：SimilarGraph add + scan + partition，对照历史基线 11.6 秒（同为 14 线程）──
+        let ids: Vec<String> = (0..N).map(|i| format!("img-{i:06}")).collect();
+        let created: Vec<String> = (0..N).map(|i| format!("2026-01-01T00:{:02}:{:02}", i / 3600 % 60, i / 60 % 60)).collect();
+        let mut graph = SimilarGraph::new(10);
+        let t = Instant::now();
+        for i in 0..N {
+            graph.add(ids[i].as_str(), created[i].as_str(), hashes[i].0, hashes[i].1);
+        }
+        let t_add = t.elapsed();
+        let t = Instant::now();
+        graph.scan();
+        let t_scan = t.elapsed();
+        let t = Instant::now();
+        let part = graph.partition();
+        let t_part = t.elapsed();
+        let grouped: usize = part.groups.iter().map(|g| g.len()).sum();
+        println!(
+            "[perf] SimilarGraph(14线程, N={N}): add {:.2?} | scan {:.2?}（历史基线 11.6s）| partition {:.2?}",
+            t_add, t_scan, t_part
+        );
+        println!(
+            "[perf] 分组 {} 个 / 成组 {} 张 / 远亲 {} 张",
+            part.groups.len(),
+            grouped,
+            part.far.len()
+        );
+        assert!(!part.groups.is_empty(), "10% 簇数据应当成组");
     }
 }

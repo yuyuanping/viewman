@@ -337,7 +337,7 @@ mod tests {
         let same = [(0u64, 0u64); 3];
         // 只有中段差一点：三处都得过线，所以这一条不配组
         let mid_off = [(0, 0), (flip(0, 20), 0), (0, 0)];
-        let entries: Vec<(String, String, [(u64, u64); 3])> = vec![
+        let entries: Vec<FrameEntry> = vec![
             ("v1".into(), "1".into(), same),
             ("v2".into(), "2".into(), [(flip(0, 4), flip(0, 4)), same[1], same[2]]),
             ("v3".into(), "3".into(), mid_off),
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_group_by_frames_keeps_the_earliest_added_as_keeper() {
-        let entries: Vec<(String, String, [(u64, u64); 3])> = vec![
+        let entries: Vec<FrameEntry> = vec![
             ("late".into(), "2024".into(), [(0, 0); 3]),
             ("early".into(), "2020".into(), [(0, 0); 3]),
         ];
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn test_group_by_frames_does_not_inherit_chain_similarity() {
         let tail = |bits: u32| [(0u64, 0u64), (0, 0), (flip(0, bits), 0)];
-        let entries: Vec<(String, String, [(u64, u64); 3])> = vec![
+        let entries: Vec<FrameEntry> = vec![
             ("a".into(), "1".into(), tail(0)),
             ("b".into(), "2".into(), tail(4)),
             ("c".into(), "3".into(), tail(8)),
