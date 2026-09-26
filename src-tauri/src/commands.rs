@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
+mod image_detect;
 mod images;
 mod players;
 mod progress;
@@ -10,9 +11,11 @@ mod removal;
 mod scan;
 mod settings;
 mod thumbnails;
+mod video_detect;
 mod videos;
 
 // 对 lib.rs 的 invoke_handler 保持平铺的命令路径（commands::scan_directory 等）
+pub use image_detect::*;
 pub use images::*;
 pub use players::*;
 pub use progress::*;
@@ -20,6 +23,7 @@ pub use removal::*;
 pub use scan::*;
 pub use settings::*;
 pub use thumbnails::*;
+pub use video_detect::*;
 pub use videos::*;
 
 /// 把 (id, 路径) 一批送进回收站，返回没能删掉的那些。视频库与图片库共用。
