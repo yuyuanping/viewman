@@ -41,6 +41,10 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
   // 打开查看器时的列表快照：翻页范围固定，不受后续刷新影响
   const [viewerList, setViewerList] = useState<Image[]>([]);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  // 动图检测：多帧图片（GIF/APNG/动态 WebP/AVIF）命中后高亮，勾选进多选批量清理
+  const [animatedIds, setAnimatedIds] = useState<Set<string>>(new Set());
+  const [detectingAnimated, setDetectingAnimated] = useState(false);
+  const [animatedDetected, setAnimatedDetected] = useState(false);
 
   const { thumbProgress, generating, generateAll } = useThumbnailGeneration(
     images, reloadImages, notify,
@@ -158,6 +162,47 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
     setSelectMode(false);
     setSelectedIds(new Set());
   }, []);
+
+  // 动图检测：后端按文件头数帧，命中即高亮；「勾选」把当前列表里的动图送进多选，
+  // 删除仍复用「删除所选」那条通路（confirm + 回收站），不再另造一键删除
+  const handleDetectAnimated = useCallback(async () => {
+    setDetectingAnimated(true);
+    try {
+      const ids = await api.findAnimatedImages();
+      setAnimatedIds(new Set(ids));
+      setAnimatedDetected(true);
+      if (ids.length === 0) notify("库里未检出动图。", "info");
+    } catch (e) {
+      notify(`检测动图失败：${String(e)}`, "error");
+    } finally {
+      setDetectingAnimated(false);
+    }
+  }, [notify]);
+
+  const selectAnimated = useCallback(() => {
+    const inView = filteredImages.filter(i => animatedIds.has(i.id));
+    if (inView.length === 0) {
+      notify("当前列表里没有动图（命中的都在其他目录或搜索结果之外）。", "info");
+      return;
+    }
+    setSelectMode(true);
+    setSelectedIds(new Set(inView.map(i => i.id)));
+  }, [filteredImages, animatedIds, notify]);
+
+  const clearAnimated = useCallback(() => {
+    setAnimatedIds(new Set());
+    setAnimatedDetected(false);
+  }, []);
+
+  // 删过之后 id 从库里消失，检测计数跟着收敛，别让工具栏一直报旧数
+  useEffect(() => {
+    setAnimatedIds(prev => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(images.map(i => i.id));
+      const next = new Set([...prev].filter(id => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [images]);
 
   const handleDeleteSelected = useCallback(async () => {
     const ids = [...selectedIds];
@@ -299,6 +344,12 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         similarProgress={similarProgress}
         onOpenSimilarGroups={openSimilarPanel}
         onClearSimilar={clearSimilar}
+        onDetectAnimated={handleDetectAnimated}
+        detectingAnimated={detectingAnimated}
+        animatedDetected={animatedDetected}
+        animatedCount={animatedIds.size}
+        onSelectAnimated={selectAnimated}
+        onClearAnimated={clearAnimated}
         selectMode={selectMode}
         selectedCount={selectedIds.size}
         allSelected={allSelected}
@@ -315,6 +366,7 @@ export function ImageLibrary({ images, selectedDir, reloadImages, dropLocally, r
         images={filteredImages}
         duplicateIds={duplicateIds}
         similarIds={similarIds}
+        animatedIds={animatedIds}
         selectMode={selectMode}
         selectedIds={selectedIds}
         onToggleSelect={selectAt}

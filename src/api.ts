@@ -59,6 +59,8 @@ export const api = {
     invoke<string>("move_image", { imageId, targetDir }),
   generateImageThumbnails: (imageIds: string[]) =>
     invoke<number>("generate_image_thumbnails", { imageIds }),
+  /** 动图检测：按文件头结构数帧（GIF/APNG/动态 WebP/AVIF 序列），返回多帧图片的 id */
+  findAnimatedImages: () => invoke<string[]>("find_animated_images"),
   findDuplicateImages: () => invoke<DuplicateReport>("find_duplicate_images"),
   /**
    * 相似图检测（pHash）：汉明距离 ≤ threshold 算一组。

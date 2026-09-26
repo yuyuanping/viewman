@@ -13,6 +13,8 @@ interface ImageCardProps {
   duplicate?: boolean;
   /** 相似图检测命中（pHash）：琥珀色边框提示，区别于红色重复 */
   similar?: boolean;
+  /** 动图检测命中（多帧）：紫色边框 + 左上角「动图」标记 */
+  animated?: boolean;
   onToggleSelect?: (shiftKey: boolean) => void;
   onOpen: (image: Image) => void;
   /** 删除成功后回报 id，父层据此就地剔除，不再重拉整库 */
@@ -20,7 +22,7 @@ interface ImageCardProps {
   onMoved: (imageId: string, newPath: string) => void;
 }
 
-export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
+export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, animated = false, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -83,8 +85,8 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
 
   return (
     <article
-      className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${similar ? " image-similar" : ""}`}
-      title={duplicate ? "与库内其他图片内容相同（多余副本，可在工具栏「重复图片分组」里审阅后删除）" : similar ? "与库内其他图片视觉相似（连拍/截图系列）" : undefined}
+      className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${similar ? " image-similar" : ""}${animated ? " image-animated" : ""}`}
+      title={duplicate ? "与库内其他图片内容相同（多余副本，可在工具栏「重复图片分组」里审阅后删除）" : similar ? "与库内其他图片视觉相似（连拍/截图系列）" : animated ? "多帧动图（GIF/APNG/动态 WebP），勾选后可批量清理" : undefined}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenu({ x: e.clientX, y: e.clientY });
@@ -98,6 +100,7 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
       >
         <div className="image-preview">
           {duplicate && <span className="dup-flag">重复副本</span>}
+          {animated && <span className="anim-flag">动图</span>}
           {selectMode && (
             <span className={`select-check${selected ? " select-checked" : ""}`} aria-hidden="true">
               {selected ? "✓" : ""}

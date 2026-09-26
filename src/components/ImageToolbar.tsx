@@ -30,6 +30,13 @@ interface ImageToolbarProps {
   similarProgress: { processed: number; total: number } | null;
   onOpenSimilarGroups: () => void;
   onClearSimilar: () => void;
+  /** 动图检测：文件头数帧，命中高亮，勾选后走「删除所选」批量清理 */
+  onDetectAnimated: () => void;
+  detectingAnimated: boolean;
+  animatedDetected: boolean;
+  animatedCount: number;
+  onSelectAnimated: () => void;
+  onClearAnimated: () => void;
   selectMode: boolean;
   selectedCount: number;
   allSelected: boolean;
@@ -77,6 +84,12 @@ export function ImageToolbar({
   similarProgress,
   onOpenSimilarGroups,
   onClearSimilar,
+  onDetectAnimated,
+  detectingAnimated,
+  animatedDetected,
+  animatedCount,
+  onSelectAnimated,
+  onClearAnimated,
   selectMode,
   selectedCount,
   allSelected,
@@ -195,6 +208,43 @@ export function ImageToolbar({
             {similarGroupCount} 组相似 · 查看
           </button>
           <button type="button" className="toolbar-chip" onClick={onClearSimilar} title="清除相似检测结果">
+            ✕
+          </button>
+        </>
+      )}
+      {/* 动图检测：命中即高亮，勾选后走「删除所选」批量进回收站 */}
+      {!animatedDetected && !detectingAnimated && (
+        <button
+          type="button"
+          className="toolbar-chip"
+          onClick={onDetectAnimated}
+          title="按文件头数帧，找出 GIF/APNG/动态 WebP/AVIF 序列等多帧动图，高亮后可批量移入回收站"
+        >
+          检测动图
+        </button>
+      )}
+      {detectingAnimated && (
+        <button type="button" className="toolbar-chip" disabled title="正在逐个读取图片头部数帧">
+          检测动图…
+        </button>
+      )}
+      {animatedDetected && (
+        <>
+          {animatedCount > 0 ? (
+            <button
+              type="button"
+              className="toolbar-chip"
+              onClick={onSelectAnimated}
+              title="进入多选并勾中当前列表里的动图，用「删除所选」批量移入回收站"
+            >
+              {animatedCount} 张动图 · 勾选
+            </button>
+          ) : (
+            <span className="toolbar-chip" title="库里已没有多帧动图">
+              未检出动图
+            </span>
+          )}
+          <button type="button" className="toolbar-chip" onClick={onClearAnimated} title="清除动图检测结果">
             ✕
           </button>
         </>

@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
+mod image_anim;
 mod image_detect;
 mod images;
 mod players;
@@ -15,6 +16,7 @@ mod video_detect;
 mod videos;
 
 // 对 lib.rs 的 invoke_handler 保持平铺的命令路径（commands::scan_directory 等）
+pub use image_anim::*;
 pub use image_detect::*;
 pub use images::*;
 pub use players::*;
