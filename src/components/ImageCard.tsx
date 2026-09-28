@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
 import type { Image } from "../types";
-import { formatFileSize, formatResolution } from "../utils";
+import { copyToClipboard, formatFileSize, formatResolution } from "../utils";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface ImageCardProps {
@@ -49,13 +49,25 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
       alert("打开文件所在位置失败: " + err);
     }
   };
+  const copyFilename = async () => {
+    try {
+      await copyToClipboard(image.filename);
+    } catch (err) {
+      alert("复制文件名失败: " + err);
+    }
+  };
 
   const handleDelete = async () => {
     if (!confirm(`确定要删除 "${image.filename}" 到回收站？`)) return;
     setDeleting(true);
     try {
       const deleted = await api.deleteImages([image.id]);
-      if (deleted.length > 0) onDeleted(image.id);
+      if (deleted.length > 0) {
+        onDeleted(image.id);
+      } else {
+        alert("删除失败：文件可能被占用或已不在库中。");
+        setDeleting(false);
+      }
     } catch (err) {
       alert("删除失败: " + err);
       setDeleting(false);
@@ -145,6 +157,9 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
         >
           <button type="button" onClick={() => { setMenu(null); void openContainingFolder(); }}>
             打开文件所在位置
+          </button>
+          <button type="button" onClick={() => { setMenu(null); void copyFilename(); }}>
+            复制文件名
           </button>
           {onFindSimilar && (
             <button type="button" onClick={() => { setMenu(null); onFindSimilar(image); }}>

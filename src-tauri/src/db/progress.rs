@@ -1,6 +1,7 @@
 use rusqlite::{Connection, Result, params};
 
-use crate::models::{RecentlyPlayed, Video, VideoProgress, WatchProgress};
+use super::videos::video_from_row;
+use crate::models::{RecentlyPlayed, VideoProgress};
 
 pub fn upsert_progress(conn: &Connection, video_id: &str, position: f64) -> Result<()> {
     conn.execute(
@@ -9,25 +10,6 @@ pub fn upsert_progress(conn: &Connection, video_id: &str, position: f64) -> Resu
         params![uuid::Uuid::new_v4().to_string(), video_id, position],
     )?;
     Ok(())
-}
-
-pub fn get_progress(conn: &Connection, video_id: &str) -> Result<Option<WatchProgress>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, video_id, position, updated_at FROM watch_progress WHERE video_id = ?1"
-    )?;
-    let mut rows = stmt.query_map(params![video_id], |row| {
-        Ok(WatchProgress {
-            id: row.get(0)?,
-            video_id: row.get(1)?,
-            position: row.get(2)?,
-            updated_at: row.get(3)?,
-        })
-    })?;
-    match rows.next() {
-        Some(Ok(progress)) => Ok(Some(progress)),
-        Some(Err(e)) => Err(e),
-        None => Ok(None),
-    }
 }
 
 pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<RecentlyPlayed>> {
@@ -40,17 +22,7 @@ pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<Recently
     )?;
     let rows = stmt.query_map(params![limit], |row| {
         Ok(RecentlyPlayed {
-            video: Video {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                filename: row.get(2)?,
-                duration: row.get(3)?,
-                width: row.get(4)?,
-                height: row.get(5)?,
-                file_size: row.get(6)?,
-                created_at: row.get(7)?,
-                thumbnail_path: row.get(10)?,
-            },
+            video: video_from_row(row, 10)?,
             position: row.get(8)?,
             updated_at: row.get(9)?,
         })
@@ -66,17 +38,7 @@ pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>>
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(VideoProgress {
-            video: Video {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                filename: row.get(2)?,
-                duration: row.get(3)?,
-                width: row.get(4)?,
-                height: row.get(5)?,
-                file_size: row.get(6)?,
-                created_at: row.get(7)?,
-                thumbnail_path: row.get(9)?,
-            },
+            video: video_from_row(row, 9)?,
             position: row.get::<_, Option<f64>>(8)?,
         })
     })?.collect::<Result<Vec<_>>>()?;
@@ -88,18 +50,20 @@ mod tests {
     use super::*;
     use crate::db::{insert_video, sample_video, setup_test_db};
 
+    fn query_position(conn: &Connection, video_id: &str) -> Option<f64> {
+        conn.query_row("SELECT position FROM watch_progress WHERE video_id = ?1", [video_id], |r| r.get(0)).ok()
+    }
+
     #[test]
     fn test_progress_upsert() {
         let conn = setup_test_db();
         insert_video(&conn, &sample_video("v1", "C:\\v.mp4")).unwrap();
 
         upsert_progress(&conn, "v1", 30.5).unwrap();
-        let p = get_progress(&conn, "v1").unwrap().unwrap();
-        assert!((p.position - 30.5).abs() < 0.001);
+        assert!((query_position(&conn, "v1").unwrap() - 30.5).abs() < 0.001);
 
         upsert_progress(&conn, "v1", 60.0).unwrap();
-        let p = get_progress(&conn, "v1").unwrap().unwrap();
-        assert!((p.position - 60.0).abs() < 0.001);
+        assert!((query_position(&conn, "v1").unwrap() - 60.0).abs() < 0.001);
     }
 
     #[test]

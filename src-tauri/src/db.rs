@@ -11,6 +11,19 @@ pub use progress::*;
 pub use settings::*;
 pub use videos::*;
 
+/// LIKE 通配符按 `ESCAPE '\'` 规则转义：目录和搜索词都是字面量，`%` `_` `\` 不能当通配符
+pub fn like_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+
 pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS videos (
@@ -184,6 +197,10 @@ pub(crate) fn sample_image(id: &str, path: &str) -> crate::models::Image {
 mod tests {
     use super::*;
 
+    fn query_position(conn: &Connection, video_id: &str) -> Option<f64> {
+        conn.query_row("SELECT position FROM watch_progress WHERE video_id = ?1", [video_id], |r| r.get(0)).ok()
+    }
+
     #[test]
     fn test_init_db_enables_wal_on_file_db() {
         // 内存库测不出 journal_mode（永远返回 memory），必须走真实文件
@@ -252,7 +269,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "old");
         assert_eq!(rows[0].duration, Some(150.0));
-        assert_eq!(get_progress(&conn, "old").unwrap().unwrap().position, 22.0);
+        assert_eq!(query_position(&conn, "old"), Some(22.0));
     }
 
     #[test]
@@ -267,7 +284,7 @@ mod tests {
             assert!(insert_video(&tx, &sample_video("conflict", "C:/other.mp4")).is_err());
         }
         assert!(get_video_path(&conn, "keep").unwrap().is_some());
-        assert_eq!(get_progress(&conn, "keep").unwrap().unwrap().position, 12.0);
+        assert_eq!(query_position(&conn, "keep"), Some(12.0));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
 use super::thumbnails::clear_thumbnail_cache;
-use super::{undeleted_targets, AppState, MapErrStr};
+use super::{undeleted_targets, video_path_or, AppState, MapErrStr};
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
 fn sniff_image_format(header: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -30,19 +30,20 @@ fn read_header(path: &Path) -> Option<[u8; 16]> {
 }
 
 /// 为重名后的文件寻找不冲突的路径：`name.jpg`、`name (2).jpg`、`name (3).jpg` …
-fn unique_path(target: &Path) -> PathBuf {
+/// 耗尽后报错而不是退回原路径——原路径必然已存在，调用方会直接覆盖文件
+fn unique_path(target: &Path) -> Result<PathBuf, String> {
     if !target.exists() {
-        return target.to_path_buf();
+        return Ok(target.to_path_buf());
     }
     let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
     let ext = target.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
     for i in 2..1000 {
         let candidate = target.with_file_name(format!("{stem} ({i}).{ext}"));
         if !candidate.exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    target.to_path_buf()
+    Err("无法生成不重名的目标路径".into())
 }
 
 #[tauri::command]
@@ -57,9 +58,7 @@ pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<Vide
     use std::io::ErrorKind;
     let path = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_video_path(&conn, &video_id)
-            .map_err_str()?
-            .ok_or_else(|| format!("Video not found: {}", video_id))?
+        video_path_or(&conn, &video_id)?
     };
 
     let p = std::path::Path::new(&path);
@@ -106,16 +105,19 @@ pub async fn delete_videos(
     state: State<'_, AppState>,
     video_ids: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    let targets: Vec<(String, String)> = {
+    // 库里已经没有记录的 id 视作已删除（口径同图片侧 split_known_targets），
+    // 不能因为个别陈旧 id 让整批都删不动
+    let (targets, mut deleted): (Vec<(String, String)>, Vec<String>) = {
         let conn = state.db.lock().map_err_str()?;
-        let mut out = Vec::with_capacity(video_ids.len());
+        let mut targets = Vec::with_capacity(video_ids.len());
+        let mut gone = Vec::new();
         for video_id in &video_ids {
-            let path = db::get_video_path(&conn, video_id)
-                .map_err_str()?
-                .ok_or_else(|| format!("Video not found: {}", video_id))?;
-            out.push((video_id.clone(), path));
+            match db::get_video_path(&conn, video_id).map_err_str()? {
+                Some(path) => targets.push((video_id.clone(), path)),
+                None => gone.push(video_id.clone()),
+            }
         }
-        out
+        (targets, gone)
     };
 
     let for_files = targets.clone();
@@ -123,11 +125,12 @@ pub async fn delete_videos(
         .await
         .map_err_str()?;
     let failed: std::collections::HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
-    let deleted: Vec<String> = targets
-        .iter()
-        .filter(|(id, _)| !failed.contains(id))
-        .map(|(id, _)| id.clone())
-        .collect();
+    deleted.extend(
+        targets
+            .iter()
+            .filter(|(id, _)| !failed.contains(id))
+            .map(|(id, _)| id.clone()),
+    );
 
     if !deleted.is_empty() {
         let conn = state.db.lock().map_err_str()?;
@@ -145,62 +148,67 @@ pub async fn delete_videos(
 /// 把"内容实为图片"的假视频转换成图片：按真实格式另存为 .jpg/.png 等新文件，
 /// 源文件移入回收站，并从视频库删除记录
 #[tauri::command]
-pub fn convert_fake_images(
+pub async fn convert_fake_images(
     app: tauri::AppHandle,
-    state: State<AppState>,
     video_ids: Vec<String>,
 ) -> Result<ConversionResult, String> {
-    let mut result = ConversionResult::default();
-    for video_id in video_ids {
-        let path = {
-            let conn = state.db.lock().map_err_str()?;
-            db::get_video_path(&conn, &video_id)
-                .map_err_str()?
-        };
-        let Some(path) = path else {
-            result.errors.push(format!("记录不存在，已跳过: {}", video_id));
-            continue;
-        };
+    // 逐文件 fs::copy + trash::delete + ffmpeg 是重活，扔进阻塞线程池，别堵主线程
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut result = ConversionResult::default();
+        for video_id in video_ids {
+            let path = {
+                let conn = state.db.lock().map_err_str()?;
+                db::get_video_path(&conn, &video_id)
+                    .map_err_str()?
+            };
+            let Some(path) = path else {
+                result.errors.push(format!("记录不存在，已跳过: {}", video_id));
+                continue;
+            };
 
-        let p = Path::new(&path);
-        let Some((ext, _label)) = read_header(p).as_ref().and_then(|h| sniff_image_format(h)) else {
-            result.errors.push(format!("{} 当前内容不是图片，已跳过", p.display()));
-            continue;
-        };
+            let p = Path::new(&path);
+            let Some((ext, _label)) = read_header(p).as_ref().and_then(|h| sniff_image_format(h)) else {
+                result.errors.push(format!("{} 当前内容不是图片，已跳过", p.display()));
+                continue;
+            };
 
-        let target = unique_path(&p.with_extension(ext));
-        if let Err(e) = std::fs::copy(p, &target) {
-            result.errors.push(format!("复制 {} 失败: {}", p.display(), e));
-            continue;
-        }
-        if let Err(e) = trash::delete(p) {
-            let _ = std::fs::remove_file(&target);
-            result.errors.push(format!("源文件移入回收站失败，已保留 {}: {}", p.display(), e));
-            continue;
-        }
+            let target = unique_path(&p.with_extension(ext))?;
+            if let Err(e) = std::fs::copy(p, &target) {
+                result.errors.push(format!("复制 {} 失败: {}", p.display(), e));
+                continue;
+            }
+            if let Err(e) = trash::delete(p) {
+                let _ = std::fs::remove_file(&target);
+                result.errors.push(format!("源文件移入回收站失败，已保留 {}: {}", p.display(), e));
+                continue;
+            }
 
-        let removal = state
-            .db
-            .lock()
-            .map_err_str()
-            .and_then(|conn| db::delete_video(&conn, &video_id).map_err_str());
-        if let Err(e) = removal {
-            // 图片和回收站都已处理，仅删库失败：还原源文件，保持库记录与磁盘一致
-            let _ = std::fs::copy(&target, p);
-            let _ = std::fs::remove_file(&target);
-            result.errors.push(format!("删除库记录失败，已还原源文件: {}", e));
-            continue;
-        }
+            let removal = state
+                .db
+                .lock()
+                .map_err_str()
+                .and_then(|conn| db::delete_video(&conn, &video_id).map_err_str());
+            if let Err(e) = removal {
+                // 图片和回收站都已处理，仅删库失败：还原源文件，保持库记录与磁盘一致
+                let _ = std::fs::copy(&target, p);
+                let _ = std::fs::remove_file(&target);
+                result.errors.push(format!("删除库记录失败，已还原源文件: {}", e));
+                continue;
+            }
 
-        clear_thumbnail_cache(&app, &video_id);
-        // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
-        let image = scanner::build_image(&target);
-        if let Ok(conn) = state.db.lock() {
-            let _ = db::insert_image(&conn, &image);
+            clear_thumbnail_cache(&app, &video_id);
+            // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
+            let image = scanner::build_image(&target);
+            if let Ok(conn) = state.db.lock() {
+                let _ = db::insert_image(&conn, &image);
+            }
+            result.converted += 1;
         }
-        result.converted += 1;
-    }
-    Ok(result)
+        Ok(result)
+    })
+    .await
+    .map_err_str()?
 }
 
 /// 短视频转图片的判定阈值：时长 ≤5 秒且去重画面 ≤3 帧（1 秒内直接视为静图）
@@ -291,7 +299,13 @@ pub async fn convert_short_videos(
             }
             // 图片伪装成视频：魔数命中则直接按真实格式另存，无需 ffmpeg
             if let Some((ext, _)) = read_header(p).and_then(|h| sniff_image_format(&h)) {
-                let target = unique_path(&p.with_extension(ext));
+                let target = match unique_path(&p.with_extension(ext)) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        errors.push(format!("{}: {}", p.display(), e));
+                        continue;
+                    }
+                };
                 if let Err(e) = std::fs::copy(p, &target) {
                     errors.push(format!("复制 {} 失败: {}", p.display(), e));
                     continue;
@@ -318,7 +332,13 @@ pub async fn convert_short_videos(
                     }
                 }
             }
-            let target = unique_path(&p.with_extension("jpg"));
+            let target = match unique_path(&p.with_extension("jpg")) {
+                Ok(t) => t,
+                Err(e) => {
+                    errors.push(format!("{}: {}", p.display(), e));
+                    continue;
+                }
+            };
             if let Err(e) = scanner::extract_full_frame(&path, &target) {
                 let _ = std::fs::remove_file(&target);
                 errors.push(format!("{} 抽帧失败: {}", p.display(), e));
@@ -352,8 +372,12 @@ pub async fn convert_short_videos(
     Ok(result)
 }
 
-/// 文件移动：同盘 rename；跨盘（Windows ERROR_NOT_SAME_DEVICE）回退为复制+删源
+/// 文件移动：同盘 rename；跨盘（Windows ERROR_NOT_SAME_DEVICE）回退为复制+删源。
+/// 目标已存在时直接报错而不做静默覆盖——检查与执行之间的窗口宁可失败也不吞文件。
 pub(crate) fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
+    if dst.exists() {
+        return Err(format!("目标文件已存在，拒绝覆盖: {}", dst.display()));
+    }
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(17) => {
@@ -366,6 +390,23 @@ pub(crate) fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
     }
 }
 
+/// target_dir 与 old_path 所在目录是否为同一目录：分隔符统一成 '\'、去掉结尾
+/// 分隔符后做大小写不敏感比较——字符串直比会把带正斜杠或结尾反斜杠的写法
+/// 误判成不同目录，导致同目录移动被当成正常移动执行
+pub(crate) fn same_target_dir(old_path: &str, target_dir: &str) -> bool {
+    let normalized = target_dir.replace('/', "\\");
+    let normalized = normalized.trim_end_matches('\\');
+    if normalized.is_empty() {
+        return false;
+    }
+    let old_dir = Path::new(old_path)
+        .parent()
+        .map(|d| d.to_string_lossy().replace('/', "\\"))
+        .unwrap_or_default();
+    let old_dir = old_dir.trim_end_matches('\\');
+    old_dir.eq_ignore_ascii_case(normalized)
+}
+
 /// 把视频文件移动到目标文件夹并同步库记录路径；目标重名时自动加 " (2)" 后缀，
 /// 写库失败会把文件移回原位
 #[tauri::command]
@@ -376,9 +417,7 @@ pub async fn move_video(
 ) -> Result<String, String> {
     let (old_path, new_path) = {
         let conn = state.db.lock().map_err_str()?;
-        let old_path = db::get_video_path(&conn, &video_id)
-            .map_err_str()?
-            .ok_or_else(|| format!("Video not found: {}", video_id))?;
+        let old_path = video_path_or(&conn, &video_id)?;
         let src = Path::new(&old_path);
         let filename = src
             .file_name()
@@ -386,11 +425,7 @@ pub async fn move_video(
             .to_string_lossy()
             .to_string();
         let dir = Path::new(&target_dir);
-        if dir
-            .join(&filename)
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&old_path)
-        {
+        if same_target_dir(&old_path, &target_dir) {
             return Err("文件已经在该目录中".into());
         }
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
@@ -460,14 +495,15 @@ pub async fn find_hevc_videos(
     if !scanner::ffmpeg_available() {
         return Err("未检测到 ffmpeg/ffprobe，无法识别编码。请安装 ffmpeg 并加入 PATH。".into());
     }
-    let jobs: Vec<(String, String)> = {
+    // 锁内只收集行集，"文件还在不在磁盘上"的逐条 stat 挪到锁外
+    let candidates: Vec<(String, String)> = {
         let conn = state.db.lock().map_err_str()?;
-        db::videos_without_codec(&conn)
-            .map_err_str()?
-            .into_iter()
-            .filter(|(_, p)| Path::new(p).exists())
-            .collect()
+        db::videos_without_codec(&conn).map_err_str()?
     };
+    let jobs: Vec<(String, String)> = candidates
+        .into_iter()
+        .filter(|(_, p)| Path::new(p).exists())
+        .collect();
     let total = jobs.len();
     let task_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -564,7 +600,18 @@ pub async fn convert_hevc_videos(
                 continue;
             }
             // 极少数：回收站未让位。回退到不覆盖的重命名，路径变化需写库
-            let target = if p.exists() { unique_path(p) } else { p.to_path_buf() };
+            let target = if p.exists() {
+                match unique_path(p) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        errors.push(format!("{} 回写失败（{}），请从回收站还原", p.display(), e));
+                        emit(converted, errors.len());
+                        continue;
+                    }
+                }
+            } else {
+                p.to_path_buf()
+            };
             if let Err(e) = std::fs::rename(&tmp, &target) {
                 let _ = std::fs::remove_file(&tmp);
                 errors.push(format!(
@@ -610,9 +657,7 @@ pub async fn get_playable_path(
 ) -> Result<String, String> {
     let path = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_video_path(&conn, &video_id)
-            .map_err_str()?
-            .ok_or_else(|| format!("Video not found: {}", video_id))?
+        video_path_or(&conn, &video_id)?
     };
 
     let probe_path = path.clone();
@@ -635,11 +680,22 @@ pub async fn get_playable_path(
         }
     }
 
+    // 先写同目录临时名再 rename：并发请求不会各写一路 ffmpeg 到同一个最终文件
+    // 互相踩踏；成功后 rename 覆盖旧缓存是预期行为（覆盖的正是本函数刚产出的有效文件）
+    let tmp = dir.join(format!("{}.tmp{}", video_id, uuid::Uuid::new_v4()));
     let src = path.clone();
     let out_str = out.to_string_lossy().to_string();
-    let job = tauri::async_runtime::spawn_blocking(move || scanner::transcode_to_h264(&src, &out))
-        .await
-        .map_err_str()?;
+    let tmp_str = tmp.to_string_lossy().to_string();
+    let dst_str = out_str.clone();
+    let job = tauri::async_runtime::spawn_blocking(move || {
+        scanner::transcode_to_h264(&src, Path::new(&tmp_str)).and_then(|()| {
+            std::fs::rename(&tmp_str, &dst_str)
+                .map_err(|e| format!("转码完成但写回缓存失败: {}", e))
+        })
+    })
+    .await
+    .map_err_str()?;
+    let _ = std::fs::remove_file(&tmp); // 失败时清掉残留的临时文件
     if job.is_ok() {
         Ok(out_str)
     } else {
@@ -678,8 +734,8 @@ mod tests {
         let taken = dir.join("a.jpg");
         std::fs::write(&taken, b"x").unwrap();
 
-        assert_eq!(unique_path(&dir.join("b.jpg")), dir.join("b.jpg"));
-        assert_eq!(unique_path(&taken), dir.join("a (2).jpg"));
+        assert_eq!(unique_path(&dir.join("b.jpg")).unwrap(), dir.join("b.jpg"));
+        assert_eq!(unique_path(&taken).unwrap(), dir.join("a (2).jpg"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

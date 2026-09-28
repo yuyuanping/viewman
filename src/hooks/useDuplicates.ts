@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import type { DuplicateProgressPayload, DuplicateReport } from "../api";
 import { pruneGroupsToLive, restoredResultStale } from "../detectionCache";
+import { useTauriEvent } from "./useTauriEvent";
 import type { Notify } from "./useToasts";
 
 interface DuplicateOptions {
@@ -47,18 +47,11 @@ export function useDuplicates(
   const clearCacheRef = useRef(clearCache);
   useEffect(() => { clearCacheRef.current = clearCache; });
 
-  useEffect(() => {
-    if (!progressEvent) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    listen<DuplicateProgressPayload>(progressEvent, (event) => {
-      const { processed, total, stage } = event.payload;
-      setProgress(total > 0 && processed < total ? { processed, total, stage } : null);
-    }).then((fn) => {
-      if (disposed) fn(); else unlisten = fn;
-    }).catch(() => { /* 收不到进度只是看不到 x/y，结果照样返回 */ });
-    return () => { disposed = true; unlisten?.(); };
-  }, [progressEvent]);
+  // 收不到进度只是看不到 x/y，结果照样返回
+  useTauriEvent<DuplicateProgressPayload>(progressEvent, (payload) => {
+    const { processed, total, stage } = payload;
+    setProgress(total > 0 && processed < total ? { processed, total, stage } : null);
+  });
 
   /** 库清单到齐了没：到齐才去读缓存——名单要照着它裁，空清单会把整份结果裁没 */
   const libraryReady = liveItems === undefined || liveItems.length > 0;

@@ -36,3 +36,8 @@ export const hevcNativeSupported: boolean = (() => {
     return false;
   }
 })();
+
+/** 复制文本到剪贴板；WebView2 上走标准 Clipboard API */
+export async function copyToClipboard(text: string): Promise<void> {
+  await navigator.clipboard.writeText(text);
+}

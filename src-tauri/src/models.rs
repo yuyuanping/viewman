@@ -40,14 +40,6 @@ pub struct ScanOutcome<T> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchProgress {
-    pub id: String,
-    pub video_id: String,
-    pub position: f64,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoProgress {
     pub video: Video,
     pub position: Option<f64>,

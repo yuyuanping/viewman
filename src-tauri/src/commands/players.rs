@@ -30,11 +30,6 @@ pub fn launch_potplayer(video_path: String, seek: Option<f64>) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn enable_potplayer_titlebar() -> Result<(), String> {
-    potplayer::enable_titlebar_time()
-}
-
-#[tauri::command]
 pub fn potplayer_status(video_path: String) -> potplayer::PotPlayerStatus {
     potplayer::get_status(&video_path)
 }

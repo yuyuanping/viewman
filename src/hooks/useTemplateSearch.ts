@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import type { TemplateMatch, TemplateProgressPayload } from "../api";
 import type { Image } from "../types";
+import { useTauriEvent } from "./useTauriEvent";
 import type { Notify } from "./useToasts";
 
 interface TemplateSearchOptions {
@@ -43,17 +43,11 @@ export function useTemplateSearch({ fetchImagesByIds, libraryVersion, setSelectM
   /** 命中条目的元数据（缩略图/尺寸/体积），按 id 现查 */
   const [imageById, setImageById] = useState<Map<string, Image>>(NO_INDEX);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    listen<TemplateProgressPayload>("template-progress", (event) => {
-      const { processed, total } = event.payload;
-      setProgress(total === 0 ? null : { processed, total });
-    }).then((fn) => {
-      if (disposed) fn(); else unlisten = fn;
-    }).catch(() => { /* 收不到只是看不到补算进度，结束时仍会拿到完整结果 */ });
-    return () => { disposed = true; unlisten?.(); };
-  }, []);
+  // 收不到只是看不到补算进度，结束时仍会拿到完整结果
+  useTauriEvent<TemplateProgressPayload>("template-progress", (payload) => {
+    const { processed, total } = payload;
+    setProgress(total === 0 ? null : { processed, total });
+  });
 
   const search = useCallback(async (tpl: Image) => {
     setTemplate(tpl);

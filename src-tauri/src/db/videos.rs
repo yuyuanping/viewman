@@ -1,3 +1,4 @@
+use super::like_escape;
 use rusqlite::{Connection, OptionalExtension, Result, params};
 
 use crate::models::Video;
@@ -9,22 +10,28 @@ pub fn get_all_video_ids(conn: &Connection) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// 行内视频列的固定顺序（id, path, filename, duration, width, height, file_size, created_at），
+/// 各查询只有 thumbnail_path 的列位不同，由调用方指定
+pub(crate) fn video_from_row(row: &rusqlite::Row<'_>, thumbnail_idx: usize) -> Result<Video> {
+    Ok(Video {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        filename: row.get(2)?,
+        duration: row.get(3)?,
+        width: row.get(4)?,
+        height: row.get(5)?,
+        file_size: row.get(6)?,
+        created_at: row.get(7)?,
+        thumbnail_path: row.get(thumbnail_idx)?,
+    })
+}
+
 pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos ORDER BY filename"
     )?;
     let videos = stmt.query_map([], |row| {
-        Ok(Video {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            filename: row.get(2)?,
-            duration: row.get(3)?,
-            width: row.get(4)?,
-            height: row.get(5)?,
-            file_size: row.get(6)?,
-            created_at: row.get(7)?,
-            thumbnail_path: row.get(8)?,
-        })
+        video_from_row(row, 8)
     })?.collect::<Result<Vec<_>>>()?;
     Ok(videos)
 }
@@ -32,16 +39,6 @@ pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
 /// 某个扫描根（含全部子目录）下的在库视频：扫描启动只需要本根的旧账，
 /// 不必全表拉一遍——那会把其它命令堵在数据库锁后面。前缀已按
 /// dir_prefix_lower 规范成小写带结尾反斜杠，LIKE 对 ASCII 不区分大小写。
-fn like_escape(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
 
 pub fn get_videos_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<Vec<Video>> {
     let pattern = format!("{}%", like_escape(prefix_lower));
@@ -49,17 +46,7 @@ pub fn get_videos_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<
         "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos WHERE path LIKE ?1 ESCAPE '\\'",
     )?;
     let videos = stmt.query_map(params![pattern], |row| {
-        Ok(Video {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            filename: row.get(2)?,
-            duration: row.get(3)?,
-            width: row.get(4)?,
-            height: row.get(5)?,
-            file_size: row.get(6)?,
-            created_at: row.get(7)?,
-            thumbnail_path: row.get(8)?,
-        })
+        video_from_row(row, 8)
     })?.collect::<Result<Vec<_>>>()?;
     Ok(videos)
 }

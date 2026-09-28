@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::Manager;
 
 use crate::db;
 
@@ -35,10 +35,11 @@ pub(crate) fn roots_to_forget(roots: &[String], dir: &str) -> Vec<String> {
 
 /// 从库中移除某个目录：忘掉指向它的扫描根，删除该目录下的条目与封面缓存。
 /// 只动应用内的记录，磁盘文件一律不删——要删文件请用条目上的删除按钮。
+/// 全表过滤 + 删库不在主线程做，整体扔进阻塞线程池；锁内只做 DB 操作，
+/// 封面缓存清理在锁外。
 #[tauri::command]
-pub fn remove_media_directory(
+pub async fn remove_media_directory(
     app: tauri::AppHandle,
-    state: State<AppState>,
     kind: String,
     dir: String,
 ) -> Result<usize, String> {
@@ -49,57 +50,62 @@ pub fn remove_media_directory(
     // roots_key 已保证 kind 只会是 video / image
     let video = kind == "video";
 
-    let removed_ids: Vec<String> = {
-        let conn = state.db.lock().map_err_str()?;
-        let ids: Vec<String> = if video {
-            db::get_all_videos(&conn)
-                .map_err_str()?
-                .into_iter()
-                .filter(|v| path_under(&v.path, &dir))
-                .map(|v| v.id)
-                .collect()
-        } else {
-            db::get_all_images(&conn)
-                .map_err_str()?
-                .into_iter()
-                .filter(|i| path_under(&i.path, &dir))
-                .map(|i| i.id)
-                .collect()
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let removed_ids: Vec<String> = {
+            let conn = state.db.lock().map_err_str()?;
+            let ids: Vec<String> = if video {
+                db::get_all_videos(&conn)
+                    .map_err_str()?
+                    .into_iter()
+                    .filter(|v| path_under(&v.path, &dir))
+                    .map(|v| v.id)
+                    .collect()
+            } else {
+                db::get_all_images(&conn)
+                    .map_err_str()?
+                    .into_iter()
+                    .filter(|i| path_under(&i.path, &dir))
+                    .map(|i| i.id)
+                    .collect()
+            };
+            // 与扫描一致：整批删除要么全部生效，要么全部回滚
+            let tx = conn.unchecked_transaction().map_err_str()?;
+            if video {
+                db::delete_videos_by_ids(&tx, &ids)
+            } else {
+                db::delete_images_by_ids(&tx, &ids)
+            }
+            .map_err_str()?;
+            tx.commit().map_err_str()?;
+            ids
         };
-        // 与扫描一致：整批删除要么全部生效，要么全部回滚
-        let tx = conn.unchecked_transaction().map_err_str()?;
-        if video {
-            db::delete_videos_by_ids(&tx, &ids)
-        } else {
-            db::delete_images_by_ids(&tx, &ids)
+
+        for id in &removed_ids {
+            clear_thumbnail_cache(&app, id);
         }
-        .map_err_str()?;
-        tx.commit().map_err_str()?;
-        ids
-    };
 
-    for id in &removed_ids {
-        clear_thumbnail_cache(&app, id);
-    }
-
-    {
-        let conn = state.db.lock().map_err_str()?;
-        let raw = db::get_setting(&conn, key).map_err_str()?;
-        let roots: Vec<String> = raw
-            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_default();
-        let forgotten = roots_to_forget(&roots, &dir);
-        if !forgotten.is_empty() {
-            let kept: Vec<String> = roots
-                .into_iter()
-                .filter(|r| !forgotten.contains(r))
-                .collect();
-            let value = serde_json::to_string(&kept).map_err_str()?;
-            db::set_setting(&conn, key, &value).map_err_str()?;
+        {
+            let conn = state.db.lock().map_err_str()?;
+            let raw = db::get_setting(&conn, key).map_err_str()?;
+            let roots: Vec<String> = raw
+                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                .unwrap_or_default();
+            let forgotten = roots_to_forget(&roots, &dir);
+            if !forgotten.is_empty() {
+                let kept: Vec<String> = roots
+                    .into_iter()
+                    .filter(|r| !forgotten.contains(r))
+                    .collect();
+                let value = serde_json::to_string(&kept).map_err_str()?;
+                db::set_setting(&conn, key, &value).map_err_str()?;
+            }
         }
-    }
 
-    Ok(removed_ids.len())
+        Ok(removed_ids.len())
+    })
+    .await
+    .map_err_str()?
 }
 
 #[cfg(test)]

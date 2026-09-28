@@ -1,5 +1,4 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { VideoGrid } from "./components/VideoGrid";
@@ -17,6 +16,8 @@ import { useHevcConversion } from "./hooks/useHevcConversion";
 import { useDuplicates } from "./hooks/useDuplicates";
 import { useFileCheck } from "./hooks/useFileCheck";
 import { useDeleteShortcut, useMoveShortcut } from "./hooks/useDeleteShortcut";
+import { useTauriEvent } from "./hooks/useTauriEvent";
+import { useBatchSelection } from "./hooks/useBatchSelection";
 import { useRangeSelect } from "./hooks/useRangeSelect";
 import { api } from "./api";
 import { STALE_RESULT_NOTE } from "./detectionCache";
@@ -27,11 +28,12 @@ import type { SortField, SortDirection, WatchState } from "./libraryFilter";
 import { filterMedia, filterByWatchState, filterByMedia, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PlayHistoryPanel } from "./components/PlayHistoryPanel";
-import { MoveTargetsDialog, type MovePrompt } from "./components/MoveTargetsDialog";
+import { MoveTargetsDialog } from "./components/MoveTargetsDialog";
 import { ToastLayer } from "./components/Toast";
 
 const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
 const TAB_PREF_KEY = "viewman.mediaTab";
+const SIDEBAR_VISIBLE_KEY = "viewman.sidebarVisible";
 
 function App() {
   const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus, applyScan: applyVideoScan, dropLocally: dropVideosLocally, retargetLocally: retargetVideosLocally } = useVideos();
@@ -69,7 +71,12 @@ function App() {
   // 多选批量删除模式
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [deletingSelected, setDeletingSelected] = useState(false);
+
+  // 勾选属于视频库：切到图片页就清空，不然图片页上按 Del/M 会命中看不见的视频
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setSelectMode(false);
+  }, [tab]);
   // 播放器打开那一刻的列表快照：播放期间固定不变，不随库/排序/进度刷新而变
   const [playlist, setPlaylist] = useState<Video[] | null>(null);
   // 完整播放历史覆盖层
@@ -135,23 +142,13 @@ function App() {
   }, [refreshScanRoots]);
 
   // 目录监视自动扫描完成广播：后端把本轮的增删直接带过来，不再整库重拉
-  useEffect(() => {
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    const bind = <T,>(event: string, apply: (outcome: ScanOutcome<T>) => void) =>
-      listen<ScanOutcome<T>>(event, (received) => apply(received.payload))
-        .then(fn => { if (disposed) fn(); else unlisteners.push(fn); })
-        .catch(() => undefined);
-    void bind<Video>("videos-changed", applyVideoScan);
-    // 图片增量已由后端直接落库，前端只需要重拉统计与当前视图（不闪 loading）
-    void bind<Image>("images-changed", () => void refreshImagesQuietly());
-    return () => { disposed = true; for (const fn of unlisteners) fn(); };
-  }, [applyVideoScan, refreshImagesQuietly]);
+  useTauriEvent<ScanOutcome<Video>>("videos-changed", applyVideoScan);
+  // 图片增量已由后端直接落库，前端只需要重拉统计与当前视图（不闪 loading）
+  useTauriEvent<Image>("images-changed", () => void refreshImagesQuietly());
 
   /** 移除目录：只清除应用内的记录与封面缓存，磁盘文件保持原样 */
   const handleRemoveRoot = useCallback(async (dir: string) => {
-    const kind = tab;
-    const count = kind === "image"
+    const kind = tab;    const count = kind === "image"
       ? countUnderDirFromCounts(imageStats?.dirs ?? [], dir)
       : countUnderDir(videos, dir);
     const detail = count > 0
@@ -166,6 +163,8 @@ function App() {
       await (kind === "image" ? loadImages() : loadVideos());
       await refreshScanRoots();
       notify(removed > 0 ? `已移除 ${removed} 条记录，文件仍在磁盘上` : "已停止扫描该目录");
+    } catch (e) {
+      notify(`移除目录失败：${String(e)}`, "error");
     } finally {
       setRemovingRoot(false);
     }
@@ -221,9 +220,10 @@ function App() {
     closePlayer();
   }, [closePlayer]);
 
-  const handleFallbackToPotPlayer = useCallback((video: Video) => {
+  const handleFallbackToPotPlayer = useCallback((video: Video, position: number) => {
     handleClosePlayer();
-    launchInPotPlayer(video, seekFor(video));
+    // position 来自播放器当前帧（保存进度之后传入），比 progressMap 快照新
+    launchInPotPlayer(video, position > 0 ? position : seekFor(video));
   }, [handleClosePlayer, launchInPotPlayer, seekFor]);
 
   const toggleSortDirection = useCallback(() => {
@@ -254,71 +254,24 @@ function App() {
 
   const { selectAt: selectVideoAt } = useRangeSelect(filteredVideos, setSelectedIds);
 
-  const allSelected = filteredVideos.length > 0 && filteredVideos.every(v => selectedIds.has(v.id));
-  const toggleSelectAll = useCallback(() => {
-    setSelectedIds(allSelected ? new Set() : new Set(filteredVideos.map(v => v.id)));
-  }, [allSelected, filteredVideos]);
-
-  const exitSelectMode = useCallback(() => {
-    setSelectMode(false);
-    setSelectedIds(new Set());
-  }, []);
-
-  const handleDeleteSelected = useCallback(async () => {
-    const ids = [...selectedIds];
-    if (ids.length === 0) return;
-    if (!confirm(`确定将选中的 ${ids.length} 个视频移入回收站？`)) return;
-    setDeletingSelected(true);
-    let ok = 0;
-    try {
-      ok = (await trashVideos(ids)).length;
-    } catch (e) {
-      notify(`删除失败：${String(e)}`, "error");
-    }
-    const failed = ids.length - ok;
-    setSelectedIds(new Set());
-    notify(failed > 0 ? `已删除 ${ok} 个，${failed} 个失败（可能被占用）` : `已将 ${ok} 个视频移入回收站。`, failed > 0 ? "error" : "info");
-    setDeletingSelected(false);
-  }, [selectedIds, trashVideos, notify]);
-
-  // 「移动到…」目录列表对话框的待办：批量移动与播放列表移动共用一个
-  const [movePrompt, setMovePrompt] = useState<MovePrompt | null>(null);
+  const {
+    allSelected, toggleSelectAll, exitSelectMode,
+    deletingSelected, movingSelected, movePrompt, setMovePrompt,
+    handleDeleteSelected, handleMoveSelected,
+  } = useBatchSelection({
+    view: filteredVideos,
+    selectedIds, setSelectedIds, setSelectMode,
+    notify,
+    noun: "视频", measure: "个", kind: "video",
+    trash: trashVideos,
+    moveOne: (id, dir) => api.moveVideo(id, dir),
+    afterMove: (moved) => retargetVideosLocally(moved),
+  });
 
   // Del 即删勾选：只要有待删清单就生效，不再要求多选模式（分组面板里点卡片勾选不经过 selectMode）；
   // 播放器或历史面板盖在上面时让位
   useDeleteShortcut(handleDeleteSelected,
     selectedIds.size > 0 && !currentVideo && !historyOpen && !deletingSelected && movePrompt === null);
-
-  // 多选批量移动：弹出目标目录列表，选定后逐个 move，失败只计数不中断（被占用的文件跳过）
-  const [movingSelected, setMovingSelected] = useState(false);
-  const handleMoveSelected = useCallback(async () => {
-    const ids = [...selectedIds];
-    if (ids.length === 0) return;
-    setMovePrompt({
-      kind: "video",
-      noun: "视频",
-      count: ids.length,
-      onPick: async (dir) => {
-        if (!confirm(`将选中的 ${ids.length} 个视频移动到:\n${dir}`)) return false;
-        setMovingSelected(true);
-        const moved: Array<[string, string]> = [];
-        let failed = 0;
-        for (const id of ids) {
-          try {
-            moved.push([id, await api.moveVideo(id, dir)]);
-          } catch {
-            failed += 1;
-          }
-        }
-        retargetVideosLocally(moved);
-        setSelectedIds(new Set());
-        const ok = moved.length;
-        notify(failed > 0 ? `已移动 ${ok} 个，${failed} 个失败（可能被占用或目标重名冲突）` : `已将 ${ok} 个视频移动到目标文件夹。`, failed > 0 ? "error" : "info");
-        setMovingSelected(false);
-        return true;
-      },
-    });
-  }, [selectedIds, retargetVideosLocally, notify]);
 
   // M 即移动勾选：与 Del 同一套门禁（播放器/历史面板/移动对话框盖在上面时让位）
   useMoveShortcut(handleMoveSelected,
@@ -421,9 +374,19 @@ function App() {
   const activeError = tab === "image" ? imagesError : libraryError;
   const clearActiveError = tab === "image" ? clearImagesError : clearLibraryError;
 
+  // 左侧目录栏显隐开关，记住用户上次的选择
+  const [sidebarVisible, setSidebarVisible] = useState(() => localStorage.getItem(SIDEBAR_VISIBLE_KEY) !== "0");
+  const toggleSidebar = useCallback(() => {
+    setSidebarVisible(v => {
+      localStorage.setItem(SIDEBAR_VISIBLE_KEY, v ? "0" : "1");
+      return !v;
+    });
+  }, []);
+
   return (
     <div className="library-shell h-screen w-screen flex text-white overflow-hidden">
-      <Sidebar
+      {sidebarVisible && (
+        <Sidebar
         tab={tab}
         onTabChange={changeTab}
         videos={videos}
@@ -448,6 +411,15 @@ function App() {
         removingRoot={removingRoot}
         onRemoveRoot={handleRemoveRoot}
       />
+      )}
+      <button
+        onClick={toggleSidebar}
+        className="shrink-0 w-7 self-stretch grid place-items-center text-gray-500 hover:text-white hover:bg-white/5 transition"
+        title={sidebarVisible ? "隐藏侧栏" : "显示侧栏"}
+        aria-label={sidebarVisible ? "隐藏侧栏" : "显示侧栏"}
+      >
+        {sidebarVisible ? "‹" : "›"}
+      </button>
       <main className="library-main flex-1 flex flex-col gap-5 overflow-hidden">
         {(activeError || notice) && (
           <div role="alert" className="bg-amber-900/80 text-amber-100 px-3 py-2 rounded text-sm flex justify-between items-center">
@@ -545,7 +517,6 @@ function App() {
       </main>
       {!useExternalPlayer && currentVideo && (
         <PlayerView
-          key={currentVideo.id}
           video={currentVideo}
           initialPosition={initialPosition}
           onClose={handleClosePlayer}

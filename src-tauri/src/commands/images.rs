@@ -13,7 +13,7 @@ use super::scan::{
 };
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbEntry, ThumbJob};
-use super::videos::move_file;
+use super::videos::{move_file, same_target_dir};
 use super::{undeleted_targets, AppState, MapErrStr};
 
 /// 扫描任务的完整产出：新文件、可清理的旧 id、告警、摘要。
@@ -368,8 +368,9 @@ pub async fn fix_mismatched_extensions(
     };
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let conn = state.db.lock().map_err_str()?;
         let mut report = ExtensionFixReport { renamed: 0, already_matched: 0, unrecognized: 0, failed: 0 };
+        // 文件探测与改名全程不持数据库锁：锁只圈住最后的路径写库
+        let mut renamed: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // (id, 新路径, 原路径)
         for (id, path) in rows {
             let p = Path::new(&path);
             // 磁盘上已经不在的记录等扫描去清，这里不管
@@ -405,13 +406,25 @@ pub async fn fix_mismatched_extensions(
                 report.failed += 1;
                 continue;
             }
-            // 写库失败把文件移回原位：库记录和磁盘必须说同一个故事
-            if db::update_image_path(&conn, &id, &target.to_string_lossy()).is_err() {
-                let _ = std::fs::rename(&target, p);
-                report.failed += 1;
-                continue;
+            renamed.push((id, target, p.to_path_buf()));
+        }
+        // 写库失败的把文件移回原位：库记录和磁盘必须说同一个故事（回退改名在锁外做）
+        let mut rollback: Vec<PathBuf> = Vec::new(); // 写库失败的新路径
+        {
+            let conn = state.db.lock().map_err_str()?;
+            for (id, target, _) in &renamed {
+                if db::update_image_path(&conn, id, &target.to_string_lossy()).is_ok() {
+                    report.renamed += 1;
+                } else {
+                    rollback.push(target.clone());
+                }
             }
-            report.renamed += 1;
+        }
+        for (_, target, original) in &renamed {
+            if rollback.contains(target) {
+                let _ = std::fs::rename(target, original);
+                report.failed += 1;
+            }
         }
         Ok(report)
     })
@@ -478,11 +491,7 @@ pub async fn move_image(
             .to_string_lossy()
             .to_string();
         let dir = Path::new(&target_dir);
-        if dir
-            .join(&filename)
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&old_path)
-        {
+        if same_target_dir(&old_path, &target_dir) {
             return Err("文件已经在该目录中".into());
         }
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");

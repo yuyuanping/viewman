@@ -13,7 +13,6 @@ import type {
 
 /** 全部 Tauri 命令的类型化封装：组件与 hooks 一律经此调用，不散落裸 invoke */
 export const api = {
-  getVideos: () => invoke<Video[]>("get_videos"),
   getVideosWithProgress: () => invoke<VideoWithProgress[]>("get_videos_with_progress"),
   getRecentlyPlayed: () => invoke<RecentlyPlayed[]>("get_recently_played"),
   /** 完整播放历史（无条数上限） */
@@ -40,9 +39,6 @@ export const api = {
     invoke<number>("generate_thumbnails", { videoIds }),
   /** 启动续跑：登记上次中断留下的孤儿封面并接着生成，返回是否做了恢复 */
   resumeVideoThumbnails: () => invoke<boolean>("resume_thumbnails", { kind: "video" }),
-  /** 播放器截图：截当前帧存到视频同目录，返回输出路径 */
-  captureFrame: (videoId: string, position: number) =>
-    invoke<string>("capture_frame", { videoId, position }),
   checkPotplayer: () => invoke<boolean>("check_potplayer"),
   checkFfprobe: () => invoke<boolean>("check_ffprobe"),
   launchPotplayer: (videoPath: string, seek: number | null) =>
@@ -56,7 +52,6 @@ export const api = {
   /** 移除目录：忘掉扫描根并删除库内条目（磁盘文件不动），返回清除的条目数 */
   removeMediaDirectory: (kind: MediaKind, dir: string) =>
     invoke<number>("remove_media_directory", { kind, dir }),
-  getImages: () => invoke<Image[]>("get_images"),
   /** 图片库视图：目录前缀 + 文件名子串过滤已在后端做完，行序未定（排序在前端做） */
   getImageView: (dir: string | null, search: string) =>
     invoke<ImageViewPayload>("get_image_view", { dir, search }),

@@ -32,13 +32,6 @@ export interface ScanOutcome<T> {
   removed_ids: string[];
 }
 
-export interface WatchProgress {
-  id: string;
-  video_id: string;
-  position: number;
-  updated_at: string;
-}
-
 export interface VideoWithProgress {
   video: Video;
   position: number | null;

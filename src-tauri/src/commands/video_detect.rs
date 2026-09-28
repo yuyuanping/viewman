@@ -187,16 +187,18 @@ pub async fn find_duplicate_videos(
     };
     // 缓存的过期判断按"库里的记录数"，所以要在丢掉读不到 mtime 的那些之前数
     let library_count = all_rows.len();
-    let rows: Vec<(db::VideoSig, String)> = all_rows
-        .into_iter()
-        .filter_map(|row| {
-            let mtime = scanner::modified_stamp(Path::new(&row.path))?;
-            Some((row, mtime))
-        })
-        .collect();
     let thumb_dir = app.path().app_data_dir().map_err_str()?.join("thumbnails");
 
     let groups = tauri::async_runtime::spawn_blocking(move || {
+        // 磁盘上已经不存在的条目不参与判定；mtime 同时当指纹缓存的钥匙用。
+        // 逐文件 stat 挪进阻塞线程，别在 async 命令体里占住 tokio worker
+        let rows: Vec<(db::VideoSig, String)> = all_rows
+            .into_iter()
+            .filter_map(|row| {
+                let mtime = scanner::modified_stamp(Path::new(&row.path))?;
+                Some((row, mtime))
+            })
+            .collect();
         let _ = std::fs::create_dir_all(&thumb_dir);
         let mut anchors: Vec<Option<(u64, u64)>> = Vec::with_capacity(rows.len());
         let mut frames: Vec<Option<[(u64, u64); 2]>> = Vec::with_capacity(rows.len());

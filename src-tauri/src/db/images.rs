@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use super::like_escape;
 use rusqlite::{Connection, OptionalExtension, Result, params};
 
 use crate::models::Image;
@@ -50,17 +51,6 @@ pub fn get_image_thumbnail_entries(conn: &Connection) -> Result<Vec<(String, Str
     Ok(rows)
 }
 
-/// LIKE 通配符按 `ESCAPE '\'` 规则转义：目录和搜索词都是字面量，`%` `_` `\` 不能当通配符
-fn like_escape(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
 
 /// 目录过滤与前端 filterMedia 同一规则：统一 `\` 分隔、去结尾分隔符、
 /// 按「目录\」前缀匹配（含全部子目录）。模式里所有反斜杠翻倍、结尾是裸 `%` 通配符

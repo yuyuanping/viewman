@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::db;
+use rusqlite::Connection;
 use tauri::Manager;
 
 mod image_anim;
@@ -70,6 +72,13 @@ pub struct AppState {
 
 /// 命令返回的错误统一是 String（前端拿到就直接显示），所以满地 `.map_err(|e| e.to_string())`。
 /// 这个 trait 给它一个短名，少写 20 个字符也少一个闭包。
+/// 按 id 取视频路径，库里没有这条记录时报错
+pub(crate) fn video_path_or(conn: &Connection, video_id: &str) -> Result<String, String> {
+    db::get_video_path(conn, video_id)
+        .map_err_str()
+        .and_then(|p| p.ok_or_else(|| format!("Video not found: {}", video_id)))
+}
+
 pub trait MapErrStr<T> {
     /// `x.map_err(|e| e.to_string())` → `x.map_err_str()`
     fn map_err_str(self) -> Result<T, String>;

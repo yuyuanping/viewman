@@ -1,10 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::commands::MapErrStr;
-
 static EXE_NAMES: &[&str] = &["PotPlayer.exe", "PotPlayerMini.exe", "PotPlayerMini64.exe"];
-static INI_NAMES: &[&str] = &["PotPlayer.ini", "PotPlayerMini.ini"];
 
 static BASE_DIRS: &[&str] = &[
     r"C:\Program Files\DAUM\PotPlayer",
@@ -88,105 +85,6 @@ pub fn get_status(video_path: &str) -> PotPlayerStatus {
     } else {
         PotPlayerStatus { running: false, state: "stopped", position: None, position_source: None }
     }
-}
-
-pub fn enable_titlebar_time() -> Result<(), String> {
-    let ini_path = find_or_create_ini()?;
-    let content = std::fs::read_to_string(&ini_path).map_err_str()?;
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-
-    const TARGET_KEY: &str = "ShowCurrentTimeInTitle";
-
-    let mut osd_start: Option<usize> = None;
-    let mut osd_end: Option<usize> = None;
-
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("[osd]") {
-            osd_start = Some(i);
-            continue;
-        }
-        if osd_start.is_some() && osd_end.is_none()
-            && trimmed.starts_with('[') {
-                osd_end = Some(i);
-            }
-    }
-
-    if let Some(start) = osd_start {
-        let end = osd_end.unwrap_or(lines.len());
-        for i in start + 1..end {
-            let trimmed = lines[i].trim();
-            let lower = trimmed.to_lowercase();
-            if lower.contains(TARGET_KEY.to_lowercase().as_str()) {
-                let parts: Vec<&str> = trimmed.splitn(2, '=').collect();
-                if parts.len() == 2 && parts[1].trim() != "1" {
-                    lines[i] = format!("{}={}", parts[0], 1);
-                    std::fs::write(&ini_path, lines.join("\r\n")).map_err_str()?;
-                    return Ok(());
-                }
-                return Ok(());
-            }
-        }
-        lines.insert(end, format!("{}={}", TARGET_KEY, 1));
-    } else {
-        lines.push(String::new());
-        lines.push(format!("[{}]", "OSD"));
-        lines.push(format!("{}={}", TARGET_KEY, 1));
-    }
-
-    std::fs::write(&ini_path, lines.join("\r\n")).map_err_str()
-}
-
-fn find_or_create_ini() -> Result<PathBuf, String> {
-    if let Some(p) = find_ini_file() {
-        return Ok(p);
-    }
-
-    let (dir, ini_name) = if let Some(exe) = find_potplayer() {
-        let parent = exe.parent().ok_or_else(|| "no parent dir".to_string())?;
-        let name = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let ini_name = if name.starts_with("PotPlayerMini") { "PotPlayerMini.ini" } else { "PotPlayer.ini" };
-        (parent.to_path_buf(), ini_name.to_string())
-    } else {
-        let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not found".to_string())?;
-        let d = PathBuf::from(&appdata).join("PotPlayer");
-        std::fs::create_dir_all(&d).map_err_str()?;
-        (d, "PotPlayerMini.ini".to_string())
-    };
-
-    let path = dir.join(&ini_name);
-    std::fs::write(&path, "").map_err_str()?;
-    Ok(path)
-}
-
-fn find_ini_file() -> Option<PathBuf> {
-    if let Some(exe_path) = find_potplayer() {
-        let dir = exe_path.parent()?;
-        for name in INI_NAMES {
-            let p = dir.join(name);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-
-    let appdata = std::env::var("APPDATA").ok()?;
-    for name in INI_NAMES {
-        let p = PathBuf::from(&appdata).join("PotPlayer").join(name);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    let local_appdata = std::env::var("LOCALAPPDATA").ok()?;
-    for name in INI_NAMES {
-        let p = PathBuf::from(&local_appdata).join("PotPlayer").join(name);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    None
 }
 
 #[allow(clippy::upper_case_acronyms)] // Win32 API 惯例名

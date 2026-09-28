@@ -6,7 +6,7 @@ import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
 import { GroupReviewPanel } from "./GroupReviewPanel";
 import { TemplateMatchPanel } from "./TemplateMatchPanel";
-import { MoveTargetsDialog, type MovePrompt } from "./MoveTargetsDialog";
+import { MoveTargetsDialog } from "./MoveTargetsDialog";
 import { api } from "../api";
 import type { ImageStatsPayload } from "../api";
 import { STALE_RESULT_NOTE } from "../detectionCache";
@@ -16,6 +16,7 @@ import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicateGroups } from "../hooks/useDuplicateGroups";
 import { useDeleteShortcut, useMoveShortcut } from "../hooks/useDeleteShortcut";
 import { useRangeSelect } from "../hooks/useRangeSelect";
+import { useBatchSelection } from "../hooks/useBatchSelection";
 import { useSimilarDetection } from "../hooks/useSimilarDetection";
 import { useTemplateSearch } from "../hooks/useTemplateSearch";
 import { selectedDirectoryLabel, sortMedia } from "../libraryFilter";
@@ -44,9 +45,6 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [deletingSelected, setDeletingSelected] = useState(false);
-  // 「移动到…」目录列表对话框：批量移动、查看器移动共用一个，onPick 里带着各自的收尾
-  const [movePrompt, setMovePrompt] = useState<MovePrompt | null>(null);
   // 打开查看器时的列表快照：翻页范围固定，不受后续刷新影响
   const [viewerList, setViewerList] = useState<Image[]>([]);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
@@ -223,15 +221,19 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
 
   const { toggleSelect, selectAt } = useRangeSelect(filteredImages, setSelectedIds);
 
-  const allSelected = filteredImages.length > 0 && filteredImages.every(i => selectedIds.has(i.id));
-  const toggleSelectAll = useCallback(() => {
-    setSelectedIds(allSelected ? new Set() : new Set(filteredImages.map(i => i.id)));
-  }, [allSelected, filteredImages]);
-
-  const exitSelectMode = useCallback(() => {
-    setSelectMode(false);
-    setSelectedIds(new Set());
-  }, []);
+  const {
+    allSelected, toggleSelectAll, exitSelectMode,
+    deletingSelected, movingSelected, movePrompt, setMovePrompt,
+    handleDeleteSelected, handleMoveSelected,
+  } = useBatchSelection({
+    view: filteredImages,
+    selectedIds, setSelectedIds, setSelectMode,
+    notify,
+    noun: "图片", measure: "张", kind: "image",
+    trash: trashImages,
+    moveOne: async (id, dir) => { await api.moveImage(id, dir); return id; },
+    afterMove: () => refreshLibrary(),
+  });
 
   // 动图检测：后端按文件头数帧，命中即高亮；「勾选」把当前列表里的动图送进多选，
   // 删除仍复用「删除所选」那条通路（confirm + 回收站），不再另造一键删除
@@ -280,59 +282,11 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     return () => { disposed = true; };
   }, [libraryVersion, animatedIds]);
 
-  const handleDeleteSelected = useCallback(async () => {
-    const ids = [...selectedIds];
-    if (ids.length === 0) return;
-    if (!confirm(`确定将选中的 ${ids.length} 张图片移入回收站？`)) return;
-    setDeletingSelected(true);
-    let ok = 0;
-    try {
-      ok = (await trashImages(ids)).length;
-    } catch (e) {
-      notify(`删除失败：${String(e)}`, "error");
-    }
-    const failed = ids.length - ok;
-    setSelectedIds(new Set());
-    notify(failed > 0 ? `已删除 ${ok} 张，${failed} 张失败（可能被占用）` : `已将 ${ok} 张图片移入回收站。`, failed > 0 ? "error" : "info");
-    setDeletingSelected(false);
-  }, [selectedIds, trashImages, notify]);
-
   // Del 即删勾选：只要有待删清单就生效，不再要求多选模式——分组面板里点卡片勾选
   // 不经过 selectMode，旧条件会让 Del 在面板里静默失灵。查看器或移动对话框盖在
   // 最上层时让位，免得在遮罩后批量删掉看不见的条目
   useDeleteShortcut(handleDeleteSelected,
     selectedIds.size > 0 && viewerIndex === null && !deletingSelected && movePrompt === null);
-
-  // 多选批量移动：弹出目标目录列表，选定后逐个 move，失败只计数不中断
-  const [movingSelected, setMovingSelected] = useState(false);
-  const handleMoveSelected = useCallback(async () => {
-    const ids = [...selectedIds];
-    if (ids.length === 0) return;
-    setMovePrompt({
-      kind: "image",
-      noun: "图片",
-      count: ids.length,
-      onPick: async (dir) => {
-        if (!confirm(`将选中的 ${ids.length} 张图片移动到:\n${dir}`)) return false;
-        setMovingSelected(true);
-        let ok = 0;
-        let failed = 0;
-        for (const id of ids) {
-          try {
-            await api.moveImage(id, dir);
-            ok += 1;
-          } catch {
-            failed += 1;
-          }
-        }
-        await refreshLibrary();
-        setSelectedIds(new Set());
-        notify(failed > 0 ? `已移动 ${ok} 张，${failed} 张失败（可能被占用或目标重名冲突）` : `已将 ${ok} 张图片移动到目标文件夹。`, failed > 0 ? "error" : "info");
-        setMovingSelected(false);
-        return true;
-      },
-    });
-  }, [selectedIds, refreshLibrary, notify]);
 
   // M 即移动勾选：与 Del 同一套门禁（查看器或移动对话框盖在上面时让位，查看器里 M 移动的是当前这张）
   useMoveShortcut(handleMoveSelected,
@@ -377,12 +331,19 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
   const handleViewerDelete = useCallback(async (image: Image) => {
     const deleted = await trashImages([image.id]);
     if (deleted.length === 0) return;
+    // 这张若此前被手动勾在多选里，删掉后从勾选集剔除，别让死 id 混进"删除所选"虚报失败数
+    setSelectedIds(prev => {
+      if (!prev.has(image.id)) return prev;
+      const next = new Set(prev);
+      next.delete(image.id);
+      return next;
+    });
     const remaining = viewerList.filter(i => i.id !== image.id);
     setViewerList(remaining);
     if (remaining.length === 0) setViewerIndex(null);
     else setViewerIndex(prev => Math.min(prev ?? 0, remaining.length - 1));
     notify("已将图片移入回收站。");
-  }, [viewerList, trashImages, notify]);
+  }, [viewerList, trashImages, notify, setSelectedIds]);
 
   // 查看器里移动当前这张（M）：弹出目标目录列表，选定后移动；移完图已不在当前
   // 视图口径里，与删除一样就地接着看下一张。用户在确认框反悔或移动失败时不翻页
@@ -400,6 +361,12 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           return false;
         }
         await refreshLibrary();
+        setSelectedIds(prev => {
+          if (!prev.has(image.id)) return prev;
+          const next = new Set(prev);
+          next.delete(image.id);
+          return next;
+        });
         const remaining = viewerList.filter(i => i.id !== image.id);
         setViewerList(remaining);
         if (remaining.length === 0) setViewerIndex(null);
@@ -408,7 +375,7 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
         return true;
       },
     });
-  }, [viewerList, refreshLibrary, notify]);
+  }, [viewerList, refreshLibrary, notify, setSelectedIds]);
 
   return (
     <>

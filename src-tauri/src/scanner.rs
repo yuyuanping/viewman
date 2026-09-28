@@ -67,6 +67,15 @@ fn image_input_opts(path: &str) -> &'static [&'static str] {
     }
 }
 
+/// ffmpeg 非零退出时的错误信息：取 stderr 末行，通常就是根因
+pub(crate) fn ffmpeg_err(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .last()
+        .unwrap_or("ffmpeg 执行失败")
+        .to_string()
+}
+
 pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
     let output = hidden_command("ffprobe")
         .args(image_input_opts(path))
@@ -532,12 +541,7 @@ pub fn transcode_to_h264(video_path: &str, out_path: &Path) -> Result<(), String
         .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
     if !output.status.success() {
         let _ = fs::remove_file(out_path);
-        let detail = String::from_utf8_lossy(&output.stderr)
-            .lines()
-            .last()
-            .unwrap_or("ffmpeg 执行失败")
-            .to_string();
-        return Err(detail);
+        return Err(ffmpeg_err(&output));
     }
     match fs::metadata(out_path) {
         Ok(m) if m.len() > 0 => Ok(()),
@@ -596,12 +600,7 @@ pub fn extract_full_frame(video_path: &str, out_path: &Path) -> Result<(), Strin
         .output()
         .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
     if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr)
-            .lines()
-            .last()
-            .unwrap_or("ffmpeg 执行失败")
-            .to_string();
-        return Err(detail);
+        return Err(ffmpeg_err(&output));
     }
     match fs::metadata(out_path) {
         Ok(m) if m.len() > 0 => Ok(()),
@@ -645,12 +644,7 @@ pub fn extract_thumbnail(
             .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
 
         if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .last()
-                .unwrap_or("ffmpeg 执行失败")
-                .to_string();
-            return Err(detail);
+            return Err(ffmpeg_err(&output));
         }
 
         // seek 点无帧时 ffmpeg 仍可能以 0 退出，但不会写出有效文件

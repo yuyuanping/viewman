@@ -1,7 +1,7 @@
 use tauri::{Manager, State};
 
 use crate::db;
-use crate::models::{RecentlyPlayed, VideoProgress, WatchProgress};
+use crate::models::{RecentlyPlayed, VideoProgress};
 
 use super::{AppState, MapErrStr};
 
@@ -11,13 +11,14 @@ pub fn save_progress(state: State<AppState>, video_id: String, position: f64) ->
         return Err(format!("非法的播放位置: {}", position));
     }
     let conn = state.db.lock().map_err_str()?;
+    // 先确认视频还在库里：FK 违规的原始报错换成用户能看懂的提示
+    if db::get_video_path(&conn, &video_id)
+        .map_err_str()?
+        .is_none()
+    {
+        return Err(format!("视频不存在或已被删除: {}", video_id));
+    }
     db::upsert_progress(&conn, &video_id, position).map_err_str()
-}
-
-#[tauri::command]
-pub fn get_progress(state: State<AppState>, video_id: String) -> Result<Option<WatchProgress>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_progress(&conn, &video_id).map_err_str()
 }
 
 #[tauri::command]
@@ -43,9 +44,15 @@ pub async fn get_recently_played(app: tauri::AppHandle) -> Result<Vec<RecentlyPl
     .map_err_str()?
 }
 
-/// 完整播放历史：watch_progress 全表按时间倒序（侧栏"播放记录"只有最近 30 条）
+/// 完整播放历史：watch_progress 全表按时间倒序（侧栏"播放记录"只有最近 30 条）。
+/// 全表 join + 序列化是秒级开销，扔进阻塞线程池，别堵主线程。
 #[tauri::command]
-pub fn get_play_history(state: State<AppState>) -> Result<Vec<RecentlyPlayed>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_recently_played(&conn, i64::MAX).map_err_str()
+pub async fn get_play_history(app: tauri::AppHandle) -> Result<Vec<RecentlyPlayed>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_recently_played(&conn, i64::MAX).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }

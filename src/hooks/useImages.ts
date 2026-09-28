@@ -19,6 +19,8 @@ export function useImages() {
   const [error, setError] = useState<string | null>(null);
   const [rescanStatus, setRescanStatus] = useState<RescanStatus | null>(null);
   const refreshTimer = useRef<number | null>(null);
+  /** 等待本轮刷新完成的调用方：后到的 join 先到的同一轮，谁的 Promise 都不会被丢弃 */
+  const refreshWaiters = useRef<Array<() => void>>([]);
 
   useEffect(() => () => {
     if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
@@ -26,17 +28,25 @@ export function useImages() {
 
   /** 库内容变了：统计重拉、代次前进让 ImageLibrary 重拉视图。
    *  19 万行的视图整表过桥一次要好几秒（查询+序列化+解析+排序），短时间内的
-   *  多次推进合并成一次，不然每个扫描根扫完都卡一下 */
+   *  多次推进合并成一次，不然每个扫描根扫完都卡一下。
+   *  已有待触发的刷新时后来者直接 join，不再重置计时——重置会清掉先到调用者的
+   *  定时器，让它返回的 Promise 永远不 resolve，await 方（删除/移动/扫描）全部挂死 */
   const refresh = useCallback(async () => {
-    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
     return new Promise<void>(resolve => {
+      if (refreshTimer.current !== null) {
+        refreshWaiters.current.push(resolve);
+        return;
+      }
+      refreshWaiters.current.push(resolve);
       refreshTimer.current = window.setTimeout(async () => {
         refreshTimer.current = null;
+        const waiters = refreshWaiters.current;
+        refreshWaiters.current = [];
         setLibraryVersion(v => v + 1);
         try {
           setImageStats(await api.getImageStats());
         } catch { /* 统计拉不动就先留旧的，下轮刷新再试 */ }
-        resolve();
+        waiters.forEach(resolve => resolve());
       }, REFRESH_DEBOUNCE_MS);
     });
   }, []);

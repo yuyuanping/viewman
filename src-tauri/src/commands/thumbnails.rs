@@ -5,7 +5,7 @@ use tauri::{Emitter, Manager, State};
 use crate::db;
 use crate::scanner;
 
-use super::{AppState, MapErrStr};
+use super::{video_path_or, AppState, MapErrStr};
 
 #[derive(Clone, serde::Serialize)]
 pub struct ThumbnailProgress {
@@ -496,16 +496,25 @@ pub async fn capture_frame(
 ) -> Result<String, String> {
     let path = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_video_path(&conn, &video_id)
-            .map_err_str()?
-            .ok_or_else(|| format!("Video not found: {}", video_id))?
+        video_path_or(&conn, &video_id)?
     };
 
     tauri::async_runtime::spawn_blocking(move || {
         let src = std::path::Path::new(&path);
         let parent = src.parent().ok_or("无法确定视频所在目录")?;
         let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "frame".into());
-        let stamp = if position > 0.0 { format!("_{:02}m{:02}s", (position / 60.0).floor() as u32, (position % 60.0).round() as u32) } else { "_start".to_string() };
+        // 文件名带毫秒：只到秒的话同一位置重复截图会静默覆盖上一张
+        let stamp = if position > 0.0 {
+            let ms = ((position * 1000.0).round() % 1000.0) as u32;
+            format!(
+                "_{:02}m{:02}s{:03}",
+                (position / 60.0).floor() as u32,
+                (position % 60.0).round() as u32,
+                ms
+            )
+        } else {
+            "_start".to_string()
+        };
         let out = parent.join(format!("{}_{}.png", stem, stamp));
 
         // -ss 0 不传：ffmpeg 62 对 image2/mjpeg 的 0 偏移 seek 会跳过唯一一帧（同 extract_thumbnail）

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import type { ScanProgressPayload } from "../api";
+import { useTauriEvent } from "./useTauriEvent";
 import type { RescanStatus } from "./useVideos";
 
 /** 订阅后端扫描进度事件；自动重扫切换目录时清掉上一目录遗留的文件计数。
@@ -12,11 +12,10 @@ export function useScanProgress(
 ) {
   const [scanProgress, setScanProgress] = useState<{ processed: number; total: number } | null>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    listen<ScanProgressPayload>(event, (received) => {
-      const { processed, total, done, warnings, summary } = received.payload;
+  useTauriEvent<ScanProgressPayload>(
+    event,
+    (payload) => {
+      const { processed, total, done, warnings, summary } = payload;
       setScanProgress(done ? null : { processed, total });
       if (warnings?.length) onNotice(warnings.join("；"));
       // 扫描完成：有实际变更才提示，让"扫了一圈什么都没变"保持安静
@@ -27,11 +26,9 @@ export function useScanProgress(
         if (summary.refreshed > 0) parts.push(`刷新 ${summary.refreshed}`);
         if (parts.length > 0) onNotice(`扫描完成：${parts.join("，")}`);
       }
-    }).then((fn) => {
-      if (disposed) fn(); else unlisten = fn;
-    }).catch(e => onNotice(`扫描进度监听失败：${String(e)}`));
-    return () => { disposed = true; unlisten?.(); };
-  }, [onNotice, event]);
+    },
+    (e) => onNotice(`扫描进度监听失败：${String(e)}`),
+  );
 
   useEffect(() => {
     if (rescanStatus) setScanProgress(null);

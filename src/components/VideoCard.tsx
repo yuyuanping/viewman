@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
 import type { Video } from "../types";
-import { formatDuration, formatFileSize } from "../utils";
+import { copyToClipboard, formatDuration, formatFileSize } from "../utils";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface VideoCardProps {
@@ -46,6 +46,13 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
       alert("打开文件所在位置失败: " + err);
     }
   };
+  const copyFilename = async () => {
+    try {
+      await copyToClipboard(video.filename);
+    } catch (err) {
+      alert("复制文件名失败: " + err);
+    }
+  };
   const progressPct = progress !== null && video.duration && video.duration > 0
     ? Math.max(0, Math.min(100, (progress / video.duration) * 100)) : 0;
   const extension = video.filename.split(".").pop()?.toUpperCase() || "VIDEO";
@@ -56,7 +63,12 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
     setDeleting(true);
     try {
       const deleted = await api.deleteVideos([video.id]);
-      if (deleted.length > 0) onDeleted(video.id);
+      if (deleted.length > 0) {
+        onDeleted(video.id);
+      } else {
+        alert("删除失败：文件可能被占用或已不在库中。");
+        setDeleting(false);
+      }
     } catch (err) {
       alert("删除失败: " + err);
       setDeleting(false);
@@ -179,6 +191,9 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
         >
           <button type="button" onClick={() => { setMenu(null); void openContainingFolder(); }}>
             打开文件所在位置
+          </button>
+          <button type="button" onClick={() => { setMenu(null); void copyFilename(); }}>
+            复制文件名
           </button>
           <button type="button" disabled={moving} onClick={() => { setMenu(null); void handleMove(); }}>
             {moving ? "移动中…" : "移动到…"}
