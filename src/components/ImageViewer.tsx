@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Image } from "../types";
 import { formatFileSize, formatResolution } from "../utils";
+import { isMovePromptOpen } from "../hooks/useDeleteShortcut";
 
 interface ImageViewerProps {
   images: Image[];
@@ -11,6 +12,10 @@ interface ImageViewerProps {
   onClose: () => void;
   /** 删除由父层负责：删完后决定是前进到下一张还是关闭 */
   onDelete: (image: Image) => Promise<void>;
+  /** 移动由父层负责（弹目录选择器 + 落库后刷新）：移完同样前进到下一张；不给就不响应 M */
+  onMove?: (image: Image) => Promise<void>;
+  /** 以当前这张为模板找库内相似图；不给就不显示工具栏按钮 */
+  onFindSimilar?: (image: Image) => void;
 }
 
 /** 滚轮每档缩放倍率；缩放范围 clamp 在 10%–800% */
@@ -24,8 +29,8 @@ const SLIDE_DELAYS = [2, 5, 10] as const;
 
 const clampScale = (v: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
 
-/** 全屏查看当前列表中的图片：← → 翻页，Esc 关闭，滚轮缩放，拖拽平移，R 旋转，0 适应窗口 */
-export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: ImageViewerProps) {
+/** 全屏查看当前列表中的图片：← → 翻页，Esc 关闭，Del 删除当前张，M 移动当前张，滚轮缩放，拖拽平移，R 旋转，0 适应窗口 */
+export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMove, onFindSimilar }: ImageViewerProps) {
   // zoom=null 表示"适应窗口"；数字是相对原图的缩放倍率
   const [zoom, setZoom] = useState<number | null>(null);
   const [rotation, setRotation] = useState(0);
@@ -116,6 +121,27 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: Im
     setZoom(prev => (prev === 1 ? null : 1));
   }, []);
 
+  /** 删除当前这张：先确认再交给父层，按钮和 Del 快捷键共用这条通路 */
+  const deleteCurrent = useCallback(async () => {
+    if (!image) return;
+    if (!confirm(`确定要删除 "${image.filename}" 到回收站？`)) return;
+    try {
+      await onDelete(image);
+    } catch (err) {
+      alert("删除失败: " + err);
+    }
+  }, [image, onDelete]);
+
+  /** 移动当前这张：目录选择与确认在父层，这里只管发起和报错 */
+  const moveCurrent = useCallback(async () => {
+    if (!image || !onMove) return;
+    try {
+      await onMove(image);
+    } catch (err) {
+      alert("移动失败: " + err);
+    }
+  }, [image, onMove]);
+
   const handleDragStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const stage = stageRef.current;
@@ -138,9 +164,13 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: Im
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // 移动对话框盖在上面时整层让位（Esc 由对话框的捕获监听截下，到不了这里）
+      if (isMovePromptOpen()) return;
       if (e.key === "Escape") { onClose(); }
       else if (e.key === "ArrowLeft") { setSlideDelay(null); go(-1); }
       else if (e.key === "ArrowRight") { setSlideDelay(null); go(1); }
+      else if (e.key === "Delete") { e.preventDefault(); void deleteCurrent(); }
+      else if ((e.key === "m" || e.key === "M") && onMove) { e.preventDefault(); void moveCurrent(); }
       else if (e.key === "1" || e.key === "f") toggleActualSize();
       else if (e.key === "r" || e.key === "R") setRotation(r => (r + 90) % 360);
       else if (e.key === "0") setZoom(null);
@@ -151,7 +181,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: Im
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, onClose, toggleActualSize]);
+  }, [go, onClose, toggleActualSize, deleteCurrent, moveCurrent, onMove]);
 
   // 幻灯片：定时翻页；到末尾一张即停（不循环）
   useEffect(() => {
@@ -164,15 +194,6 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: Im
   }, [slideDelay, index, images.length, onNavigate]);
 
   if (!image) return null;
-
-  const handleDelete = async () => {
-    if (!confirm(`确定要删除 "${image.filename}" 到回收站？`)) return;
-    try {
-      await onDelete(image);
-    } catch (err) {
-      alert("删除失败: " + err);
-    }
-  };
 
   const zoomLabel = zoom === null ? "适应窗口" : zoom === 1 ? "1:1 原始尺寸" : `${Math.round(zoom * 100)}%`;
 
@@ -187,6 +208,16 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: Im
         <button type="button" className="toolbar-chip" onClick={() => setRotation(r => (r + 90) % 360)} title="旋转 90°（R）">
           旋转
         </button>
+        {onFindSimilar && (
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={() => onFindSimilar(image)}
+            title="以这张图为模板，找出库内与它相似的图片"
+          >
+            找相似
+          </button>
+        )}
         {slideDelay === null ? (
           <button
             type="button"
@@ -221,7 +252,12 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete }: Im
         >
           打开位置
         </button>
-        <button type="button" className="toolbar-chip" onClick={handleDelete} title="移入回收站">
+        {onMove && (
+          <button type="button" className="toolbar-chip" onClick={() => void moveCurrent()} title="移动到其他文件夹（M）">
+            移动
+          </button>
+        )}
+        <button type="button" className="toolbar-chip" onClick={() => void deleteCurrent()} title="移入回收站（Del）">
           删除
         </button>
         <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc）" aria-label="关闭查看器">

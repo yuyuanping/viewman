@@ -7,6 +7,8 @@ use super::{AppState, MapErrStr};
 
 pub(crate) const SCAN_ROOTS_KEY: &str = "scan_roots";
 pub(crate) const IMAGE_SCAN_ROOTS_KEY: &str = "image_scan_roots";
+pub(crate) const VIDEO_MOVE_TARGETS_KEY: &str = "video_move_targets";
+pub(crate) const IMAGE_MOVE_TARGETS_KEY: &str = "image_move_targets";
 
 /// 视频库与图片库各存一份目录清单，互不干扰（键名沿用旧的 scan_roots，老用户不丢记录）
 pub(crate) fn roots_key(kind: &str) -> Result<&'static str, String> {
@@ -22,10 +24,16 @@ pub(crate) fn roots_key(kind: &str) -> Result<&'static str, String> {
 pub fn load_scan_roots(state: State<AppState>, kind: String) -> Result<Vec<String>, String> {
     let key = roots_key(&kind)?;
     let conn = state.db.lock().map_err_str()?;
-    let raw = db::get_setting(&conn, key).map_err_str()?;
-    Ok(raw
+    Ok(load_roots(&conn, key))
+}
+
+/// 通用根表读取：JSON 解析失败按空清单处理
+pub(crate) fn load_roots(conn: &rusqlite::Connection, key: &str) -> Vec<String> {
+    db::get_setting(conn, key)
+        .ok()
+        .flatten()
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -36,6 +44,35 @@ pub fn save_scan_roots(
 ) -> Result<(), String> {
     let key = roots_key(&kind)?;
     let value = serde_json::to_string(&roots).map_err_str()?;
+    let conn = state.db.lock().map_err_str()?;
+    db::set_setting(&conn, key, &value).map_err_str()
+}
+
+/// 「移动到…」对话框里的目标目录清单：按媒体类型各存一份，由用户在对话框里添加/删除。
+/// 与扫描根分开存——移动落点和扫描范围是两回事，互不干扰
+fn move_targets_key(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "video" => Ok(VIDEO_MOVE_TARGETS_KEY),
+        "image" => Ok(IMAGE_MOVE_TARGETS_KEY),
+        other => Err(format!("未知的媒体类型: {}", other)),
+    }
+}
+
+#[tauri::command]
+pub fn load_move_targets(state: State<AppState>, kind: String) -> Result<Vec<String>, String> {
+    let key = move_targets_key(&kind)?;
+    let conn = state.db.lock().map_err_str()?;
+    Ok(load_roots(&conn, key))
+}
+
+#[tauri::command]
+pub fn save_move_targets(
+    state: State<AppState>,
+    kind: String,
+    targets: Vec<String>,
+) -> Result<(), String> {
+    let key = move_targets_key(&kind)?;
+    let value = serde_json::to_string(&targets).map_err_str()?;
     let conn = state.db.lock().map_err_str()?;
     db::set_setting(&conn, key, &value).map_err_str()
 }

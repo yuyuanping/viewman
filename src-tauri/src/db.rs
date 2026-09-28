@@ -56,7 +56,8 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             phash INTEGER,
             dhash INTEGER,
             sig_pixels BLOB,
-            sig_modified_at TEXT
+            sig_modified_at TEXT,
+            is_animated INTEGER
         );"
     )
 }
@@ -121,6 +122,10 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
     // 重复判定的最后一道看这 1KB 缩略像素：只有哈希撞车的候选才有，允许为空
     if !image_columns.is_empty() && !has_column("sig_pixels") {
         conn.execute("ALTER TABLE images ADD COLUMN sig_pixels BLOB", [])?;
+    }
+    // 动图判定缓存：NULL = 没判定过（新入库 / 文件改动后作废），判过就沿用结论
+    if !image_columns.is_empty() && !has_column("is_animated") {
+        conn.execute("ALTER TABLE images ADD COLUMN is_animated INTEGER", [])?;
     }
     Ok(())
 }

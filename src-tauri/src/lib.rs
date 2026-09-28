@@ -30,6 +30,14 @@ pub fn run() {
             });
             // 扫描根目录监视：文件变化防抖后自动增量扫描（失败不影响手动扫描）
             watcher::spawn(app.handle().clone());
+            // 后台清一轮孤儿缩略图：两张表都查无此 id 的缓存文件（失败不影响启动）
+            let cleanup_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let removed = commands::cleanup_orphan_thumbnail_files(&cleanup_app);
+                if removed > 0 {
+                    println!("cleaned {} orphan thumbnail files", removed);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -51,6 +59,8 @@ pub fn run() {
             commands::check_ffprobe,
             commands::load_scan_roots,
             commands::save_scan_roots,
+            commands::load_move_targets,
+            commands::save_move_targets,
             commands::delete_videos,
             commands::move_video,
             commands::check_potplayer,
@@ -67,9 +77,11 @@ pub fn run() {
             commands::scan_image_directory,
             commands::delete_images,
             commands::move_image,
+            commands::fix_mismatched_extensions,
             commands::generate_image_thumbnails,
             commands::find_duplicate_images,
             commands::find_similar_images,
+            commands::find_images_like_template,
             commands::find_animated_images,
             commands::get_similar_cache,
             commands::get_duplicate_cache,

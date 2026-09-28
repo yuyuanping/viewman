@@ -184,13 +184,14 @@ export function Sidebar({
       {isImageTab ? (
         <DirTree
           dirCounts={images?.dirs}
+          scopeRoots={roots}
           rootLabel="所有图片"
           selectedDir={selectedImageDir}
           onSelectDir={onSelectImageDir}
         />
       ) : (
         <>
-          <DirTree items={videos} rootLabel="所有视频" selectedDir={selectedDir} onSelectDir={onSelectDir} />
+          <DirTree items={videos} scopeRoots={roots} rootLabel="所有视频" selectedDir={selectedDir} onSelectDir={onSelectDir} />
           <RecentlyPlayedList items={recentlyPlayed} onPlay={onPlayVideo} />
         </>
       )}

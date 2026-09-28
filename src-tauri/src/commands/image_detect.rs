@@ -56,7 +56,39 @@ pub struct DuplicateCache {
 
 #[tauri::command]
 pub async fn get_similar_cache(app: tauri::AppHandle) -> Result<Option<SimilarCache>, String> {
-    read_cache(&app, SIMILAR_CACHE).await
+    let Some(mut cached): Option<SimilarCache> = read_cache(&app, SIMILAR_CACHE).await? else {
+        return Ok(None);
+    };
+    if cached.result.groups.is_empty() {
+        return Ok(Some(cached));
+    }
+    // 旧缓存可能是照着全库算的，会挂着扫描范围外的组员：恢复前按当前扫描根裁一遍，
+    // 跟现跑的口径一致，否则面板里会出现图片库看不到的图。裁到不足两张的组不再算一组。
+    // 裁剪要全表 LIKE 扫描 + 十几万 id 进集合，扔进阻塞线程池；这是启动恢复路径，别占主线程
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        let roots = super::settings::load_roots(&conn, super::settings::IMAGE_SCAN_ROOTS_KEY);
+        // 无扫描根 = 全库都在范围内，裁剪是恒等操作，别白跑一遍全表查询
+        if !roots.is_empty() {
+            let scoped: HashSet<String> = db::image_ids_in_scope(&conn, &roots)
+                .map_err_str()?
+                .into_iter()
+                .collect();
+            cached.result.groups = cached
+                .result
+                .groups
+                .into_iter()
+                .map(|group| group.into_iter().filter(|id| scoped.contains(id)).collect::<Vec<_>>())
+                .filter(|group| group.len() > 1)
+                .collect();
+            cached.result.far.retain(|id| scoped.contains(id));
+            cached.result.hashes.retain(|hit| scoped.contains(&hit.id));
+        }
+        Ok(Some(cached))
+    })
+    .await
+    .map_err_str()?
 }
 
 #[tauri::command]
@@ -79,17 +111,19 @@ pub async fn clear_detection_cache(app: tauri::AppHandle, which: String) -> Resu
 
 /// 只对还缺双指纹的行跑 ffmpeg，攒一批落一次库并推一次进度。
 /// 逐张 spawn ffmpeg 是这趟的全部代价，所以按线程分片（和相似检测同一套 14 线程上限）。
+/// `event` 是进度事件名（重复检测与模板匹配共用这套补算，各推各的频道）。
 /// 返回解不出图的张数。
 fn ensure_sigs(
     app: &tauri::AppHandle,
     rows: &[db::ImageSig],
     indexes: &[usize],
     pairs: &mut [Option<(u64, u64)>],
+    event: &'static str,
 ) -> usize {
     const EMIT_EVERY: usize = 256;
     const FLUSH_EVERY: usize = 64;
     let total = indexes.len();
-    let _ = app.emit("duplicate-progress", DuplicateProgress { processed: 0, total, stage: "sigs", skipped: 0, groups: Vec::new() });
+    let _ = app.emit(event, DuplicateProgress { processed: 0, total, stage: "sigs", skipped: 0, groups: Vec::new() });
     if total == 0 {
         return 0;
     }
@@ -125,7 +159,7 @@ fn ensure_sigs(
                     let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if processed % EMIT_EVERY == 0 || processed == total {
                         let _ = app.emit(
-                            "duplicate-progress",
+                            event,
                             DuplicateProgress { processed, total, stage: "sigs", skipped: failed.load(Ordering::Relaxed), groups: Vec::new() },
                         );
                     }
@@ -254,10 +288,11 @@ const PIX_GRID: usize = 32;
 /// 也就是重存/转格式的抖动基本都在 1 以内；两张不同的图随便就差到十几，这条线留着一个数量级。
 const PIX_MEAN_MAX: f64 = 2.0;
 const PIX_BIG_SHARE: f64 = 0.10;
-/// 32 档对不上时再试的两档。两张分辨率差得远的图缩到某个固定网格会撞上采样干涉——
-/// 实测同一张图在 32/64/96 档差 8 级、在 16/128/192 档只差 0.5 级，多试一档就少漏一批。
-/// 只有前一档对不上的候选才会走到这儿，所以代价只落在极少数条目上。
-const PIX_RESCUE_GRIDS: [usize; 2] = [96, 192];
+/// 32 档对不上时再试的三档。两张分辨率差得远的图缩到某个固定网格会撞上采样干涉——
+/// 实测同一张图在 32/64 档差 8 级、在 16/128/192 档只差 0.5 级，多试一档就少漏一批。
+/// 96/192 盖到 4 倍放大；8 倍放大在 96/192 都差 5 级上下、256 档差 1.84 过线，
+/// 所以再挂一档 256。只有前一档对不上的候选才会走到下一档，代价只落在极少数条目上。
+const PIX_RESCUE_GRIDS: [usize; 3] = [96, 192, 256];
 /// 32 档差过这个线就不再去试高分辨率档：真副本被采样干涉拉开也就到 8 级上下，
 /// 十几级开外的是平图/连环截图撞哈希，换档位也救不回来，而每一档都是一次 ffmpeg。
 const RESCUE_MEAN_MAX: f64 = 12.0;
@@ -370,7 +405,16 @@ fn group_bucket(rows: &[db::ImageSig], mut pool: Vec<Candidate>) -> Vec<Vec<Stri
 /// （5→470/114、6→382/84），多出来的基本都是撞车。
 /// 代价：候选从 74 张涨到 8,209 张，其中约 6.8 千张要现解 32 档像素（本机实测九分半，
 /// 解完就落库，第二次跑只剩零头）。
-const DUP_GATE: u32 = 4;
+/// 4 的线后来被两轮实测改写：
+/// ① 同一幅图换分辨率重存（1358×1920 → 1448×2048），pHash 一位不差、dHash 差 5 位，
+///    像素层 mean=0.93 明明是同一张——缩放采样正好翻动 dHash 的相邻梯度位，收到 5；
+/// ② "不考虑分辨率"这轮拿真实照片扫了 1/8x~8x 的整条倍率带：pHash 全程 0 位不差，
+///    dHash 最多差 6（1/32 倍即 42px 的缩略图），8 倍画质烂图差 3——5 的线把极端
+///    缩略图挡在像素层外面，收到 7。
+/// 代价可控：实库直方图每升一档只多几百个候选对（6→382 对、像素收下 84 对全是真重复），
+/// 收不收仍由像素层说了算。边界：抖动随缩略图的绝对像素数涨——真实照片 42px 差 6、
+/// 480p 的 1/32（15px）级别能差到 10，40px 以下的缩略图画面本身就糊成一片，不保。
+const DUP_GATE: u32 = 7;
 
 /// 用两枚感知哈希圈候选池：先做一次全量两两比对（和相似检测同一套按行分片，
 /// 18.3 万枚实测 13 秒），再把"两路距离都 ≤ 门槛"的边并成池。
@@ -447,7 +491,7 @@ pub async fn find_duplicate_images(
     let report = tauri::async_runtime::spawn_blocking(move || {
         let mut pairs: Vec<Option<(u64, u64)>> = rows.iter().map(|row| row.cached_sigs()).collect();
         let need_sigs: Vec<usize> = (0..rows.len()).filter(|&i| pairs[i].is_none()).collect();
-        let skipped = ensure_sigs(&app, &rows, &need_sigs, pairs.as_mut_slice());
+        let skipped = ensure_sigs(&app, &rows, &need_sigs, pairs.as_mut_slice(), "duplicate-progress");
 
         // 哈希差得远的到不了像素层，绝大多数条目在这一步就被排除
         let candidates = candidate_pools(&pairs, DUP_GATE);
@@ -796,6 +840,170 @@ fn emit_similar_progress(
     );
 }
 
+/// 模板匹配的一条命中：图片 id + 与模板的指纹距离
+/// （两枚感知哈希的距离**求和**，见 template_distance）
+#[derive(Clone, serde::Serialize)]
+pub struct TemplateMatch {
+    pub id: String,
+    pub distance: u32,
+}
+
+/// 模板匹配结论：按距离升序的命中清单 + 解不出指纹而没参与比对的张数
+#[derive(Clone, serde::Serialize)]
+pub struct TemplateMatchResult {
+    pub matches: Vec<TemplateMatch>,
+    pub skipped: usize,
+}
+
+/// 命中距离上限：与前端滑杆上限一致（48）。曾经想放到 64"让前端自己收"，
+/// 实测 sum≤64 有 11.4 万条命中——返回值白扛 6 MB、元数据再现查 45 MB，
+/// 纯属把洪峰搬过 IPC；滑杆之外的命中本来就显示不出来，不传。
+const TEMPLATE_DISTANCE_MAX: u32 = 48;
+
+/// 模板匹配的距离：两枚感知哈希的汉明距离**求和**，不取大。
+/// 取大是相似分组那边的从严口径——分组宁可漏不掉；以图搜图要的是召回，
+/// 一路指纹漂远（缩放/裁剪/重编码专门动 dHash 的相邻梯度）不该把整对否掉：
+/// 实测重存副本 dHash 就能漂 5~10 位，极端缩略图到 10+，取大时模板只认出
+/// pHash 也近的那一小半，求和后另一路够近就还有机会进清单，收不收由人拖滑杆。
+fn template_distance(phash: u64, dhash: u64, t_phash: u64, t_dhash: u64) -> u32 {
+    (phash ^ t_phash).count_ones() + (dhash ^ t_dhash).count_ones()
+}
+
+/// 模板匹配的进度事件负载（事件名 template-progress）：只报补算指纹的张数
+#[derive(Clone, serde::Serialize)]
+struct TemplateProgress {
+    processed: usize,
+    total: usize,
+}
+
+/// 以一张图为模板找库里的相似图（以图搜图）：模板算一遍双指纹，和全库逐一比汉明距离。
+/// 与 find_similar_images 的差别是方向反过来了——不是"谁跟谁成团"，而是"谁跟这张像"，
+/// 所以只做一趟一对一比对（18.6 万条毫秒级），指纹缺的现补（落库，下次就是零头）。
+/// 模板自己不进结果；同图副本距离 0，是最先该看到的那批。
+#[tauri::command]
+pub async fn find_images_like_template(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    image_id: String,
+) -> Result<TemplateMatchResult, String> {
+    if !crate::scanner::ffmpeg_available() {
+        return Err("未检测到 ffmpeg，无法计算图片指纹。请安装 ffmpeg 并加入 PATH。".into());
+    }
+    // 与相似检测同一口径：只比扫描范围内的图，文件已不在磁盘上的不参与
+    let mut rows: Vec<db::ImageSig> = {
+        let conn = state.db.lock().map_err_str()?;
+        let roots = super::settings::load_roots(&conn, super::settings::IMAGE_SCAN_ROOTS_KEY);
+        db::get_image_sigs_scoped(&conn, &roots).map_err_str()?
+    };
+    rows.retain(|row| Path::new(&row.path).exists());
+
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<TemplateMatchResult, String> {
+        let template_at = rows
+            .iter()
+            .position(|row| row.id == image_id)
+            .ok_or_else(|| "模板图已不在库里（可能刚被删除或移出扫描范围）。".to_string())?;
+        let mut pairs: Vec<Option<(u64, u64)>> = rows.iter().map(|row| row.cached_sigs()).collect();
+        // 模板没缓存指纹就先给自己算一份；缺 dhash 的旧行 cached_sigs 会整体当没有
+        if pairs[template_at].is_none() {
+            let (phash, dhash) = scanner::image_hashes(&rows[template_at].path)
+                .ok_or_else(|| "模板图解不出画面，没法当模板。".to_string())?;
+            pairs[template_at] = Some((phash, dhash));
+            let row = &rows[template_at];
+            if let Ok(conn) = app.state::<AppState>().db.lock() {
+                let _ = db::save_image_sigs(
+                    &conn,
+                    &[(row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone())],
+                );
+            }
+        }
+        let (t_phash, t_dhash) = pairs[template_at].unwrap();
+
+        // 缺指纹的现补：复用重复检测那套按线程分片的补算（进度推到 template-progress 频道），
+        // 补出来的直接拿进比对，落库留给下一趟当缓存
+        let need: Vec<usize> = (0..rows.len())
+            .filter(|&i| i != template_at && pairs[i].is_none())
+            .collect();
+        let _ = app.emit("template-progress", TemplateProgress { processed: 0, total: need.len() });
+        let (fresh, skipped) = ensure_sigs_for_template(&app, &rows, &need);
+        let mut fresh_by_id: HashMap<String, (u64, u64)> =
+            fresh.into_iter().map(|(id, p, d)| (id, (p, d))).collect();
+
+        let mut matches: Vec<TemplateMatch> = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            if index == template_at {
+                continue;
+            }
+            let sigs = fresh_by_id.remove(&row.id).or_else(|| pairs[index]);
+            match sigs {
+                Some((phash, dhash)) => {
+                    let dd = template_distance(phash, dhash, t_phash, t_dhash);
+                    if dd <= TEMPLATE_DISTANCE_MAX {
+                        matches.push(TemplateMatch { id: row.id.clone(), distance: dd });
+                    }
+                }
+                // 解不出画面的进不了比对：返回值里带上张数，别让"没匹配"被当成定论
+                None => {}
+            }
+        }
+        matches.sort_by(|a, b| a.distance.cmp(&b.distance).then_with(|| a.id.cmp(&b.id)));
+        Ok(TemplateMatchResult { matches, skipped })
+    })
+    .await
+    .map_err_str()??;
+
+    Ok(result)
+}
+
+/// 模板匹配里补缺失指纹：与 ensure_sigs 同一套线程分片和落库节奏，
+/// 但不回填 pairs（调用方只需要"这次算出了什么"），返回 (新指纹清单, 解不出图的张数)。
+fn ensure_sigs_for_template(
+    app: &tauri::AppHandle,
+    rows: &[db::ImageSig],
+    indexes: &[usize],
+) -> (Vec<(String, u64, u64)>, usize) {
+    const EMIT_EVERY: usize = 256;
+    const FLUSH_EVERY: usize = 64;
+    let total = indexes.len();
+    let mut fresh = std::sync::Mutex::new(Vec::<(String, u64, u64)>::new());
+    let done = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+    let threads = workers(total);
+
+    std::thread::scope(|s| {
+        for slot in 0..threads {
+            let (fresh, done, failed) = (&fresh, &done, &failed);
+            s.spawn(move || {
+                let mut batch: Vec<SigUpdate> = Vec::with_capacity(FLUSH_EVERY);
+                for (n, &index) in indexes.iter().enumerate() {
+                    if n % threads != slot {
+                        continue;
+                    }
+                    let row = &rows[index];
+                    if let Some((phash, dhash)) = scanner::image_hashes(&row.path) {
+                        lock_ignoring_poison(fresh).push((row.id.clone(), phash, dhash));
+                        batch.push((row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone()));
+                    } else {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if batch.len() >= FLUSH_EVERY {
+                        let _ = flush(app, &mut batch, db::save_image_sigs);
+                    }
+                    let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    if processed % EMIT_EVERY == 0 || processed == total {
+                        let _ = app.emit("template-progress", TemplateProgress { processed, total });
+                    }
+                }
+                if !batch.is_empty() {
+                    let _ = flush(app, &mut batch, db::save_image_sigs);
+                }
+            });
+        }
+    });
+
+    let fresh = std::mem::take(fresh.get_mut().unwrap_or_else(|e| e.into_inner()));
+    (fresh, failed.into_inner())
+}
+
 /// 找出"相似但不相同"的图片组（连拍/截图系列）：pHash + dHash 双指纹，两路都要 ≤ threshold。
 /// 与 find_duplicate_images 互补：字节级去重只认完全相同，这里抓视觉近似。
 /// 成组看的不是"有一条链连着"，而是"两端互为前 2 近邻"——闭包会把一片撞车的截图串成 3 万张一组。
@@ -817,13 +1025,15 @@ pub async fn find_similar_images(
         return Err("未检测到 ffmpeg，无法计算图片指纹。请安装 ffmpeg 并加入 PATH。".into());
     }
 
-    // 文件已经不在磁盘上的条目不参与聚类，也不用再白跑一遍解码
+    // 只比对扫描范围内的图：范围外的记录（如被移出根的落点）不进聚类，
+    // 与图片库视图同一口径。缓存的过期判断按"库里的记录数"，所以要在过滤之后数
     let mut rows: Vec<db::ImageSig> = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_image_sigs(&conn).map_err_str()?
+        let roots = super::settings::load_roots(&conn, super::settings::IMAGE_SCAN_ROOTS_KEY);
+        db::get_image_sigs_scoped(&conn, &roots).map_err_str()?
     };
-    // 缓存的过期判断按"库里的记录数"，所以要在过滤之前数
     let library_count = rows.len();
+    // 文件已经不在磁盘上的条目不参与聚类，也不用再白跑一遍解码
     rows.retain(|row| Path::new(&row.path).exists());
 
     let result = tauri::async_runtime::spawn_blocking(move || -> SimilarResult {
@@ -1081,6 +1291,68 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// 分辨率差异不再把重复图拆开（"不考虑分辨率"）：1/16 倍缩略图靠门槛放宽收进来，
+    /// 8 倍放大的 32 档采样干涉靠补救档——两条路都走真实的 close_against 链路
+    #[test]
+    fn test_resolution_differences_still_match() {
+        if !scanner::ffmpeg_available() {
+            eprintln!("跳过：本机未安装 ffmpeg");
+            return;
+        }
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("viewman_res_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let render = |name: &str, size: &str, quality: &[&str]| {
+            let out = dir.join(name);
+            let ok = Command::new("ffmpeg")
+                .args(["-y", "-f", "lavfi", "-i", "testsrc2=size=480x360:rate=10:duration=1", "-frames:v", "1"])
+                .args(["-vf", &format!("scale={size}:flags=bicubic")])
+                .args(quality)
+                .arg(&out)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "生成测试图片失败");
+            out.to_string_lossy().to_string()
+        };
+        // 底图 480×360；1/16 倍即 30px、1/8 倍即 60px 的缩略图，8 倍即 3840×2700。
+        // 30px 只用来量哈希抖动；像素核对用 60px——比它更小的缩略图（15px 级别）
+        // 连画面信息都快没了，合成图案下每个网格档都对不上，不属"同一张图的两份拷贝"
+        let original = render("orig.png", "480x360", &[]);
+        let thumbnail = render("thumb.jpg", "60:-2", &["-q:v", "3"]);
+        let upscaled = render("big.jpg", "3840:2700", &["-q:v", "3"]);
+
+        // 门槛放宽量的是哈希抖动：极小缩略图的 dHash 差距要仍在 DUP_GATE 内
+        let (_, d_tiny) = scanner::image_hashes(&render("tiny.jpg", "30:-2", &["-q:v", "3"])).unwrap();
+        let (_, d_base) = scanner::image_hashes(&original).unwrap();
+        assert!(
+            (d_tiny ^ d_base).count_ones() <= DUP_GATE,
+            "1/16 倍缩略图的 dHash 抖动超出门槛，候选阶段就会漏"
+        );
+
+        let rows = vec![
+            db::ImageSig { id: "a".into(), path: original.clone(), created_at: String::new(), modified_at: None, phash: None, dhash: None, sig_pixels: None, sig_modified_at: None },
+            db::ImageSig { id: "b".into(), path: thumbnail.clone(), created_at: String::new(), modified_at: None, phash: None, dhash: None, sig_pixels: None, sig_modified_at: None },
+            db::ImageSig { id: "c".into(), path: upscaled.clone(), created_at: String::new(), modified_at: None, phash: None, dhash: None, sig_pixels: None, sig_modified_at: None },
+        ];
+        let candidate = |index: usize, path: &str| Candidate {
+            index,
+            id: String::new(),
+            created_at: String::new(),
+            pixels: scanner::gray_pixels(path, PIX_GRID).unwrap(),
+        };
+        let mut cache: HashMap<(usize, usize), Vec<u8>> = HashMap::new();
+        let base = candidate(0, &original);
+        for (index, path) in [(1usize, thumbnail.as_str()), (2usize, upscaled.as_str())] {
+            assert!(
+                close_against(&rows, &mut cache, &base, &candidate(index, path)),
+                "{path} 与原图仅分辨率不同，应判为同一张"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// 一把灌完再聚：返回值是（分组，远亲名单），跟面板看到的一样
     fn clustered(threshold: u32, items: &[(&str, &str, u64, u64)]) -> (Vec<Vec<String>>, Vec<String>) {
         let mut graph = SimilarGraph::new(threshold);
@@ -1309,6 +1581,16 @@ mod tests {
             pools.entry(uf.find(rep)).or_default().push(reps[rep].0);
         }
         pools.into_values().filter(|pool| pool.len() > 1).collect()
+    }
+
+    /// 模板匹配的求和口径：一路指纹漂很远、另一路很近的副本要能进清单——
+    /// 这正是"取大"规则匹配不到的那类图
+    #[test]
+    fn test_template_distance_sums_both_hashes() {
+        // dHash 漂 30 位、pHash 只差 2：取大是 30（被否），求和 32（进清单）
+        assert_eq!(template_distance(0b11, (1u64 << 30) - 1, 0, 0), 30 + 2);
+        // 两路都远的真不同图，求和照样把它挡在外面
+        assert!(template_distance(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0, 0) > TEMPLATE_DISTANCE_MAX);
     }
 
     /// 分组清单归一化（组内组间都排序），供新旧实现比对等价性

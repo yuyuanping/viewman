@@ -2,6 +2,13 @@ use rusqlite::{Connection, OptionalExtension, Result, params};
 
 use crate::models::Video;
 
+/// 全部视频 id：孤儿缩略图清理时判断"这个缓存文件还有没有主"（视频与图片共用缓存目录）
+pub fn get_all_video_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM videos")?;
+    let ids = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos ORDER BY filename"
@@ -20,6 +27,53 @@ pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
         })
     })?.collect::<Result<Vec<_>>>()?;
     Ok(videos)
+}
+
+/// 某个扫描根（含全部子目录）下的在库视频：扫描启动只需要本根的旧账，
+/// 不必全表拉一遍——那会把其它命令堵在数据库锁后面。前缀已按
+/// dir_prefix_lower 规范成小写带结尾反斜杠，LIKE 对 ASCII 不区分大小写。
+fn like_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+pub fn get_videos_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<Vec<Video>> {
+    let pattern = format!("{}%", like_escape(prefix_lower));
+    let mut stmt = conn.prepare(
+        "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos WHERE path LIKE ?1 ESCAPE '\\'",
+    )?;
+    let videos = stmt.query_map(params![pattern], |row| {
+        Ok(Video {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            filename: row.get(2)?,
+            duration: row.get(3)?,
+            width: row.get(4)?,
+            height: row.get(5)?,
+            file_size: row.get(6)?,
+            created_at: row.get(7)?,
+            thumbnail_path: row.get(8)?,
+        })
+    })?.collect::<Result<Vec<_>>>()?;
+    Ok(videos)
+}
+
+/// 封面批次待办的最小行集 (id, 源路径, 时长, 封面路径)：续跑/生成前的逐条 stat
+/// 要在锁外做，锁内只留这一下查询，全表九列的大行集没必要过一遍
+pub fn get_video_thumbnail_entries(
+    conn: &Connection,
+) -> Result<Vec<(String, String, Option<f64>, Option<String>)>> {
+    let mut stmt = conn.prepare("SELECT id, path, duration, thumbnail_path FROM videos")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn insert_video(conn: &Connection, video: &Video) -> Result<()> {
@@ -256,7 +310,47 @@ pub fn delete_videos_by_ids(conn: &Connection, ids: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ensure_columns, sample_video, setup_test_db};
+    use crate::db::{ensure_columns, insert_video, sample_video, setup_test_db};
+
+    #[test]
+    fn test_videos_under_prefix_scopes_to_one_root() {
+        let conn = setup_test_db();
+        for (id, path) in [
+            ("v1", r"D:\vid\one.mp4"),
+            ("v2", r"D:\vid\sub\two.mp4"),
+            ("v3", r"D:\vids2\three.mp4"),
+            ("v4", r"E:\other\four.mp4"),
+        ] {
+            insert_video(&conn, &sample_video(id, path)).unwrap();
+        }
+
+        // 前缀含子目录、大小写不敏感；D:\vid 不能误匹配 D:\vids2
+        let rows = get_videos_under_prefix(&conn, r"d:\vid\").unwrap();
+        let mut ids: Vec<&str> = rows.iter().map(|v| v.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["v1", "v2"]);
+        assert!(get_videos_under_prefix(&conn, r"d:\vids\").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_video_thumbnail_entries_carry_duration_and_path() {
+        let conn = setup_test_db();
+        let mut video = sample_video("v1", r"D:\vid\one.mp4");
+        video.duration = Some(61.5);
+        insert_video(&conn, &video).unwrap();
+        set_thumbnail(&conn, "v1", r"C:\cache\v1.jpg").unwrap();
+
+        let rows = get_video_thumbnail_entries(&conn).unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "v1".to_string(),
+                r"D:\vid\one.mp4".to_string(),
+                Some(61.5),
+                Some(r"C:\cache\v1.jpg".to_string()),
+            )]
+        );
+    }
 
     #[test]
     fn test_insert_and_get_videos() {

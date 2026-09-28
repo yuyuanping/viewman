@@ -13,6 +13,8 @@ interface DuplicateGroupOptions {
   fetchImagesByIds: (ids: string[]) => Promise<Image[]>;
   /** 当前库内总数：恢复出来的旧结果拿它判断过没过期 */
   libraryTotal: number;
+  /** 库内容代次：删除/移动/扫描之后 bump，面板据此把退库的组员裁出列表 */
+  libraryVersion: number;
   setSelectMode: (on: boolean) => void;
   setSelectedIds: Dispatch<SetStateAction<Set<string>>>;
   notify: Notify;
@@ -34,7 +36,7 @@ const NO_INDEX = new Map<string, Image>();
  * 判定按"双指纹相同 + 画面核对"，保留张是组内最早入库那张，其余自动勾进多选。
  * 勾选走增量：只补新冒出来的副本，用户手动取消过的不会被擅自勾回去。
  */
-export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, setSelectMode, setSelectedIds, notify }: DuplicateGroupOptions) {
+export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, libraryVersion, setSelectMode, setSelectedIds, notify }: DuplicateGroupOptions) {
   const [groups, setGroups] = useState<string[][]>([]);
   const [chosenKeeps, setChosenKeeps] = useState<Set<string>>(new Set());
   const [skipped, setSkipped] = useState(0);
@@ -64,7 +66,8 @@ export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, setSelectMo
       setImageById(new Map(rows.map(image => [image.id, image])));
     }).catch(() => { /* 查不到就先空着，面板只是显示不出缩略图 */ });
     return () => { disposed = true; };
-  }, [groups, fetchImagesByIds]);
+    // libraryVersion 变了要重查：删除/移动之后这份元数据还挂着旧账，列表就"不变"了
+  }, [groups, fetchImagesByIds, libraryVersion]);
 
   const aliveGroups = useMemo(
     () => liveGroups(groups, imageById, chosenKeeps),

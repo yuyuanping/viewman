@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { Image } from "../types";
 import { formatFileSize, formatResolution } from "../utils";
+import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface ImageCardProps {
   image: Image;
@@ -15,6 +15,8 @@ interface ImageCardProps {
   similar?: boolean;
   /** 动图检测命中（多帧）：紫色边框 + 左上角「动图」标记 */
   animated?: boolean;
+  /** 以这张图为模板找库内相似图；不给就不显示右键菜单项 */
+  onFindSimilar?: (image: Image) => void;
   onToggleSelect?: (shiftKey: boolean) => void;
   onOpen: (image: Image) => void;
   /** 删除成功后回报 id，父层据此就地剔除，不再重拉整库 */
@@ -22,10 +24,11 @@ interface ImageCardProps {
   onMoved: (imageId: string, newPath: string) => void;
 }
 
-export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, animated = false, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
+export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [movePromptOpen, setMovePromptOpen] = useState(false);
 
   useEffect(() => {
     if (!menu) return;
@@ -59,25 +62,9 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
     }
   };
 
-  const handleMove = async () => {
-    let dir: string | null;
-    try {
-      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
-    } catch (err) {
-      alert("打开文件夹选择器失败: " + err);
-      return;
-    }
-    if (!dir) return;
-    if (!confirm(`将 "${image.filename}" 移动到:\n${dir}`)) return;
-    setMoving(true);
-    try {
-      const newPath = await api.moveImage(image.id, dir);
-      onMoved(image.id, newPath);
-    } catch (err) {
-      alert("移动失败: " + err);
-    } finally {
-      setMoving(false);
-    }
+  const handleMove = () => {
+    setMenu(null);
+    setMovePromptOpen(true);
   };
 
   // 没有封面缓存时直接引用原图：靠 loading="lazy" 兜住首屏，生成封面后走缩略图
@@ -127,6 +114,28 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
           {deleting ? "…" : "×"}
         </button>
       )}
+      {movePromptOpen && (
+        <MoveTargetsDialog
+          kind="image"
+          noun="图片"
+          count={1}
+          onPick={async (dir) => {
+            if (!confirm(`将 "${image.filename}" 移动到:\n${dir}`)) return false;
+            setMoving(true);
+            try {
+              const newPath = await api.moveImage(image.id, dir);
+              onMoved(image.id, newPath);
+              return true;
+            } catch (err) {
+              alert("移动失败: " + err);
+              return false;
+            } finally {
+              setMoving(false);
+            }
+          }}
+          onClose={() => setMovePromptOpen(false)}
+        />
+      )}
       {menu && (
         <div
           className="media-context-menu"
@@ -137,6 +146,11 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
           <button type="button" onClick={() => { setMenu(null); void openContainingFolder(); }}>
             打开文件所在位置
           </button>
+          {onFindSimilar && (
+            <button type="button" onClick={() => { setMenu(null); onFindSimilar(image); }}>
+              以此为模板找相似
+            </button>
+          )}
           <button type="button" disabled={moving} onClick={() => { setMenu(null); void handleMove(); }}>
             {moving ? "移动中…" : "移动到…"}
           </button>

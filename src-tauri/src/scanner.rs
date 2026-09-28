@@ -54,8 +54,14 @@ pub struct VideoMeta {
 ///   这个私有选项会导致 "Option not found"，连输入都打不开（实测）；
 /// - 视频不能加——mov/matroska 不认识该选项，同样 "Option not found"。
 fn image_input_opts(path: &str) -> &'static [&'static str] {
-    if path.contains('%') && is_image_file(Path::new(path)) {
-        &["-pattern_type", "none"]
+    // 图片一律按内容探测格式（image2pipe），不按扩展名猜：改名工具存出的大批
+    // "PNG 内容 + .jpg 扩展名"，image2 会按扩展名选 mjpeg 解码器，把完全正常的
+    // PNG 解成 "bits is invalid"；JPEG 内容配 .png/.bmp 扩展名同理。
+    // image2pipe 没有模式匹配逻辑，文件名带 % 也天然安全，不再需要 pattern_type——
+    // 那个补丁反而有害：内容探测选中 gif 等非 image2 解封装器时，它们没有
+    // pattern_type 选项，直接 "Option not found"（错标扩展名的 GIF 全栽在这）。
+    if is_image_file(Path::new(path)) {
+        &["-f", "image2pipe"]
     } else {
         &[]
     }
@@ -615,12 +621,16 @@ pub fn extract_thumbnail(
     }
 
     let attempt = |seconds: f64| -> Result<(), String> {
-        let output = hidden_command("ffmpeg")
-            .args(image_input_opts(video_path))
+        // -ss 只在真的要 seek 时才传。ffmpeg 62（2025-08 git 构建）对 image2 输入做
+        // 0 偏移输入 seek 会把唯一一帧直接跳过去：exit 0、零帧输出，mjpeg 全军覆没
+        // （实测 PNG/WebP 不受影响）。0 偏移本来就是无操作，省掉最稳。
+        let mut cmd = hidden_command("ffmpeg");
+        cmd.args(image_input_opts(video_path)).arg("-y");
+        if seconds > 0.0 {
+            cmd.args(["-ss", &seconds.to_string()]);
+        }
+        let output = cmd
             .args([
-                "-y",
-                "-ss",
-                &seconds.to_string(),
                 "-i",
                 video_path,
                 "-frames:v",
@@ -875,7 +885,7 @@ mod tests {
         let (phash, dhash) = image_hashes(&png.to_string_lossy()).unwrap();
         assert_ne!((phash, dhash), (0, 0), "带 % 的图片应能算出两枚指纹");
 
-        // 视频名里带 % 也照常工作（pattern_type 是 image2 专有选项，不能无条件塞给 ffmpeg）
+        // 视频名里带 % 也照常工作（-f image2pipe 只给图片输入，视频容器必须走常规内容探测）
         let video = dir.join("sample 100%.mp4");
         assert!(Command::new("ffmpeg")
             .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2", "-pix_fmt", "yuv420p", &video.to_string_lossy()])
@@ -886,6 +896,39 @@ mod tests {
         let vthumb = dir.join("pct-video-thumb.jpg");
         extract_thumbnail(&video.to_string_lossy(), &vthumb, Some(2.0)).unwrap();
         assert!(fs::metadata(&vthumb).unwrap().len() > 0);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 回归：内容与扩展名不符的图要按内容解出来。改名工具存出的大批
+    /// "PNG 内容 + .jpg 扩展名"，image2 按扩展名选 mjpeg 解码器会直接报
+    /// "bits is invalid"（重复检测一次跳过了 5667 张，全是这类）；反过来
+    /// JPEG 内容配 .png/.bmp 扩展名同理。image2pipe 按内容探测，两头都通。
+    #[test]
+    fn test_mislabeled_extension_still_decodes() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：本机未安装 ffmpeg");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("viewman_ext_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let png_as_jpg = dir.join("png-content.jpg");
+        assert!(Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1:duration=1", "-frames:v", "1", &png_as_jpg.to_string_lossy()])
+            .output().unwrap().status.success(), "生成 PNG 测试图失败");
+
+        let jpg_as_bmp = dir.join("jpg-content.bmp");
+        assert!(Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1:duration=1", "-frames:v", "1", "-q:v", "3", &jpg_as_bmp.to_string_lossy()])
+            .output().unwrap().status.success(), "生成 JPEG 测试图失败");
+
+        for path in [&png_as_jpg, &jpg_as_bmp] {
+            let hashes = image_hashes(&path.to_string_lossy());
+            assert!(hashes.is_some(), "{path:?} 内容正常，不该因扩展名不符解不开");
+            let (phash, dhash) = hashes.unwrap();
+            assert_ne!((phash, dhash), (0, 0), "{path:?} 应算出两枚指纹");
+        }
 
         fs::remove_dir_all(&dir).unwrap();
     }

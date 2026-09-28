@@ -16,7 +16,7 @@ import { useThumbnailGeneration } from "./hooks/useThumbnailGeneration";
 import { useHevcConversion } from "./hooks/useHevcConversion";
 import { useDuplicates } from "./hooks/useDuplicates";
 import { useFileCheck } from "./hooks/useFileCheck";
-import { useDeleteShortcut } from "./hooks/useDeleteShortcut";
+import { useDeleteShortcut, useMoveShortcut } from "./hooks/useDeleteShortcut";
 import { useRangeSelect } from "./hooks/useRangeSelect";
 import { api } from "./api";
 import { STALE_RESULT_NOTE } from "./detectionCache";
@@ -27,6 +27,7 @@ import type { SortField, SortDirection, WatchState } from "./libraryFilter";
 import { filterMedia, filterByWatchState, filterByMedia, sortMedia, selectedDirectoryLabel } from "./libraryFilter";
 import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PlayHistoryPanel } from "./components/PlayHistoryPanel";
+import { MoveTargetsDialog, type MovePrompt } from "./components/MoveTargetsDialog";
 import { ToastLayer } from "./components/Toast";
 
 const POTPLAYER_PREF_KEY = "viewman.usePotPlayer";
@@ -280,39 +281,48 @@ function App() {
     setDeletingSelected(false);
   }, [selectedIds, trashVideos, notify]);
 
-  // Del 即删勾选；播放器或历史面板盖在上面时让位
-  useDeleteShortcut(handleDeleteSelected,
-    selectMode && selectedIds.size > 0 && !currentVideo && !historyOpen && !deletingSelected);
+  // 「移动到…」目录列表对话框的待办：批量移动与播放列表移动共用一个
+  const [movePrompt, setMovePrompt] = useState<MovePrompt | null>(null);
 
-  // 多选批量移动：选目录后逐个 move，失败只计数不中断（被占用的文件跳过）
+  // Del 即删勾选：只要有待删清单就生效，不再要求多选模式（分组面板里点卡片勾选不经过 selectMode）；
+  // 播放器或历史面板盖在上面时让位
+  useDeleteShortcut(handleDeleteSelected,
+    selectedIds.size > 0 && !currentVideo && !historyOpen && !deletingSelected && movePrompt === null);
+
+  // 多选批量移动：弹出目标目录列表，选定后逐个 move，失败只计数不中断（被占用的文件跳过）
   const [movingSelected, setMovingSelected] = useState(false);
   const handleMoveSelected = useCallback(async () => {
     const ids = [...selectedIds];
     if (ids.length === 0) return;
-    let dir: string | null;
-    try {
-      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
-    } catch {
-      return;
-    }
-    if (!dir) return;
-    if (!confirm(`将选中的 ${ids.length} 个视频移动到:\n${dir}`)) return;
-    setMovingSelected(true);
-    const moved: Array<[string, string]> = [];
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        moved.push([id, await api.moveVideo(id, dir)]);
-      } catch {
-        failed += 1;
-      }
-    }
-    retargetVideosLocally(moved);
-    setSelectedIds(new Set());
-    const ok = moved.length;
-    notify(failed > 0 ? `已移动 ${ok} 个，${failed} 个失败（可能被占用或目标重名冲突）` : `已将 ${ok} 个视频移动到目标文件夹。`, failed > 0 ? "error" : "info");
-    setMovingSelected(false);
+    setMovePrompt({
+      kind: "video",
+      noun: "视频",
+      count: ids.length,
+      onPick: async (dir) => {
+        if (!confirm(`将选中的 ${ids.length} 个视频移动到:\n${dir}`)) return false;
+        setMovingSelected(true);
+        const moved: Array<[string, string]> = [];
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            moved.push([id, await api.moveVideo(id, dir)]);
+          } catch {
+            failed += 1;
+          }
+        }
+        retargetVideosLocally(moved);
+        setSelectedIds(new Set());
+        const ok = moved.length;
+        notify(failed > 0 ? `已移动 ${ok} 个，${failed} 个失败（可能被占用或目标重名冲突）` : `已将 ${ok} 个视频移动到目标文件夹。`, failed > 0 ? "error" : "info");
+        setMovingSelected(false);
+        return true;
+      },
+    });
   }, [selectedIds, retargetVideosLocally, notify]);
+
+  // M 即移动勾选：与 Del 同一套门禁（播放器/历史面板/移动对话框盖在上面时让位）
+  useMoveShortcut(handleMoveSelected,
+    selectedIds.size > 0 && !currentVideo && !historyOpen && !movingSelected && movePrompt === null);
 
   // 从库/侧栏打开视频：以当前列表为快照固定下来；当前视频不在其中则补到最前
   const openFromLibrary = useCallback((video: Video, position?: number) => {
@@ -382,30 +392,30 @@ function App() {
     }
   }, [playlist, filteredVideos, currentVideo, progressMap, openPlayer, handleClosePlayer, trashVideos]);
 
-  // 播放列表内移动：更新快照路径；若是当前播放项则按新路径从上次进度重新挂载
+  // 播放列表内移动：弹目标目录列表；更新快照路径，若是当前播放项则按新路径从上次进度重新挂载
   const handlePlaylistMove = useCallback(async (video: Video) => {
-    let dir: string | null;
-    try {
-      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
-    } catch (err) {
-      alert(`打开文件夹选择器失败: ${String(err)}`);
-      return;
-    }
-    if (!dir) return;
-    if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return;
-    let newPath: string;
-    try {
-      newPath = await api.moveVideo(video.id, dir);
-    } catch (err) {
-      alert(`移动失败：${String(err)}`);
-      return;
-    }
-    const moved = { ...video, path: newPath };
-    setPlaylist(prev => prev ? prev.map(v => v.id === video.id ? moved : v) : prev);
-    if (currentVideo?.id === video.id) {
-      openPlayer(moved, progressMap[video.id] ?? 0);
-    }
-    retargetVideosLocally([[video.id, newPath]]);
+    setMovePrompt({
+      kind: "video",
+      noun: "视频",
+      count: 1,
+      onPick: async (dir) => {
+        if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return false;
+        let newPath: string;
+        try {
+          newPath = await api.moveVideo(video.id, dir);
+        } catch (err) {
+          alert(`移动失败：${String(err)}`);
+          return false;
+        }
+        const moved = { ...video, path: newPath };
+        setPlaylist(prev => prev ? prev.map(v => v.id === video.id ? moved : v) : prev);
+        if (currentVideo?.id === video.id) {
+          openPlayer(moved, progressMap[video.id] ?? 0);
+        }
+        retargetVideosLocally([[video.id, newPath]]);
+        return true;
+      },
+    });
   }, [currentVideo, openPlayer, progressMap, retargetVideosLocally]);
 
   const activeError = tab === "image" ? imagesError : libraryError;
@@ -555,6 +565,15 @@ function App() {
             setHistoryOpen(false);
             handlePlayById(videoId, position);
           }}
+        />
+      )}
+      {movePrompt && (
+        <MoveTargetsDialog
+          kind={movePrompt.kind}
+          noun={movePrompt.noun}
+          count={movePrompt.count}
+          onPick={movePrompt.onPick}
+          onClose={() => setMovePrompt(null)}
         />
       )}
       <ToastLayer toasts={toasts} onClose={dismiss} />

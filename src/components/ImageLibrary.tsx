@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { SearchBar } from "./SearchBar";
 import { ImageGrid } from "./ImageGrid";
 import { ImageToolbar } from "./ImageToolbar";
 import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
 import { GroupReviewPanel } from "./GroupReviewPanel";
+import { TemplateMatchPanel } from "./TemplateMatchPanel";
+import { MoveTargetsDialog, type MovePrompt } from "./MoveTargetsDialog";
 import { api } from "../api";
 import type { ImageStatsPayload } from "../api";
 import { STALE_RESULT_NOTE } from "../detectionCache";
@@ -13,9 +14,10 @@ import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicateGroups } from "../hooks/useDuplicateGroups";
-import { useDeleteShortcut } from "../hooks/useDeleteShortcut";
+import { useDeleteShortcut, useMoveShortcut } from "../hooks/useDeleteShortcut";
 import { useRangeSelect } from "../hooks/useRangeSelect";
 import { useSimilarDetection } from "../hooks/useSimilarDetection";
+import { useTemplateSearch } from "../hooks/useTemplateSearch";
 import { selectedDirectoryLabel, sortMedia } from "../libraryFilter";
 import type { SortDirection } from "../libraryFilter";
 
@@ -43,6 +45,8 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deletingSelected, setDeletingSelected] = useState(false);
+  // 「移动到…」目录列表对话框：批量移动、查看器移动共用一个，onPick 里带着各自的收尾
+  const [movePrompt, setMovePrompt] = useState<MovePrompt | null>(null);
   // 打开查看器时的列表快照：翻页范围固定，不受后续刷新影响
   const [viewerList, setViewerList] = useState<Image[]>([]);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
@@ -105,7 +109,7 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     autoSelect: autoSelectDuplicates,
     clearSelection: clearDuplicateSelection,
     setGroupSelection: selectDuplicateGroup,
-  } = useDuplicateGroups({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, setSelectMode, setSelectedIds, notify });
+  } = useDuplicateGroups({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, libraryVersion, setSelectMode, setSelectedIds, notify });
 
   // 相似图检测（pHash）：后端边算边推组，面板逐组审阅，新出现的副本自动勾进多选
   const {
@@ -131,7 +135,23 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     rethreshold: rethresholdSimilar,
     keepRule: similarKeepRule,
     applyKeepRule: applySimilarKeepRule,
-  } = useSimilarDetection({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, setSelectMode, setSelectedIds, notify });
+  } = useSimilarDetection({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, libraryVersion, setSelectMode, setSelectedIds, notify });
+
+  // 模板匹配（以图搜图）：右键/查看器里选一张图当模板，命中按距离排成一份清单
+  const {
+    template: templateImage,
+    matches: templateMatches,
+    imageById: templateIndex,
+    skipped: templateSkipped,
+    threshold: templateThreshold,
+    setThreshold: setTemplateThreshold,
+    searching: templateSearching,
+    progress: templateProgress,
+    panelOpen: templatePanelOpen,
+    search: searchByTemplate,
+    clear: clearTemplate,
+    selectIds: selectTemplateIds,
+  } = useTemplateSearch({ fetchImagesByIds: api.getImagesByIds, libraryVersion, setSelectMode, setSelectedIds, notify });
 
   // 两个审阅面板都是全屏遮罩，只能开一个：开这一个就把另一个关掉，重跑检测也一样
   const openDuplicatePanel = useCallback(() => {
@@ -150,6 +170,33 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     setDuplicatePanelOpen(false);
     handleDetectSimilar();
   }, [handleDetectSimilar, setSimilarPanelOpen]);
+
+  // 模板匹配入口：结果面板也是全屏遮罩，发起时把别的面板和查看器都收掉
+  const runTemplateSearch = useCallback((image: Image) => {
+    setViewerIndex(null);
+    setDuplicatePanelOpen(false);
+    setSimilarPanelOpen(false);
+    void searchByTemplate(image);
+  }, [searchByTemplate]);
+
+  // 扩展名修正：把"解不出画面"里内容与扩展名不符的图就地改名（后端同步库记录，
+  // 不必重扫），改完自动重跑重复检测，让这批图真的参与比对
+  const [fixingExtensions, setFixingExtensions] = useState(false);
+  const handleFixExtensions = useCallback(async () => {
+    setFixingExtensions(true);
+    try {
+      const report = await api.fixMismatchedExtensions();
+      const parts = [`改名 ${report.renamed} 张`];
+      if (report.failed) parts.push(`${report.failed} 张没改成（可能被占用）`);
+      if (report.unrecognized) parts.push(`${report.unrecognized} 张认不出格式，原样保留`);
+      notify(`扩展名修正完成：${parts.join("，")}。正在重跑重复检测…`);
+      handleDetectDuplicates();
+    } catch (e) {
+      notify(`修正扩展名失败：${String(e)}`, "error");
+    } finally {
+      setFixingExtensions(false);
+    }
+  }, [handleDetectDuplicates, notify]);
 
   /** 面板标题后面那串小提示：恢复出来的旧结果要说清楚，免得被当成这一轮刚算的 */
   const duplicateCaveat = [
@@ -250,39 +297,46 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     setDeletingSelected(false);
   }, [selectedIds, trashImages, notify]);
 
-  // Del 即删勾选；查看器盖在最上层时让位，免得在遮罩后批量删掉看不见的条目
+  // Del 即删勾选：只要有待删清单就生效，不再要求多选模式——分组面板里点卡片勾选
+  // 不经过 selectMode，旧条件会让 Del 在面板里静默失灵。查看器或移动对话框盖在
+  // 最上层时让位，免得在遮罩后批量删掉看不见的条目
   useDeleteShortcut(handleDeleteSelected,
-    selectMode && selectedIds.size > 0 && viewerIndex === null && !deletingSelected);
+    selectedIds.size > 0 && viewerIndex === null && !deletingSelected && movePrompt === null);
 
-  // 多选批量移动：选目录后逐个 move，失败只计数不中断
+  // 多选批量移动：弹出目标目录列表，选定后逐个 move，失败只计数不中断
   const [movingSelected, setMovingSelected] = useState(false);
   const handleMoveSelected = useCallback(async () => {
     const ids = [...selectedIds];
     if (ids.length === 0) return;
-    let dir: string | null;
-    try {
-      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
-    } catch {
-      return;
-    }
-    if (!dir) return;
-    if (!confirm(`将选中的 ${ids.length} 张图片移动到:\n${dir}`)) return;
-    setMovingSelected(true);
-    let ok = 0;
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        await api.moveImage(id, dir);
-        ok += 1;
-      } catch {
-        failed += 1;
-      }
-    }
-    await refreshLibrary();
-    setSelectedIds(new Set());
-    notify(failed > 0 ? `已移动 ${ok} 张，${failed} 张失败（可能被占用或目标重名冲突）` : `已将 ${ok} 张图片移动到目标文件夹。`, failed > 0 ? "error" : "info");
-    setMovingSelected(false);
+    setMovePrompt({
+      kind: "image",
+      noun: "图片",
+      count: ids.length,
+      onPick: async (dir) => {
+        if (!confirm(`将选中的 ${ids.length} 张图片移动到:\n${dir}`)) return false;
+        setMovingSelected(true);
+        let ok = 0;
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            await api.moveImage(id, dir);
+            ok += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+        await refreshLibrary();
+        setSelectedIds(new Set());
+        notify(failed > 0 ? `已移动 ${ok} 张，${failed} 张失败（可能被占用或目标重名冲突）` : `已将 ${ok} 张图片移动到目标文件夹。`, failed > 0 ? "error" : "info");
+        setMovingSelected(false);
+        return true;
+      },
+    });
   }, [selectedIds, refreshLibrary, notify]);
+
+  // M 即移动勾选：与 Del 同一套门禁（查看器或移动对话框盖在上面时让位，查看器里 M 移动的是当前这张）
+  useMoveShortcut(handleMoveSelected,
+    selectedIds.size > 0 && viewerIndex === null && !movingSelected && movePrompt === null);
 
   const openViewer = useCallback((image: Image) => {
     const index = filteredImages.findIndex(i => i.id === image.id);
@@ -329,6 +383,32 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     else setViewerIndex(prev => Math.min(prev ?? 0, remaining.length - 1));
     notify("已将图片移入回收站。");
   }, [viewerList, trashImages, notify]);
+
+  // 查看器里移动当前这张（M）：弹出目标目录列表，选定后移动；移完图已不在当前
+  // 视图口径里，与删除一样就地接着看下一张。用户在确认框反悔或移动失败时不翻页
+  const handleViewerMove = useCallback(async (image: Image) => {
+    setMovePrompt({
+      kind: "image",
+      noun: "图片",
+      count: 1,
+      onPick: async (dir) => {
+        if (!confirm(`将 "${image.filename}" 移动到:\n${dir}`)) return false;
+        try {
+          await api.moveImage(image.id, dir);
+        } catch (e) {
+          notify(`移动失败：${String(e)}`, "error");
+          return false;
+        }
+        await refreshLibrary();
+        const remaining = viewerList.filter(i => i.id !== image.id);
+        setViewerList(remaining);
+        if (remaining.length === 0) setViewerIndex(null);
+        else setViewerIndex(prev => Math.min(prev ?? 0, remaining.length - 1));
+        notify("已移动图片。");
+        return true;
+      },
+    });
+  }, [viewerList, refreshLibrary, notify]);
 
   return (
     <>
@@ -398,6 +478,7 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
         onScanDirectory={onScanDirectory}
         onDeleted={() => refreshLibrary()}
         onMoved={() => refreshLibrary()}
+        onFindSimilar={runTemplateSearch}
         resetKey={selectedDir}
       />
       {duplicatePanelOpen && (
@@ -418,6 +499,8 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           caveat={duplicateCaveat}
           onDeleteSelected={handleDeleteSelected}
           deleting={deletingSelected}
+          onFixExtensions={handleFixExtensions}
+          fixingExtensions={fixingExtensions}
           onOpenImage={openDuplicateGroup}
           onClose={() => setDuplicatePanelOpen(false)}
         />
@@ -446,8 +529,42 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onKeepRule={applySimilarKeepRule}
           onDeleteSelected={handleDeleteSelected}
           deleting={deletingSelected}
+          onMoveSelected={handleMoveSelected}
+          moving={movingSelected}
           onOpenImage={openSimilarGroup}
           onClose={() => setSimilarPanelOpen(false)}
+        />
+      )}
+      {templatePanelOpen && (
+        <TemplateMatchPanel
+          template={templateImage}
+          matches={templateMatches}
+          imageById={templateIndex}
+          skipped={templateSkipped}
+          threshold={templateThreshold}
+          onThreshold={setTemplateThreshold}
+          searching={templateSearching}
+          progress={templateProgress}
+          selectedIds={selectedIds}
+          onToggle={toggleSelect}
+          onSelectIds={selectTemplateIds}
+          onClearAll={() => setSelectedIds(new Set())}
+          selectedTotal={selectedIds.size}
+          onDeleteSelected={handleDeleteSelected}
+          deleting={deletingSelected}
+          onMoveSelected={handleMoveSelected}
+          moving={movingSelected}
+          onOpenImage={(image, matchIds) => openGroupInViewer(image, matchIds, templateIndex)}
+          onClose={clearTemplate}
+        />
+      )}
+      {movePrompt && (
+        <MoveTargetsDialog
+          kind={movePrompt.kind}
+          noun={movePrompt.noun}
+          count={movePrompt.count}
+          onPick={movePrompt.onPick}
+          onClose={() => setMovePrompt(null)}
         />
       )}
       {viewerIndex !== null && viewerList[viewerIndex] && (
@@ -457,6 +574,8 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onNavigate={setViewerIndex}
           onClose={closeViewer}
           onDelete={handleViewerDelete}
+          onMove={handleViewerMove}
+          onFindSimilar={runTemplateSearch}
         />
       )}
     </>

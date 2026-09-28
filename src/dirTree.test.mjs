@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDirTree } from './dirTree.ts';
+import { buildDirTree, buildDirTreeFromCounts } from './dirTree.ts';
 
 const paths = [
   { path: 'D:\\pics\\a\\1.jpg' },
@@ -45,4 +45,56 @@ test('buildDirTree reuses one node per path under wide fan-out', () => {
   const wide = tree.children[0].children[0];
   assert.equal(wide.children.length, 50);
   assert.equal(wide.children.reduce((n, c) => n + c.itemCount, 0), 5000);
+});
+
+test('buildDirTree keeps only folders inside the scan scope', () => {
+  const roots = ['D:\\QQBot_Data', 'E:\\精选'];
+  const tree = buildDirTree(
+    [
+      { path: 'D:\\QQBot_Data\\group\\1.jpg' },
+      { path: 'D:\\QQBot_Data\\private\\2.jpg' },
+      { path: 'E:\\新选\\3.jpg' },
+      { path: 'C:\\elsewhere\\4.jpg' },
+    ],
+    '所有图片',
+    roots,
+  );
+  // E:\精选 这个根下本轮没有文件，所以连 E: 驱动器节点都不会出现
+  assert.deepEqual(tree.children.map(c => c.path), ['D:']);
+  const d = tree.children.find(c => c.path === 'D:');
+  assert.equal(d.children[0].path, 'D:\\QQBot_Data');
+  assert.equal(d.children[0].itemCount, 2);
+  assert.equal(tree.itemCount, 2);
+});
+
+test('buildDirTree counts a scan root itself as in scope', () => {
+  const tree = buildDirTree(
+    [{ path: 'E:\\精选\\a.jpg' }, { path: 'E:\\新选\\b.jpg' }],
+    '所有图片',
+    ['E:\\精选'],
+  );
+  // 驱动器节点 E: 下才是根目录 E:\精选
+  assert.deepEqual(tree.children.map(c => c.path), ['E:']);
+  const e = tree.children[0];
+  assert.deepEqual(e.children.map(c => c.path), ['E:\\精选']);
+  assert.equal(tree.itemCount, 1);
+});
+
+test('buildDirTreeFromCounts filters out-of-scope dirs and still totals the root', () => {
+  const tree = buildDirTreeFromCounts(
+    [['D:\\pics', 2], ['E:\\新选', 117], ['E:\\精选\\sub', 5]],
+    '所有图片',
+    ['D:\\pics', 'E:\\精选'],
+  );
+  assert.equal(tree.itemCount, 7);
+  const e = tree.children.find(c => c.path === 'E:');
+  const sub = e.children.find(c => c.path === 'E:\\精选');
+  assert.equal(sub.itemCount, 5);
+  assert.equal(tree.children.find(c => c.path === 'E:\\新选'), undefined);
+});
+
+test('empty scope roots means no filtering (legacy behavior)', () => {
+  const tree = buildDirTreeFromCounts([['D:\\pics', 2], ['E:\\新选', 117]], '所有图片', []);
+  assert.equal(tree.itemCount, 119);
+  assert.equal(tree.children.length, 2);
 });

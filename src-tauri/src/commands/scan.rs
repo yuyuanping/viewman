@@ -38,9 +38,11 @@ pub async fn scan_directory(
     state: State<'_, AppState>,
     dir: String,
 ) -> Result<ScanOutcome<Video>, String> {
+    // 只拉本根前缀下的旧账：失效清理与新旧比对都只关心这个根，
+    // 全表拉一遍会把视图/统计/其它扫描堵在数据库锁后面好几秒
     let existing_videos = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_all_videos(&conn).map_err_str()?
+        db::get_videos_under_prefix(&conn, &dir_prefix_lower(&dir)).map_err_str()?
     };
 
     let dir_path = std::path::PathBuf::from(&dir);

@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::db;
 use crate::models::{RecentlyPlayed, VideoProgress, WatchProgress};
@@ -21,15 +21,26 @@ pub fn get_progress(state: State<AppState>, video_id: String) -> Result<Option<W
 }
 
 #[tauri::command]
-pub fn get_videos_with_progress(state: State<AppState>) -> Result<Vec<VideoProgress>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_videos_with_progress(&conn).map_err_str()
+pub async fn get_videos_with_progress(app: tauri::AppHandle) -> Result<Vec<VideoProgress>, String> {
+    // 全表 LEFT JOIN + 整表下发，启动时就要跑：序列化在阻塞线程池做，主线程只管回传
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_videos_with_progress(&conn).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
 #[tauri::command]
-pub fn get_recently_played(state: State<AppState>) -> Result<Vec<RecentlyPlayed>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_recently_played(&conn, 30).map_err_str()
+pub async fn get_recently_played(app: tauri::AppHandle) -> Result<Vec<RecentlyPlayed>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_recently_played(&conn, 30).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
 /// 完整播放历史：watch_progress 全表按时间倒序（侧栏"播放记录"只有最近 30 条）

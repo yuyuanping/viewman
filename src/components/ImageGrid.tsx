@@ -9,6 +9,8 @@ interface ImageGridProps {
   similarIds?: Set<string>;
   /** 动图检测命中的条目（多帧）：紫色高亮 */
   animatedIds?: Set<string>;
+  /** 以某张图为模板找库内相似图（右键菜单入口）；不给就不显示菜单项 */
+  onFindSimilar?: (image: Image) => void;
   selectMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (index: number, shiftKey: boolean) => void;
@@ -20,7 +22,7 @@ interface ImageGridProps {
   resetKey: unknown;
 }
 
-export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved, resetKey }: ImageGridProps) {
+export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, onFindSimilar, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved, resetKey }: ImageGridProps) {
   const { onScroll, viewportRef, gridRef, slice, padTop, padBottom } =
     useGridWindow(images.length, resetKey);
 
@@ -58,6 +60,7 @@ export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, selec
             duplicate={duplicateIds?.has(image.id) ?? false}
             similar={similarIds?.has(image.id) ?? false}
             animated={animatedIds?.has(image.id) ?? false}
+            onFindSimilar={onFindSimilar}
             selectMode={selectMode}
             selected={selectedIds?.has(image.id) ?? false}
             onToggleSelect={shiftKey => onToggleSelect?.(start + at, shiftKey)}

@@ -35,6 +35,12 @@ interface GroupReviewPanelProps {
   /** 直接走工具栏那条批量删除通路（进回收站前有二次确认） */
   onDeleteSelected: () => void;
   deleting: boolean;
+  /** 批量移动勾中的图片到别的文件夹（弹系统目录选择器）；不给就不显示这个按钮 */
+  onMoveSelected?: () => void;
+  moving?: boolean;
+  /** 扩展名修正（重复检测给：解不出画面的多半是内容与扩展名不符）；不给就不显示这个按钮 */
+  onFixExtensions?: () => void;
+  fixingExtensions?: boolean;
   /** 检测仍在跑：每推一次，分组整份换新 */
   detecting: boolean;
   /** 换宽容度后正在重新比对（指纹已缓存，只是重算分组） */
@@ -61,7 +67,7 @@ interface GroupReviewPanelProps {
  * 宽容度滑杆和选主下拉只有相似检测给（重复判据没有这两个旋钮）。
  */
 export function GroupReviewPanel({
-  noun, progressLabel, groups, imageById, hashById, selectedIds, onToggle, onKeep, onAutoSelect, onClearAll, onSelectGroup, selectedTotal, onDeleteSelected, deleting, detecting, recalculating, progress, caveat, threshold, onThreshold, keepRule, onKeepRule, onOpenImage, onClose,
+  noun, progressLabel, groups, imageById, hashById, selectedIds, onToggle, onKeep, onAutoSelect, onClearAll, onSelectGroup, selectedTotal, onDeleteSelected, deleting, onMoveSelected, moving, onFixExtensions, fixingExtensions, detecting, recalculating, progress, caveat, threshold, onThreshold, keepRule, onKeepRule, onOpenImage, onClose,
 }: GroupReviewPanelProps) {
   /** 展开过的组（按当前的保留张记着）：组员太多的组默认只铺前若干张 */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -147,6 +153,17 @@ export function GroupReviewPanel({
         >
           取消全选
         </button>
+        {onMoveSelected && (
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={onMoveSelected}
+            disabled={moving || selectedTotal === 0}
+            title="把已勾中的图片移动到另一个文件夹（M，会先弹目录选择器，移动前再确认一次）"
+          >
+            {moving ? "移动中…" : `移动所选 (${selectedTotal})`}
+          </button>
+        )}
         <button
           type="button"
           className="toolbar-chip"
@@ -156,6 +173,17 @@ export function GroupReviewPanel({
         >
           {deleting ? "删除中…" : `删除所选 (${selectedTotal})`}
         </button>
+        {onFixExtensions && caveat && (
+          <button
+            type="button"
+            className="toolbar-chip"
+            onClick={onFixExtensions}
+            disabled={fixingExtensions || detecting}
+            title="按文件头把内容与扩展名不符的图就地改名并同步库记录；改完自动重跑检测，把这批图收进比对"
+          >
+            {fixingExtensions ? "修正中…" : "修正扩展名"}
+          </button>
+        )}
         <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc）" aria-label={`关闭${noun}分组面板`}>
           关闭 (Esc)
         </button>
@@ -173,7 +201,7 @@ export function GroupReviewPanel({
           {query && `命中 ${visible.length}/${groups.length} 组 · `}
           {detecting
             ? `还在比对剩下的${noun}，分组会随进度整份刷新；已出的组现在就能勾、能删。`
-            : "点缩略图勾选/取消，点「留」把本组的保留项换成这张；按 Del 一次性移入回收站。"}
+            : "点缩略图勾选/取消，点「留」把本组的保留项换成这张；按 M 移动所选，按 Del 一次性移入回收站。"}
         </span>
       </div>
 

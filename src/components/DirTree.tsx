@@ -7,6 +7,8 @@ interface DirTreeProps {
   items?: MediaItem[];
   /** 「父目录 → 直接文件数」平表建树（图片库，库不再整表下发） */
   dirCounts?: Array<[string, number]>;
+  /** 扫描范围：只展示落在这些根内（含根自身）的文件夹；缺省不设限 */
+  scopeRoots?: string[];
   rootLabel: string;
   selectedDir: string | null;
   onSelectDir: (dir: string | null) => void;
@@ -73,12 +75,12 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
   );
 }
 
-export function DirTree({ items, dirCounts, rootLabel, selectedDir, onSelectDir }: DirTreeProps) {
+export function DirTree({ items, dirCounts, scopeRoots, rootLabel, selectedDir, onSelectDir }: DirTreeProps) {
   const tree = useMemo(
     () => dirCounts
-      ? buildDirTreeFromCounts(dirCounts, rootLabel)
-      : buildDirTree(items ?? [], rootLabel),
-    [dirCounts, items, rootLabel],
+      ? buildDirTreeFromCounts(dirCounts, rootLabel, scopeRoots)
+      : buildDirTree(items ?? [], rootLabel, scopeRoots),
+    [dirCounts, items, scopeRoots, rootLabel],
   );
 
   return (

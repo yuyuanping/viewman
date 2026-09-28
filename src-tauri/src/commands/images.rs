@@ -12,7 +12,7 @@ use super::scan::{
     capped_walk_warnings, dir_prefix_lower, plan_stale_ids, ScanProgress, ScanSummary,
 };
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
-use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbJob};
+use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbEntry, ThumbJob};
 use super::videos::move_file;
 use super::{undeleted_targets, AppState, MapErrStr};
 
@@ -25,36 +25,62 @@ pub fn get_images(state: State<AppState>) -> Result<Vec<Image>, String> {
     db::get_all_images(&conn).map_err_str()
 }
 
-/// 图片库视图：目录前缀 + 文件名子串过滤下推到 SQL，前端不再整表过桥
+/// 图片库视图：扫描范围 + 目录前缀 + 文件名子串过滤下推到 SQL，前端不再整表过桥。
+/// 19 万行的查询 + JSON 序列化是秒级开销，扔进阻塞线程池，别堵主线程（同步命令跑在主线程上）。
 #[tauri::command]
-pub fn get_image_view(
-    state: State<AppState>,
+pub async fn get_image_view(
+    app: tauri::AppHandle,
     dir: Option<String>,
     search: String,
 ) -> Result<db::ImageView, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_image_view(&conn, dir.as_deref(), &search).map_err_str()
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        let roots = super::settings::load_roots(&conn, IMAGE_SCAN_ROOTS_KEY);
+        db::get_image_view(&conn, dir.as_deref(), &search, &roots).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
-/// 图片库统计：总数、缺封面数、每父目录直接文件数（目录树与每根计数的数据源）
+/// 图片库统计：总数、缺封面数、每父目录直接文件数（目录树与每根计数的数据源）。
+/// 只统计扫描范围内的文件。
 #[tauri::command]
-pub fn get_image_stats(state: State<AppState>) -> Result<db::ImageStats, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_image_stats(&conn).map_err_str()
+pub async fn get_image_stats(app: tauri::AppHandle) -> Result<db::ImageStats, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        let roots = super::settings::load_roots(&conn, IMAGE_SCAN_ROOTS_KEY);
+        db::get_image_stats(&conn, &roots).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
 /// 缺封面图片的 id 集：封面批任务的待办清单
 #[tauri::command]
-pub fn get_missing_image_thumbnail_ids(state: State<AppState>) -> Result<Vec<String>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_missing_image_thumbnail_ids(&conn).map_err_str()
+pub async fn get_missing_image_thumbnail_ids(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_missing_image_thumbnail_ids(&conn).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
-/// 按 id 批量取图：检测面板元数据与"id 还活着吗"的收敛判定
+/// 按 id 批量取图：检测面板元数据与"id 还活着吗"的收敛判定。
+/// 按扫描根过滤口径：移出根外的落点虽然记录还在，面板也当它已退库
 #[tauri::command]
-pub fn get_images_by_ids(state: State<AppState>, ids: Vec<String>) -> Result<Vec<Image>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_images_by_ids(&conn, &ids).map_err_str()
+pub async fn get_images_by_ids(app: tauri::AppHandle, ids: Vec<String>) -> Result<Vec<Image>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        let roots = super::settings::load_roots(&conn, IMAGE_SCAN_ROOTS_KEY);
+        db::get_images_by_ids(&conn, &ids, &roots).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
 /// 递归扫描图片目录并增量更新图片库：新文件探测尺寸，扫描时已消失的文件从库里清掉。
@@ -65,9 +91,11 @@ pub async fn scan_image_directory(
     state: State<'_, AppState>,
     dir: String,
 ) -> Result<ScanOutcome<Image>, String> {
+    // 只拉本根前缀下的旧账：失效清理与新旧比对都只关心这个根，
+    // 全表 19 万行拉一遍会把视图/统计/其它扫描堵在数据库锁后面好几秒
     let existing_images = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_all_images(&conn).map_err_str()?
+        db::get_images_under_prefix(&conn, &dir_prefix_lower(&dir)).map_err_str()?
     };
 
     let dir_path = PathBuf::from(&dir);
@@ -255,24 +283,154 @@ fn build_images_parallel(
     (images, warnings)
 }
 
+/// 删除目标：[(id, 磁盘路径)] 与"库里已查无记录、视作已删除"的 id 清单
+type DeleteTargets = Result<(Vec<(String, String)>, Vec<String>), String>;
+
+/// 按 id 查删除目标：库里还挂着记录的归"去磁盘上删"，查无记录的归"视作已删除"
+/// （重扫换代后，恢复出来的重复分组缓存里挂的还是上一代的 id）。
+/// 查无记录虽无从删起，但一票否决会让整批都删不动。
+fn split_known_targets(conn: &rusqlite::Connection, image_ids: &[String]) -> DeleteTargets {
+    let mut targets = Vec::with_capacity(image_ids.len());
+    let mut gone = Vec::new();
+    for image_id in image_ids {
+        match db::get_image_path(conn, image_id).map_err_str()? {
+            Some(path) => targets.push((image_id.clone(), path)),
+            None => gone.push(image_id.clone()),
+        }
+    }
+    Ok((targets, gone))
+}
+
+/// 扩展名修正的统计
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionFixReport {
+    pub renamed: usize,
+    pub already_matched: usize,
+    /// 认不出内容格式的（真坏文件/非图片数据），原样保留
+    pub unrecognized: usize,
+    /// 想改但没改成（文件被占用等）
+    pub failed: usize,
+}
+
+/// 按文件头认内容格式。认不出的返回 None——改名只对认得出的做，宁可留着也别猜。
+/// 现有库名单里错标的就这几种：PNG 当 .jpg/.bmp 存、JPEG 当 .png/.bmp 存、
+/// WebP/GIF 当 .jpg 存（顺手把 avif 也认了，虽然库里还没见过）。
+fn content_extension(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+    if head.starts_with(b"\xff\xd8\xff") {
+        return Some("jpg");
+    }
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("png");
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+    if head.starts_with(b"RIFF") && head[8..12] == *b"WEBP" {
+        return Some("webp");
+    }
+    if head[4..8] == *b"ftyp" && (&head[8..12] == b"avif" || &head[8..12] == b"avis") {
+        return Some("avif");
+    }
+    // "BM" 只有两字节，靠文件长度字段（第 3~6 字节 LE）不超过实际大小挡一挡文本撞车
+    if head.starts_with(b"BM") {
+        let declared = u32::from_le_bytes([head[2], head[3], head[4], head[5]]);
+        let actual = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if declared == 0 || (declared as u64) <= actual {
+            return Some("bmp");
+        }
+    }
+    None
+}
+
+/// 扩展名（小写）与内容格式对不对得上；jpg/jpeg 都算 JPEG 内容的相符写法
+fn extension_matches(current: &str, content: &str) -> bool {
+    match content {
+        "jpg" => current == "jpg" || current == "jpeg",
+        other => current == other,
+    }
+}
+
+/// 批量修正扩展名与内容不符的图片：只看还没有指纹的在库文件（重复检测里
+/// "解不出画面"的那批——解得出的图 ffmpeg 按内容探测兜着，错标不碍比对）。
+/// 按文件头认格式就地改名，库记录路径同步改掉，不必重扫；认不出的原样保留。
+#[tauri::command]
+pub async fn fix_mismatched_extensions(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ExtensionFixReport, String> {
+    let rows: Vec<(String, String)> = {
+        let conn = state.db.lock().map_err_str()?;
+        db::unhashed_image_paths(&conn).map_err_str()?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        let mut report = ExtensionFixReport { renamed: 0, already_matched: 0, unrecognized: 0, failed: 0 };
+        for (id, path) in rows {
+            let p = Path::new(&path);
+            // 磁盘上已经不在的记录等扫描去清，这里不管
+            if !p.exists() {
+                continue;
+            }
+            let Some(ext) = content_extension(p) else {
+                report.unrecognized += 1;
+                continue;
+            };
+            let current = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            if extension_matches(&current, ext) {
+                report.already_matched += 1;
+                continue;
+            }
+            // 目标重名时加 " (2)" 后缀，口径同 move_image
+            let (Some(dir), Some(stem)) = (p.parent(), p.file_stem()) else {
+                report.failed += 1;
+                continue;
+            };
+            let stem = stem.to_string_lossy().to_string();
+            let mut target = dir.join(format!("{stem}.{ext}"));
+            let mut n = 2;
+            while target.exists() {
+                target = dir.join(format!("{stem} ({n}).{ext}"));
+                n += 1;
+            }
+            if std::fs::rename(p, &target).is_err() {
+                report.failed += 1;
+                continue;
+            }
+            // 写库失败把文件移回原位：库记录和磁盘必须说同一个故事
+            if db::update_image_path(&conn, &id, &target.to_string_lossy()).is_err() {
+                let _ = std::fs::rename(&target, p);
+                report.failed += 1;
+                continue;
+            }
+            report.renamed += 1;
+        }
+        Ok(report)
+    })
+    .await
+    .map_err_str()?
+}
+
 /// 批量删除图片：一次回收站事务 + 一次数据库事务，返回成功删除的 id。
 /// 逐张删时每张都要过一次 IPC、一次 shell 调用和一次事务落盘，勾选几百张就是十几秒。
+/// 库里已经没有记录的 id 视作已删除，见 split_known_targets。
 #[tauri::command]
 pub async fn delete_images(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     image_ids: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    let targets: Vec<(String, String)> = {
+    let (targets, mut deleted): (Vec<(String, String)>, Vec<String>) = {
         let conn = state.db.lock().map_err_str()?;
-        let mut out = Vec::with_capacity(image_ids.len());
-        for image_id in &image_ids {
-            let path = db::get_image_path(&conn, image_id)
-                .map_err_str()?
-                .ok_or_else(|| format!("Image not found: {}", image_id))?;
-            out.push((image_id.clone(), path));
-        }
-        out
+        split_known_targets(&conn, &image_ids)?
     };
 
     let for_files = targets.clone();
@@ -280,11 +438,12 @@ pub async fn delete_images(
         .await
         .map_err_str()?;
     let failed: HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
-    let deleted: Vec<String> = targets
-        .iter()
-        .filter(|(id, _)| !failed.contains(id))
-        .map(|(id, _)| id.clone())
-        .collect();
+    deleted.extend(
+        targets
+            .iter()
+            .filter(|(id, _)| !failed.contains(id))
+            .map(|(id, _)| id.clone()),
+    );
 
     if !deleted.is_empty() {
         let conn = state.db.lock().map_err_str()?;
@@ -374,15 +533,22 @@ pub async fn generate_image_thumbnails(
     state: State<'_, AppState>,
     image_ids: Vec<String>,
 ) -> Result<usize, String> {
-    let jobs: Vec<ThumbJob> = {
+    // 最小行集在锁内一次拉完；"缓存文件还在吗"的逐条 stat 挪到锁外，
+    // 免得几万次 metadata 让其它命令排队等数据库锁
+    let candidates: Vec<ThumbEntry> = {
         let conn = state.db.lock().map_err_str()?;
-        let all = db::get_all_images(&conn).map_err_str()?;
-        all.into_iter()
-            .filter(|i| image_ids.iter().any(|id| id == &i.id))
-            .filter(|i| !cached_thumbnail_usable(&i.thumbnail_path))
-            .map(|i| ThumbJob { id: i.id, source: i.path, duration: None })
+        db::get_image_thumbnail_entries(&conn)
+            .map_err_str()?
+            .into_iter()
+            .map(|(id, source, thumbnail_path)| ThumbEntry { id, source, duration: None, thumbnail_path })
             .collect()
     };
+    let jobs: Vec<ThumbJob> = candidates
+        .into_iter()
+        .filter(|e| image_ids.iter().any(|id| id == &e.id))
+        .filter(|e| !cached_thumbnail_usable(&e.thumbnail_path))
+        .map(|e| ThumbJob { id: e.id, source: e.source, duration: None })
+        .collect();
 
     run_thumbnail_jobs(&app, jobs, "image-thumbnail-progress", db::set_image_thumbnail).await
 }
@@ -391,6 +557,7 @@ pub async fn generate_image_thumbnails(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use crate::db::{sample_image, setup_test_db};
 
     #[test]
@@ -410,6 +577,54 @@ mod tests {
         let targets = vec![("i1".to_string(), ghost.to_string_lossy().to_string())];
         assert!(undeleted_targets(&targets).is_empty());
         assert!(undeleted_targets(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_unknown_ids_are_sorted_out_instead_of_failing_the_batch() {
+        // 重扫换代后缓存里挂的上一代 id 查无记录：分离出来当已删除，不能卡住整批
+        let conn = setup_test_db();
+        db::insert_image(&conn, &sample_image("i1", "C:/pics/a.png")).unwrap();
+        let ids = ["i1".to_string(), "stale-id".to_string()];
+        let (targets, gone) = split_known_targets(&conn, &ids).unwrap();
+        assert_eq!(targets, vec![("i1".to_string(), "C:/pics/a.png".to_string())]);
+        assert_eq!(gone, vec!["stale-id".to_string()]);
+    }
+
+    #[test]
+    fn test_content_extension_reads_magic_bytes() {
+        let dir = std::env::temp_dir().join(format!("viewman_extfix_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            fs::write(&p, bytes).unwrap();
+            p
+        };
+        let png = write("x.png", b"\x89PNG\r\n\x1a\n whatever");
+        assert_eq!(content_extension(&png), Some("png"));
+        let jpg = write("x.jpg", b"\xff\xd8\xff\xe0 jfif-ish");
+        assert_eq!(content_extension(&jpg), Some("jpg"));
+        let gif = write("x.gif", b"GIF89a drawing");
+        assert_eq!(content_extension(&gif), Some("gif"));
+        // BMP 长度字段（LE）在声明范围内才算，纯文本撞上 "BM" 两个字母的不认
+        let mut bmp_head = Vec::from(&b"BM"[..]);
+        bmp_head.extend_from_slice(&70u32.to_le_bytes());
+        bmp_head.extend_from_slice(&[0u8; 64]);
+        let bmp = write("x.bmp", &bmp_head);
+        assert_eq!(content_extension(&bmp), Some("bmp"));
+        let fake_bmp = write("y.bmp", b"BM this is just text talking");
+        assert_eq!(content_extension(&fake_bmp), None);
+        let junk = write("x.jpg", b"{\"retcode\":100055}");
+        assert_eq!(content_extension(&junk), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_extension_matches_tolerates_jpeg_spelling() {
+        assert!(extension_matches("jpg", "jpg"));
+        assert!(extension_matches("jpeg", "jpg"));
+        assert!(extension_matches("png", "png"));
+        assert!(!extension_matches("jpg", "png"));
+        assert!(!extension_matches("bmp", "png"));
     }
 
     #[test]

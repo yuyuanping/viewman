@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { Video } from "../types";
 import { formatDuration, formatFileSize } from "../utils";
+import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface VideoCardProps {
   video: Video;
@@ -25,6 +25,7 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [movePromptOpen, setMovePromptOpen] = useState(false);
 
   useEffect(() => {
     if (!menu) return;
@@ -62,25 +63,9 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
     }
   };
 
-  const handleMove = async () => {
-    let dir: string | null;
-    try {
-      dir = await open({ directory: true, multiple: false, title: "选择目标文件夹" });
-    } catch (err) {
-      alert("打开文件夹选择器失败: " + err);
-      return;
-    }
-    if (!dir) return;
-    if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return;
-    setMoving(true);
-    try {
-      const newPath = await api.moveVideo(video.id, dir);
-      onMoved(video.id, newPath);
-    } catch (err) {
-      alert("移动失败: " + err);
-    } finally {
-      setMoving(false);
-    }
+  const handleMove = () => {
+    setMenu(null);
+    setMovePromptOpen(true);
   };
 
   return (
@@ -162,6 +147,28 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
         >
           {deleting ? "…" : "×"}
         </button>
+      )}
+      {movePromptOpen && (
+        <MoveTargetsDialog
+          kind="video"
+          noun="视频"
+          count={1}
+          onPick={async (dir) => {
+            if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return false;
+            setMoving(true);
+            try {
+              const newPath = await api.moveVideo(video.id, dir);
+              onMoved(video.id, newPath);
+              return true;
+            } catch (err) {
+              alert("移动失败: " + err);
+              return false;
+            } finally {
+              setMoving(false);
+            }
+          }}
+          onClose={() => setMovePromptOpen(false)}
+        />
       )}
       {menu && (
         <div

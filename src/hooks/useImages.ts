@@ -1,8 +1,11 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "../api";
 import type { ImageStatsPayload } from "../api";
 import type { RescanStatus } from "./useVideos";
 import { loadScanRoots } from "../scanRootStore";
+
+/** 库代次推进 + 统计重拉的合并窗口：短时间内多次刷新只拉一次 */
+const REFRESH_DEBOUNCE_MS = 400;
 
 /**
  * 图片库数据层。库不再整表下发：前端只持有两样东西——
@@ -15,18 +18,38 @@ export function useImages() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rescanStatus, setRescanStatus] = useState<RescanStatus | null>(null);
+  const refreshTimer = useRef<number | null>(null);
 
-  /** 库内容变了：统计重拉、代次前进让 ImageLibrary 重拉视图 */
+  useEffect(() => () => {
+    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+  }, []);
+
+  /** 库内容变了：统计重拉、代次前进让 ImageLibrary 重拉视图。
+   *  19 万行的视图整表过桥一次要好几秒（查询+序列化+解析+排序），短时间内的
+   *  多次推进合并成一次，不然每个扫描根扫完都卡一下 */
   const refresh = useCallback(async () => {
-    setLibraryVersion(v => v + 1);
-    setImageStats(await api.getImageStats());
+    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    return new Promise<void>(resolve => {
+      refreshTimer.current = window.setTimeout(async () => {
+        refreshTimer.current = null;
+        setLibraryVersion(v => v + 1);
+        try {
+          setImageStats(await api.getImageStats());
+        } catch { /* 统计拉不动就先留旧的，下轮刷新再试 */ }
+        resolve();
+      }, REFRESH_DEBOUNCE_MS);
+    });
   }, []);
 
   /** 扫描完成后库已在后端更新，这里只负责让前端重新拉取；返回错误信息（null = 成功） */
   const runScan = useCallback(async (dir: string): Promise<string | null> => {
     try {
-      await api.scanImageDirectory(dir);
-      await refresh();
+      const outcome = await api.scanImageDirectory(dir);
+      // 库一个字都没变就不重拉：稳定库里自动重扫四个根全都是空手而归，
+      // 照旧推代次的话图片页刚打开就被四趟全库重拉卡住十几秒
+      if (outcome.items.length > 0 || outcome.removed_ids.length > 0) {
+        await refresh();
+      }
       return null;
     } catch (e) {
       return `图片扫描失败，未完成更新：${String(e)}`;

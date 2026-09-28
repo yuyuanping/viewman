@@ -29,15 +29,11 @@ export function loadRate(): number {
 export function PlayerView({ video, initialPosition, onClose, onProgress, onFallback, playlist, playlistProgress, onSelect, onDelete, onMove }: PlayerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const currentTimeRef = useRef(0);
-  const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [rate, setRate] = useState(loadRate);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [progressError, setProgressError] = useState<string | null>(null);
-  // 截图：成功/失败走 notice 条（播放器内没有 Toast 队列）
-  const [captureNotice, setCaptureNotice] = useState<string | null>(null);
-  const [capturing, setCapturing] = useState(false);
   const [fileReadable, setFileReadable] = useState(false);
   const [showError, setShowError] = useState(false);
   const [autoMuted, setAutoMuted] = useState(false);
@@ -102,12 +98,11 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
   // 自动下一集时页面已无用户手势，play() 可能被拦截：回退为静音自动播放
   const tryPlay = useCallback((el: HTMLVideoElement) => {
     el.play()
-      .then(() => setPlaying(true))
       .catch(() => {
         el.muted = true;
         el.play()
-          .then(() => { setPlaying(true); setAutoMuted(true); })
-          .catch(() => setPlaying(false));
+          .then(() => setAutoMuted(true))
+          .catch(() => undefined);
       });
   }, []);
 
@@ -175,6 +170,15 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     if (idx >= 0) onSelect(playlist[(idx + 1) % playlist.length]);
   }, [handleSave, playlist, video.id, onSelect]);
 
+  // 手动切换上/下一个视频，切换前先落盘当前进度
+  const stepVideo = useCallback((delta: number) => {
+    if (!playlist || !onSelect || playlist.length < 2) return;
+    const idx = playlist.findIndex(item => item.id === video.id);
+    if (idx < 0) return;
+    void handleSave();
+    onSelect(playlist[(idx + delta + playlist.length) % playlist.length]);
+  }, [handleSave, playlist, video.id, onSelect]);
+
   const togglePlay = useCallback(() => {
     const el = videoRef.current;
     if (!el) return;
@@ -184,7 +188,6 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
       tryPlay(el);
     } else {
       el.pause();
-      setPlaying(false);
     }
   }, [tryPlay]);
 
@@ -244,25 +247,6 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     if (el.paused) tryPlay(el);
   }, [tryPlay]);
 
-  // 截图当前帧：后端 ffmpeg 抽帧存到视频同目录，几秒后自动收起成功提示
-  const captureTimerRef = useRef<number | null>(null);
-  const handleCapture = useCallback(async () => {
-    const el = videoRef.current;
-    if (!el || capturing) return;
-    setCapturing(true);
-    setCaptureNotice(null);
-    try {
-      const out = await api.captureFrame(video.id, el.currentTime);
-      setCaptureNotice(`已保存：${out}`);
-    } catch (e) {
-      setCaptureNotice(`截图失败：${String(e)}`);
-    } finally {
-      setCapturing(false);
-      if (captureTimerRef.current) window.clearTimeout(captureTimerRef.current);
-      captureTimerRef.current = window.setTimeout(() => setCaptureNotice(null), 5000);
-    }
-  }, [video.id, capturing]);
-
   const changeRate = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = Number(e.target.value);
     setRate(value);
@@ -305,9 +289,6 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
         e.preventDefault();
         el.muted = !el.muted;
         setAutoMuted(false);
-      } else if (e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        void handleCapture();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         el.volume = Math.min(1, el.volume + 0.1);
@@ -319,7 +300,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlay, toggleFullscreen, handleCapture]);
+  }, [togglePlay, toggleFullscreen]);
 
   // 画面旋转：每点一次顺时针 90°；90/270 时按旋转后的外接框重新约束视频
   const [rot, setRot] = useState(0);
@@ -343,7 +324,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
   return (
     <div ref={overlayRef} className="player-overlay fixed inset-0 z-50 flex flex-col">
       <div className="flex-1 min-h-0 flex">
-        <div className="player-stage flex-1 min-h-0 flex items-center justify-center px-4 pt-14 pb-2">
+        <div className={`player-stage flex-1 min-h-0 flex items-center justify-center ${isFullscreen ? "p-0" : "px-4 pt-14 pb-2"}`}>
           <div ref={fitBoxRef} className="w-full h-full min-w-0 min-h-0 flex items-center justify-center">
             {playSrc ? (
               <video
@@ -351,10 +332,9 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
                 src={playSrc}
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={handleLoadedMetadata}
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
                 onEnded={handleEnded}
                 onError={() => { void handlePlaybackError(); }}
+                onClick={togglePlay}
                 onDoubleClick={toggleFullscreen}
                 style={videoStyle}
                 className="player-video max-h-full max-w-full bg-black object-contain transition-transform duration-200"
@@ -369,7 +349,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
           </div>
         </div>
 
-        {playlist && playlist.length > 0 && onSelect && (
+        {playlist && playlist.length > 0 && onSelect && !isFullscreen && (
           <PlaylistPanel
             playlist={playlist}
             currentId={video.id}
@@ -395,7 +375,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
         </div>
       </div>
 
-      <div className="player-bar shrink-0 w-full flex flex-col items-center gap-2 px-4 pb-5">
+      <div className={`player-bar shrink-0 w-full flex flex-col items-center gap-2 px-4 pb-5 ${isFullscreen ? "absolute bottom-0 left-0 right-0 z-10" : ""}`}>
         {showError && playbackError && (
           <div className="player-error w-full max-w-xl rounded-xl border border-red-500/30 bg-red-900/60 px-4 py-3 text-sm text-red-200 flex flex-col gap-3">
             <div className="flex items-start justify-between gap-3">
@@ -422,45 +402,24 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
         {progressError && (
           <p className="player-progress-notice text-amber-300 text-sm">{progressError}</p>
         )}
-        {captureNotice && (
-          <p className="player-progress-notice text-gray-300 text-sm truncate max-w-full px-6" title={captureNotice}>{captureNotice}</p>
-        )}
 
         <div className="player-controls w-full max-w-3xl flex flex-col gap-3.5">
-          <div className="player-transport flex items-center justify-center gap-4">
+          <div className="flex items-center justify-center gap-3 text-xs">
             <button
-              onClick={() => skip(-10)}
-              className="player-skip inline-flex items-center justify-center w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 text-white text-sm font-medium transition"
-              aria-label="后退10秒"
-              title="后退 10 秒（←）"
+              onClick={() => stepVideo(-1)}
+              disabled={!playlist || playlist.length < 2}
+              className="inline-flex items-center gap-1.5 rounded-full bg-white/10 hover:bg-white/15 px-3 py-1.5 text-white/90 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+              title="上一个视频"
             >
-              ⏪10
+              ⏮ 上一个
             </button>
             <button
-              onClick={togglePlay}
-              className="player-play inline-flex items-center justify-center w-14 h-14 rounded-full bg-white/10 hover:bg-white/15 text-white text-2xl transition"
-              aria-label={playing ? "暂停" : "播放"}
+              onClick={() => stepVideo(1)}
+              disabled={!playlist || playlist.length < 2}
+              className="inline-flex items-center gap-1.5 rounded-full bg-white/10 hover:bg-white/15 px-3 py-1.5 text-white/90 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+              title="下一个视频"
             >
-              {playing ? "❚❚" : "▶"}
-            </button>
-            <button
-              onClick={() => skip(10)}
-              className="player-skip inline-flex items-center justify-center w-11 h-11 rounded-full bg-white/10 hover:bg-white/15 text-white text-sm font-medium transition"
-              aria-label="快进10秒"
-              title="快进 10 秒（→）"
-            >
-              10⏩
-            </button>
-          </div>
-
-          <div className="flex items-center justify-center gap-3 text-xs text-gray-300">
-            <button
-              onClick={() => void handleCapture()}
-              disabled={capturing}
-              className="inline-flex items-center gap-1.5 rounded-full bg-white/10 hover:bg-white/15 px-3 py-1.5 transition disabled:opacity-50"
-              title="截图当前帧到视频所在目录（S）"
-            >
-              {capturing ? "截图中…" : "📷 截图"}
+              下一个 ⏭
             </button>
           </div>
 

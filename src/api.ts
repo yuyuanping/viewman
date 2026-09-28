@@ -50,6 +50,9 @@ export const api = {
   potplayerStatus: (videoPath: string) => invoke<PotPlayerStatus>("potplayer_status", { videoPath }),
   loadScanRoots: (kind: MediaKind) => invoke<string[]>("load_scan_roots", { kind }),
   saveScanRoots: (kind: MediaKind, roots: string[]) => invoke<void>("save_scan_roots", { kind, roots }),
+  /** 「移动到…」对话框的目标目录清单：按媒体类型各存一份，对话框里添加/删除 */
+  loadMoveTargets: (kind: MediaKind) => invoke<string[]>("load_move_targets", { kind }),
+  saveMoveTargets: (kind: MediaKind, targets: string[]) => invoke<void>("save_move_targets", { kind, targets }),
   /** 移除目录：忘掉扫描根并删除库内条目（磁盘文件不动），返回清除的条目数 */
   removeMediaDirectory: (kind: MediaKind, dir: string) =>
     invoke<number>("remove_media_directory", { kind, dir }),
@@ -66,6 +69,11 @@ export const api = {
   scanImageDirectory: (dir: string) => invoke<ScanOutcome<Image>>("scan_image_directory", { dir }),
   /** 批量删除图片：一次回收站事务 + 一次库事务，返回真正删掉的 id */
   deleteImages: (imageIds: string[]) => invoke<string[]>("delete_images", { imageIds }),
+  /** 扩展名修正：把内容与扩展名不符的图按文件头就地改名并同步库记录 */
+  fixMismatchedExtensions: () =>
+    invoke<{ renamed: number; alreadyMatched: number; unrecognized: number; failed: number }>(
+      "fix_mismatched_extensions",
+    ),
   moveImage: (imageId: string, targetDir: string) =>
     invoke<string>("move_image", { imageId, targetDir }),
   generateImageThumbnails: (imageIds: string[]) =>
@@ -80,6 +88,12 @@ export const api = {
    * 除了分组，还带回组内各成员的指纹（拆成两个 32 位），面板据此算"距保留张几位"。
    */
   findSimilarImages: (threshold: number) => invoke<SimilarResult>("find_similar_images", { threshold }),
+  /**
+   * 模板匹配（以图搜图）：以一张图为模板，返回库内与它的指纹距离（两枚哈希求和）
+   * ≤ 48 的全部命中，按距离升序。指纹已缓存的只做一趟一对一比对，缺的现补并落库。
+   */
+  findImagesLikeTemplate: (imageId: string) =>
+    invoke<TemplateMatchResult>("find_images_like_template", { imageId }),
   /**
    * 上一趟检测的落盘结果（没有则 null）。检测一趟动辄几分钟，重启后先看缓存里的组，
    * 数字对不上 libraryCount 就说明库动过、结果不含新增的那批，界面得提示一句。
@@ -138,6 +152,25 @@ export interface SimilarResult {
   far: string[];
   /** 只含成组的图片：孤张不给，免得整库指纹白传一趟 */
   hashes: SimilarHash[];
+}
+
+/** 模板匹配的一条命中：图片 id + 与模板的指纹距离（pHash 与 dHash 的汉明距离之和） */
+export interface TemplateMatch {
+  id: string;
+  distance: number;
+}
+
+export interface TemplateMatchResult {
+  /** 按距离升序的全部命中（阈值过滤在前端做，改宽容度不必重跑） */
+  matches: TemplateMatch[];
+  /** 解不出指纹、因此没参与比对的张数 */
+  skipped: number;
+}
+
+/** 后端 template-progress 事件负载：补算缺失指纹的进度 */
+export interface TemplateProgressPayload {
+  processed: number;
+  total: number;
 }
 
 /** 后端 duplicate-progress 事件负载 */
