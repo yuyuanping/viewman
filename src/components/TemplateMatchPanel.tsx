@@ -3,7 +3,13 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Image } from "../types";
 import type { TemplateMatch } from "../api";
 import { formatFileSize, formatResolution } from "../utils";
+import { JustifiedGrid } from "./JustifiedGrid";
 import { TEMPLATE_THRESHOLD_MAX } from "../hooks/useTemplateSearch";
+
+/** JustifiedGrid 的稳定回调：内联箭头函数每次渲染都换引用，会把布局缓存全部打穿 */
+const aspectOfEntry = (entry: { image: Image }) =>
+  entry.image.width && entry.image.height ? entry.image.width / entry.image.height : 1;
+const keyOfEntry = (entry: { image: Image }) => entry.image.id;
 
 interface TemplateMatchPanelProps {
   /** 当模板的那张图：面板头部要显示"在拿谁比" */
@@ -69,7 +75,7 @@ export function TemplateMatchPanel({
             <img
               src={convertFileSrc(template.thumbnail_path ?? template.path)}
               alt=""
-              className="w-7 h-7 rounded object-cover bg-[#0f1723] shrink-0"
+              className="w-7 h-7 rounded object-contain bg-[#0f1723] shrink-0"
             />
             <span className="truncate max-w-48" title={template.path}>{template.filename}</span>
           </span>
@@ -155,11 +161,16 @@ export function TemplateMatchPanel({
           </p>
         )}
         {visible.length > 0 && (
-          <ul className="flex flex-wrap gap-2.5">
-            {visible.map(({ hit, image }) => {
+          <JustifiedGrid
+            items={visible}
+            aspectOf={aspectOfEntry}
+            keyOf={keyOfEntry}
+            textH={46}
+            targetImageH={200}
+            renderItem={({ hit, image }, imageH) => {
               const selected = selectedIds.has(image.id);
               return (
-                <li key={image.id} className="relative w-[128px] min-w-0">
+                <div className="relative min-w-0">
                   <div className={`rounded-lg overflow-hidden border border-white/10 bg-[#151f2e]${selected ? " media-selected" : ""}`}>
                     <button
                       type="button"
@@ -168,25 +179,27 @@ export function TemplateMatchPanel({
                       className="block w-full text-left"
                       title={selected ? `取消勾选 ${image.filename}` : `勾选 ${image.filename}`}
                     >
-                      <span className="relative block aspect-square bg-[#0f1723] overflow-hidden">
+                      <span className="relative block bg-[#0f1723] overflow-hidden" style={{ height: imageH }}>
                         <img
                           src={convertFileSrc(image.thumbnail_path ?? image.path)}
                           alt={image.filename}
                           loading="lazy"
-                          className="w-full h-full object-cover"
+                          className="w-full h-full object-contain"
                         />
                         {selected && (
                           <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true">✓</span>
                         )}
                       </span>
-                      <span className="block px-1.5 pt-1.5 text-[11px] leading-4 text-gray-200 truncate" title={image.filename}>
-                        {image.filename}
-                      </span>
-                      <span className="block px-1.5 pb-1.5 text-[10px] text-gray-500 tabular-nums">
-                        {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
-                        {` · `}
-                        <span className={hit.distance === 0 ? "text-emerald-400" : hit.distance <= 24 ? "text-sky-300" : undefined}>
-                          距 {hit.distance}
+                      <span className="block px-1.5 pt-1.5 pb-1.5 overflow-hidden" style={{ height: 46 }}>
+                        <span className="block text-[11px] leading-4 text-gray-200 truncate" title={image.filename}>
+                          {image.filename}
+                        </span>
+                        <span className="block text-[10px] leading-4 text-gray-500 mt-0.5 tabular-nums">
+                          {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
+                          {` · `}
+                          <span className={hit.distance === 0 ? "text-emerald-400" : hit.distance <= 24 ? "text-sky-300" : undefined}>
+                            距 {hit.distance}
+                          </span>
                         </span>
                       </span>
                     </button>
@@ -202,10 +215,10 @@ export function TemplateMatchPanel({
                       ⤢
                     </button>
                   </span>
-                </li>
+                </div>
               );
-            })}
-          </ul>
+            }}
+          />
         )}
       </div>
     </div>

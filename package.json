@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node --test src/hooks/potPlayerSession.test.mjs src/hooks/useDeleteShortcut.test.mjs src/detectionCache.test.mjs src/libraryFilter.test.mjs src/scanRoots.test.mjs src/scanMerge.test.mjs src/rangeSelect.test.mjs src/similarGroups.test.mjs src/dirTree.test.mjs src/useGridWindow.test.mjs",
+    "test": "node --test src/justifiedLayout.test.mjs src/hooks/potPlayerSession.test.mjs src/hooks/useDeleteShortcut.test.mjs src/detectionCache.test.mjs src/libraryFilter.test.mjs src/scanRoots.test.mjs src/scanMerge.test.mjs src/rangeSelect.test.mjs src/similarGroups.test.mjs src/dirTree.test.mjs src/useGridWindow.test.mjs",
     "test:cargo": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:all": "npm run test && npm run test:cargo",
     "preview": "vite preview",

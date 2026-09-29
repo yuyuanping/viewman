@@ -3,11 +3,14 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
 import type { Image } from "../types";
+import { CARD_TEXT_H } from "../justifiedLayout";
 import { copyToClipboard, formatFileSize, formatResolution } from "../utils";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface ImageCardProps {
   image: Image;
+  /** 对齐布局给的图片区高度：给了就用它，不给走方格默认（aspect-ratio 1/1） */
+  imageHeight?: number;
   selectMode?: boolean;
   selected?: boolean;
   duplicate?: boolean;
@@ -24,7 +27,7 @@ interface ImageCardProps {
   onMoved: (imageId: string, newPath: string) => void;
 }
 
-export function ImageCard({ image, selectMode = false, selected = false, duplicate = false, similar = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
+export function ImageCard({ image, imageHeight, selectMode = false, selected = false, duplicate = false, similar = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -97,7 +100,7 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
         className="block w-full text-left"
         aria-label={selectMode ? (selected ? `取消选择 ${image.filename}` : `选择 ${image.filename}`) : `查看 ${image.filename}`}
       >
-        <div className="image-preview">
+        <div className="image-preview" style={imageHeight !== undefined ? { height: imageHeight, width: "100%" } : undefined}>
           {duplicate && <span className="dup-flag">重复副本</span>}
           {animated && <span className="anim-flag">动图</span>}
           {selectMode && (
@@ -108,11 +111,11 @@ export function ImageCard({ image, selectMode = false, selected = false, duplica
           <img src={convertFileSrc(preview)} alt={image.filename} loading="lazy" className="media-thumbnail" />
           <span className="media-badge bottom-2 right-2">{formatResolution(image.width, image.height)}</span>
         </div>
-        <div className="px-2.5 py-2.5">
+        <div className="px-2.5 pt-2 pb-2 overflow-hidden" style={{ height: CARD_TEXT_H }}>
           <p className="text-[12px] leading-4 line-clamp-1 text-gray-200 break-all" title={image.filename}>
             {image.filename}
           </p>
-          <p className="text-[11px] text-gray-400 mt-1.5 tabular-nums">{formatFileSize(image.file_size)}</p>
+          <p className="text-[11px] leading-4 text-gray-400 mt-1 tabular-nums">{formatFileSize(image.file_size)}</p>
         </div>
       </button>
       {!selectMode && (

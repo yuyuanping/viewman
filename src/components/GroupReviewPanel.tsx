@@ -1,14 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Image } from "../types";
 import type { SimilarGroup } from "../similarGroups";
 import { hashDistance, KEEP_RULES, groupsMatching } from "../similarGroups";
 import type { HashPair, KeepRule } from "../similarGroups";
 import { formatFileSize, formatResolution } from "../utils";
+import { JustifiedGrid } from "./JustifiedGrid";
 import { SIMILAR_THRESHOLD_MAX, SIMILAR_THRESHOLD_MIN } from "../hooks/useSimilarDetection";
 
 /** 一组超过这个张数就先折起来：几百张一次铺出来既卡又没法逐张比对 */
 const COLLAPSE_AT = 24;
+
+/** JustifiedGrid 的稳定回调：内联箭头函数每次渲染都换引用，会把布局缓存全部打穿 */
+const aspectOfEntry = (entry: { image: Image }) =>
+  entry.image.width && entry.image.height ? entry.image.width / entry.image.height : 1;
+const keyOfEntry = (entry: { image: Image }) => entry.image.id;
 
 interface GroupReviewPanelProps {
   /** 文案里指代这一批条目的名词（"相似图片" / "重复图片"），标题和提示都由它拼 */
@@ -73,12 +79,29 @@ export function GroupReviewPanel({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   /** 组名/路径筛选：几万组里要能直接查到某一枚，而不是滚到眼花 */
   const [query, setQuery] = useState("");
+  // 面板级只量一次内容宽，共享给所有分组：分组数上千时每组各挂
+  // ResizeObserver + 挂载二次渲染，打开面板就等于卡死
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [contentWidth, setContentWidth] = useState(0);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const sync = () => {
+      const cs = getComputedStyle(el);
+      setContentWidth(el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const selectedInGroups = useMemo(
     () => groups.reduce((n, group) => n + group.ids.filter(id => selectedIds.has(id)).length, 0),
@@ -205,7 +228,7 @@ export function GroupReviewPanel({
         </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 pb-6">
+      <div className="flex-1 overflow-y-auto px-4 pb-6" ref={contentRef}>
         {groups.length === 0 && (
           <p className="text-gray-500 text-sm p-4">
             {detecting
@@ -260,12 +283,18 @@ export function GroupReviewPanel({
                 </button>
                 <span className="text-gray-600 truncate min-w-0 flex-1">{imageById.get(group.keep)?.filename}</span>
               </header>
-              <ul className="flex flex-wrap gap-2.5">
-                {shown.map(({ image, dist, far }) => {
+              <JustifiedGrid
+                items={shown}
+                aspectOf={aspectOfEntry}
+                keyOf={keyOfEntry}
+                width={contentWidth}
+                textH={46}
+                targetImageH={200}
+                renderItem={({ image, dist, far }, imageH) => {
                   const selected = selectedIds.has(image.id);
                   const isKeep = group.keep === image.id;
                   return (
-                    <li key={image.id} className="relative w-[128px] min-w-0">
+                    <div className="relative min-w-0">
                       <div className={`rounded-lg overflow-hidden border border-white/10 bg-[#151f2e]${selected ? " media-selected" : ""}`}>
                         <button
                           type="button"
@@ -274,12 +303,12 @@ export function GroupReviewPanel({
                           className="block w-full text-left"
                           title={selected ? `取消勾选 ${image.filename}` : `勾选 ${image.filename}`}
                         >
-                          <span className="relative block aspect-square bg-[#0f1723] overflow-hidden">
+                          <span className="relative block bg-[#0f1723] overflow-hidden" style={{ height: imageH }}>
                             <img
                               src={convertFileSrc(image.thumbnail_path ?? image.path)}
                               alt={image.filename}
                               loading="lazy"
-                              className="w-full h-full object-cover"
+                              className="w-full h-full object-contain"
                             />
                             {selected && (
                               <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true">✓</span>
@@ -288,13 +317,15 @@ export function GroupReviewPanel({
                               <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-gray-950/85 text-[10px] text-emerald-300">保留</span>
                             )}
                           </span>
-                          <span className="block px-1.5 pt-1.5 text-[11px] leading-4 text-gray-200 truncate" title={image.filename}>
-                            {image.filename}
-                          </span>
-                          <span className="block px-1.5 pb-1.5 text-[10px] text-gray-500 tabular-nums">
-                            {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
-                            {dist !== null && <span className={dist === 0 ? "text-emerald-400" : undefined}> · 距 {dist}</span>}
-                            {far && <span className="text-amber-400/80"> · 远亲</span>}
+                          <span className="block px-1.5 pt-1.5 pb-1.5 overflow-hidden" style={{ height: 46 }}>
+                            <span className="block text-[11px] leading-4 text-gray-200 truncate" title={image.filename}>
+                              {image.filename}
+                            </span>
+                            <span className="block text-[10px] leading-4 text-gray-500 mt-0.5 tabular-nums">
+                              {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
+                              {dist !== null && <span className={dist === 0 ? "text-emerald-400" : undefined}> · 距 {dist}</span>}
+                              {far && <span className="text-amber-400/80"> · 远亲</span>}
+                            </span>
                           </span>
                         </button>
                       </div>
@@ -319,10 +350,10 @@ export function GroupReviewPanel({
                           留
                         </button>
                       </span>
-                    </li>
+                    </div>
                   );
-                })}
-              </ul>
+                }}
+              />
               {ranked.length > COLLAPSE_AT && (
                 <button
                   type="button"
