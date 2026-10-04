@@ -4,6 +4,7 @@ import { api } from "../api";
 import type { MediaKind } from "../types";
 import { dedupeKey } from "../scanRoots";
 import { setMovePromptFlag } from "../hooks/useDeleteShortcut";
+import { useMoveTargets } from "../hooks/useMoveTargets";
 
 /** 发起一次移动的待办：谁触发移动谁填 onPick，确认与真正的移动都在父层做 */
 export interface MovePrompt {
@@ -20,13 +21,13 @@ type MoveTargetsDialogProps = MovePrompt & { onClose: () => void };
 
 /**
  * 「移动到…」目标目录列表：常用落点一目了然，点一行就移过去。
- * 清单按媒体类型存在数据库里，行尾 ✕ 删除，「添加目录…」走系统选择器补新的。
+ * 清单按媒体类型存在数据库里（与数字键直达共享 useMoveTargets 缓存，增删即时同步），
+ * 行尾 ✕ 删除，「添加目录…」走系统选择器补新的。
  * Esc 用捕获阶段监听：面板/查看器也各自监听 Esc 关自己，得赶在它们前面把事件截下，
  * 不然关个移动对话框会连带把底下整层一起关掉。
  */
 export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTargetsDialogProps) {
-  /** null = 清单还在读取；[] = 读到了但是空的 */
-  const [targets, setTargets] = useState<string[] | null>(null);
+  const { targets, setTargets } = useMoveTargets(kind);
   /** 正在往这个目录移动（等待父层的 onPick 返回） */
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -46,18 +47,6 @@ export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTa
   // 行数与选中行收敛：删行后 active 不能悬空（与待移动条数 prop 同名，叫 rowCount）
   const rowCount = targets?.length ?? 0;
   const clamped = rowCount === 0 ? 0 : Math.min(active, rowCount - 1);
-
-  useEffect(() => {
-    let disposed = false;
-    api.loadMoveTargets(kind)
-      .then(list => {
-        if (disposed) return;
-        setTargets(list);
-        setActive(0);
-      })
-      .catch(() => { if (!disposed) { setTargets([]); setActive(0); } });
-    return () => { disposed = true; };
-  }, [kind]);
 
   useEffect(() => {
     // 挂上全局标记：批量的 Del/M 和查看器里的按键见标志就让位，不许隔着对话框误删误移

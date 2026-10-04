@@ -14,10 +14,10 @@ import type { Image } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useThumbnailGeneration } from "../hooks/useThumbnailGeneration";
 import { useDuplicateGroups } from "../hooks/useDuplicateGroups";
-import { useDeleteShortcut, useMoveShortcut } from "../hooks/useDeleteShortcut";
+import { useDeleteShortcut, useMoveShortcut, useMoveNumberShortcut } from "../hooks/useDeleteShortcut";
+import { useMoveTargets } from "../hooks/useMoveTargets";
 import { useRangeSelect } from "../hooks/useRangeSelect";
 import { useBatchSelection } from "../hooks/useBatchSelection";
-import { useSimilarDetection } from "../hooks/useSimilarDetection";
 import { useTemplateSearch } from "../hooks/useTemplateSearch";
 import { selectedDirectoryLabel, sortMedia } from "../libraryFilter";
 import type { SortDirection } from "../libraryFilter";
@@ -80,13 +80,25 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     { generate: api.generateImageThumbnails, resume: api.resumeImageThumbnails, event: "image-thumbnail-progress", unit: "图片" },
   );
 
-  /** 一批图片进回收站，返回真正删掉的 id；库内容已变，视图与统计交给 refreshLibrary 重拉 */
+  /** 一批图片进回收站，返回三类清单；无论成败都刷新视图与统计，
+   *  让界面与库真实内容一致——删库事务炸了会抛错，跳过刷新就留下"删掉了还显示"的旧账 */
   const trashImages = useCallback(async (imageIds: string[]) => {
-    if (imageIds.length === 0) return [];
-    const deleted = await api.deleteImages(imageIds);
-    await refreshLibrary();
-    return deleted;
+    if (imageIds.length === 0) return { deleted: [], stale: [], locked: [] };
+    try {
+      return await api.deleteImages(imageIds);
+    } finally {
+      await refreshLibrary();
+    }
   }, [refreshLibrary]);
+
+  // 比对像素开关：记忆上次选择，重复检测快检/精检两种模式
+  const [pixelVerify, setPixelVerify] = useState<boolean>(
+    () => localStorage.getItem("viewman.duplicatePixelVerify") !== "0",
+  );
+  const changePixelVerify = useCallback((next: boolean) => {
+    setPixelVerify(next);
+    localStorage.setItem("viewman.duplicatePixelVerify", next ? "1" : "0");
+  }, []);
 
   // 重复图检测：后端边核对候选桶边推分组，面板逐组审阅，副本自动勾进多选
   const {
@@ -105,35 +117,11 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     clear: clearDuplicates,
     keep: keepDuplicate,
     autoSelect: autoSelectDuplicates,
+    selectAll: selectAllDuplicates,
     clearSelection: clearDuplicateSelection,
     setGroupSelection: selectDuplicateGroup,
-  } = useDuplicateGroups({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, libraryVersion, setSelectMode, setSelectedIds, notify });
-
-  // 相似图检测（pHash）：后端边算边推组，面板逐组审阅，新出现的副本自动勾进多选
-  const {
-    groups: aliveSimilarGroups,
-    imageById: similarIndex,
-    hashById: similarHashes,
-    similarIds,
-    groupCount: similarGroupCount,
-    stale: similarStale,
-    detected: similarDetected,
-    detecting: detectingSimilar,
-    progress: similarProgress,
-    panelOpen: similarPanelOpen,
-    setPanelOpen: setSimilarPanelOpen,
-    detect: handleDetectSimilar,
-    clear: clearSimilar,
-    keep: keepSimilar,
-    autoSelect: autoSelectSimilar,
-    clearSelection: clearSimilarSelection,
-    setGroupSelection: selectSimilarGroup,
-    recalculating: similarRecalculating,
-    threshold: similarThreshold,
-    rethreshold: rethresholdSimilar,
-    keepRule: similarKeepRule,
-    applyKeepRule: applySimilarKeepRule,
-  } = useSimilarDetection({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, libraryVersion, setSelectMode, setSelectedIds, notify });
+    cachePixelVerify: duplicateCachePixelVerify,
+  } = useDuplicateGroups({ fetchImagesByIds: api.getImagesByIds, libraryTotal: stats?.total ?? 0, libraryVersion, setSelectMode, setSelectedIds, notify, pixelVerify });
 
   // 模板匹配（以图搜图）：右键/查看器里选一张图当模板，命中按距离排成一份清单
   const {
@@ -151,31 +139,20 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     selectIds: selectTemplateIds,
   } = useTemplateSearch({ fetchImagesByIds: api.getImagesByIds, libraryVersion, setSelectMode, setSelectedIds, notify });
 
-  // 两个审阅面板都是全屏遮罩，只能开一个：开这一个就把另一个关掉，重跑检测也一样
+  // 审阅面板是全屏遮罩：重跑检测时把别的面板关掉
   const openDuplicatePanel = useCallback(() => {
-    setSimilarPanelOpen(false);
     setDuplicatePanelOpen(true);
-  }, [setDuplicatePanelOpen, setSimilarPanelOpen]);
-  const openSimilarPanel = useCallback(() => {
-    setDuplicatePanelOpen(false);
-    setSimilarPanelOpen(true);
-  }, [setDuplicatePanelOpen, setSimilarPanelOpen]);
+  }, [setDuplicatePanelOpen]);
   const runDetectDuplicates = useCallback(() => {
-    setSimilarPanelOpen(false);
     handleDetectDuplicates();
-  }, [handleDetectDuplicates, setSimilarPanelOpen]);
-  const runDetectSimilar = useCallback(() => {
-    setDuplicatePanelOpen(false);
-    handleDetectSimilar();
-  }, [handleDetectSimilar, setSimilarPanelOpen]);
+  }, [handleDetectDuplicates]);
 
   // 模板匹配入口：结果面板也是全屏遮罩，发起时把别的面板和查看器都收掉
   const runTemplateSearch = useCallback((image: Image) => {
     setViewerIndex(null);
     setDuplicatePanelOpen(false);
-    setSimilarPanelOpen(false);
     void searchByTemplate(image);
-  }, [searchByTemplate]);
+  }, [searchByTemplate, setDuplicatePanelOpen]);
 
   // 扩展名修正：把"解不出画面"里内容与扩展名不符的图就地改名（后端同步库记录，
   // 不必重扫），改完自动重跑重复检测，让这批图真的参与比对
@@ -200,8 +177,11 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
   const duplicateCaveat = [
     duplicateSkipped > 0 ? `另有 ${duplicateSkipped} 张解不出画面，未参与比对` : "",
     duplicateStale ? STALE_RESULT_NOTE : "",
+    // 缓存那份用的模式跟当前开关不一致：直接看会误判精度，提示重跑一次
+    duplicateCachePixelVerify !== null && duplicateCachePixelVerify !== pixelVerify
+      ? `这份结果是「比对像素${duplicateCachePixelVerify ? "开" : "关"}」模式下跑的，当前开关是「${pixelVerify ? "开" : "关"}」，重跑一次为准`
+      : "",
   ].filter(Boolean).join("；") || undefined;
-  const similarCaveat = similarStale ? STALE_RESULT_NOTE : undefined;
 
   // 目录+搜索过滤在后端做完了，前端只排一次序。排序留在前端：
   // SQLite 没有等价于 Intl.Collator 的中文拼音排序，硬下推会改变排序语义
@@ -221,16 +201,43 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
 
   const { toggleSelect, selectAt } = useRangeSelect(filteredImages, setSelectedIds);
 
+  // Shift 连选不要求先点「多选」：Shift 点下去就直接进多选，工具栏的删除/移动立即跟上
+  const handleGridToggle = useCallback((index: number, shiftKey: boolean) => {
+    if (shiftKey) setSelectMode(true);
+    selectAt(index, shiftKey);
+  }, [selectAt]);
+
   const {
     allSelected, toggleSelectAll, exitSelectMode,
     deletingSelected, movingSelected, movePrompt, setMovePrompt,
-    handleDeleteSelected, handleMoveSelected,
+    handleDeleteSelected, handleMoveSelected, moveSelectedTo,
   } = useBatchSelection({
     view: filteredImages,
     selectedIds, setSelectedIds, setSelectMode,
     notify,
     noun: "图片", measure: "张", kind: "image",
     trash: trashImages,
+    // 删不掉时点名：视图 + 各检测面板的元数据索引先查，查不到的现查后端
+    describe: async (ids) => {
+      const names: string[] = [];
+      const missing: string[] = [];
+      for (const id of ids) {
+        const hit = filteredImages.find(i => i.id === id)
+          ?? duplicateIndex.get(id) ?? templateIndex.get(id);
+        if (hit) names.push(hit.filename);
+        else missing.push(id);
+      }
+      if (missing.length > 0) {
+        try {
+          const rows = await api.getImagesByIds(missing);
+          const byId = new Map(rows.map(r => [r.id, r.filename] as const));
+          for (const id of missing) names.push(byId.get(id) ?? id);
+        } catch {
+          names.push(...missing);
+        }
+      }
+      return names;
+    },
     moveOne: async (id, dir) => { await api.moveImage(id, dir); return id; },
     afterMove: () => refreshLibrary(),
   });
@@ -292,6 +299,12 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
   useMoveShortcut(handleMoveSelected,
     selectedIds.size > 0 && viewerIndex === null && !movingSelected && movePrompt === null);
 
+  // 数字键 1-9 直达：勾选后按 1/2/3… 直接移到清单对应目录，免弹清单。门禁同 M。
+  const { targets: imageMoveTargets } = useMoveTargets("image");
+  useMoveNumberShortcut(imageMoveTargets, (dir) => {
+    void moveSelectedTo(dir);
+  }, selectedIds.size > 0 && viewerIndex === null && !movingSelected && movePrompt === null);
+
   const openViewer = useCallback((image: Image) => {
     const index = filteredImages.findIndex(i => i.id === image.id);
     setViewerList(filteredImages);
@@ -306,10 +319,6 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     setViewerList(list);
     setViewerIndex(at >= 0 ? at : 0);
   }, []);
-  const openSimilarGroup = useCallback(
-    (image: Image, groupIds: string[]) => openGroupInViewer(image, groupIds, similarIndex),
-    [openGroupInViewer, similarIndex],
-  );
   const openDuplicateGroup = useCallback(
     (image: Image, groupIds: string[]) => openGroupInViewer(image, groupIds, duplicateIndex),
     [openGroupInViewer, duplicateIndex],
@@ -327,10 +336,19 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     setViewerList([]);
   }, []);
 
-  // 查看器里删掉当前这张：就地接着看下一张，删完了才关闭
-  const handleViewerDelete = useCallback(async (image: Image) => {
-    const deleted = await trashImages([image.id]);
-    if (deleted.length === 0) return;
+  // 单张删除（面板/查看器右键共用）：返回值表示是否真删掉了，调用方据此决定翻页
+  const handleSingleDelete = useCallback(async (image: Image): Promise<boolean> => {
+    let report;
+    try {
+      report = await trashImages([image.id]);
+    } catch (e) {
+      notify(`删除失败：${String(e)}`, "error");
+      return false;
+    }
+    if (report.locked.length > 0) {
+      notify(`删除失败：${image.filename} 被占用（关闭占用它的程序后重试）`, "error");
+      return false;
+    }
     // 这张若此前被手动勾在多选里，删掉后从勾选集剔除，别让死 id 混进"删除所选"虚报失败数
     setSelectedIds(prev => {
       if (!prev.has(image.id)) return prev;
@@ -338,22 +356,53 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
       next.delete(image.id);
       return next;
     });
+    notify(report.stale.length > 0 ? "记录路径已不在磁盘，仅清理了记录。" : "已将图片移入回收站。");
+    return true;
+  }, [trashImages, notify, setSelectedIds]);
+
+  // 查看器里删掉当前这张：就地接着看下一张，删完了才关闭
+  const handleViewerDelete = useCallback(async (image: Image) => {
+    if (!await handleSingleDelete(image)) return;
     const remaining = viewerList.filter(i => i.id !== image.id);
     setViewerList(remaining);
     if (remaining.length === 0) setViewerIndex(null);
     else setViewerIndex(prev => Math.min(prev ?? 0, remaining.length - 1));
-    notify("已将图片移入回收站。");
-  }, [viewerList, trashImages, notify, setSelectedIds]);
+  }, [viewerList, handleSingleDelete]);
 
-  // 查看器里移动当前这张（M）：弹出目标目录列表，选定后移动；移完图已不在当前
-  // 视图口径里，与删除一样就地接着看下一张。用户在确认框反悔或移动失败时不翻页
+  // 单张移动（面板右键共用）：复用批量那套移动对话框，移完刷新并清理勾选
+  const handleSingleMove = useCallback(async (image: Image) => {
+    setMovePrompt({
+      kind: "image",
+      noun: "图片",
+      count: 1,
+      onPick: async (dir) => {
+        try {
+          await api.moveImage(image.id, dir);
+        } catch (e) {
+          notify(`移动失败：${String(e)}`, "error");
+          return false;
+        }
+        await refreshLibrary();
+        setSelectedIds(prev => {
+          if (!prev.has(image.id)) return prev;
+          const next = new Set(prev);
+          next.delete(image.id);
+          return next;
+        });
+        notify("已移动图片。");
+        return true;
+      },
+    });
+  }, [refreshLibrary, notify, setSelectedIds]);
+
+  // 查看器里移动当前这张（M）：弹出目标目录列表，选定后直接移动；移完图已不在当前
+  // 视图口径里，与删除一样就地接着看下一张。移动失败时不翻页
   const handleViewerMove = useCallback(async (image: Image) => {
     setMovePrompt({
       kind: "image",
       noun: "图片",
       count: 1,
       onPick: async (dir) => {
-        if (!confirm(`将 "${image.filename}" 移动到:\n${dir}`)) return false;
         try {
           await api.moveImage(image.id, dir);
         } catch (e) {
@@ -408,13 +457,6 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
         duplicateGroupCount={duplicateGroupCount}
         onOpenDuplicateGroups={openDuplicatePanel}
         onClearDuplicates={clearDuplicates}
-        onDetectSimilar={runDetectSimilar}
-        detectingSimilar={detectingSimilar}
-        similarDetected={similarDetected}
-        similarGroupCount={similarGroupCount}
-        similarProgress={similarProgress}
-        onOpenSimilarGroups={openSimilarPanel}
-        onClearSimilar={clearSimilar}
         onDetectAnimated={handleDetectAnimated}
         detectingAnimated={detectingAnimated}
         animatedDetected={animatedDetected}
@@ -436,11 +478,10 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
       <ImageGrid
         images={filteredImages}
         duplicateIds={duplicateIds}
-        similarIds={similarIds}
         animatedIds={animatedIds}
         selectMode={selectMode}
         selectedIds={selectedIds}
-        onToggleSelect={selectAt}
+        onToggleSelect={handleGridToggle}
         onOpen={openViewer}
         onScanDirectory={onScanDirectory}
         onDeleted={() => refreshLibrary()}
@@ -458,48 +499,24 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onToggle={toggleSelect}
           onKeep={keepDuplicate}
           onAutoSelect={autoSelectDuplicates}
+          onSelectAll={selectAllDuplicates}
           onClearAll={clearDuplicateSelection}
           onSelectGroup={selectDuplicateGroup}
           selectedTotal={selectedIds.size}
           detecting={detectingDuplicates}
           progress={duplicateProgress}
           caveat={duplicateCaveat}
+          pixelVerify={pixelVerify}
+          onPixelVerify={changePixelVerify}
           onDeleteSelected={handleDeleteSelected}
           deleting={deletingSelected}
           onFixExtensions={handleFixExtensions}
           fixingExtensions={fixingExtensions}
           onOpenImage={openDuplicateGroup}
+          onMoveImage={handleSingleMove}
+          onDeleteImage={handleSingleDelete}
+          onError={(message) => notify(message, "error")}
           onClose={() => setDuplicatePanelOpen(false)}
-        />
-      )}
-      {similarPanelOpen && (
-        <GroupReviewPanel
-          noun="相似图片"
-          progressLabel="补算指纹"
-          groups={aliveSimilarGroups}
-          imageById={similarIndex}
-          hashById={similarHashes}
-          selectedIds={selectedIds}
-          onToggle={toggleSelect}
-          onKeep={keepSimilar}
-          onAutoSelect={autoSelectSimilar}
-          onClearAll={clearSimilarSelection}
-          onSelectGroup={selectSimilarGroup}
-          selectedTotal={selectedIds.size}
-          detecting={detectingSimilar}
-          recalculating={similarRecalculating}
-          progress={similarProgress}
-          caveat={similarCaveat}
-          threshold={similarThreshold}
-          onThreshold={rethresholdSimilar}
-          keepRule={similarKeepRule}
-          onKeepRule={applySimilarKeepRule}
-          onDeleteSelected={handleDeleteSelected}
-          deleting={deletingSelected}
-          onMoveSelected={handleMoveSelected}
-          moving={movingSelected}
-          onOpenImage={openSimilarGroup}
-          onClose={() => setSimilarPanelOpen(false)}
         />
       )}
       {templatePanelOpen && (
@@ -522,6 +539,9 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onMoveSelected={handleMoveSelected}
           moving={movingSelected}
           onOpenImage={(image, matchIds) => openGroupInViewer(image, matchIds, templateIndex)}
+          onMoveImage={handleSingleMove}
+          onDeleteImage={handleSingleDelete}
+          onError={(message) => notify(message, "error")}
           onClose={clearTemplate}
         />
       )}
@@ -543,6 +563,7 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onDelete={handleViewerDelete}
           onMove={handleViewerMove}
           onFindSimilar={runTemplateSearch}
+          onError={(message) => notify(message, "error")}
         />
       )}
     </>

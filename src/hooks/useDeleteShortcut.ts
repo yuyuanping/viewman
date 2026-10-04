@@ -30,14 +30,19 @@ export function movesOnKey(key: string, target: { tagName?: string; isContentEdi
   return (key === "m" || key === "M") && !editableTarget(target);
 }
 
-function useKeyShortcut(fires: (key: string, target: { tagName?: string; isContentEditable?: boolean } | null) => boolean, onFire: () => void, enabled: boolean): void {
+/** 数字键直达移动的谓词：1-9 且不在输入控件里 */
+export function movesOnNumberKey(key: string, target: { tagName?: string; isContentEditable?: boolean } | null): boolean {
+  return key >= "1" && key <= "9" && !editableTarget(target);
+}
+
+function useKeyShortcut(fires: (key: string, target: { tagName?: string; isContentEditable?: boolean } | null) => boolean, onFire: (key: string) => void, enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
     const onKey = (e: KeyboardEvent) => {
       if (isMovePromptOpen()) return;
       if (!fires(e.key, e.target as HTMLElement | null)) return;
       e.preventDefault();
-      onFire();
+      onFire(e.key);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -52,4 +57,16 @@ export function useDeleteShortcut(onDelete: () => void, enabled: boolean): void 
 /** M 键 = 「移动所选」：与 Del 同一套门禁，弹目录选择器后批量移动 */
 export function useMoveShortcut(onMove: () => void, enabled: boolean): void {
   useKeyShortcut(movesOnKey, onMove, enabled);
+}
+
+/** 数字键直达移动：1/2/3… = 目标清单第 1/2/3… 项，一次按键即批量移动（弹清单那步全省了） */
+export function useMoveNumberShortcut(
+  targets: string[] | null | undefined,
+  onMoveTo: (dir: string) => void,
+  enabled: boolean,
+): void {
+  useKeyShortcut(movesOnNumberKey, (key) => {
+    const dir = targets?.[Number(key) - 1];
+    if (dir) onMoveTo(dir);
+  }, enabled);
 }

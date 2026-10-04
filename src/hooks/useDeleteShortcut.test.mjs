@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deletesOnKey, movesOnKey } from './useDeleteShortcut.ts';
+import { deletesOnKey, movesOnKey, movesOnNumberKey } from './useDeleteShortcut.ts';
 
 test('deletesOnKey fires only on Delete', () => {
   assert.equal(deletesOnKey('Delete', null), true);
@@ -28,4 +28,19 @@ test('movesOnKey fires on m/M only, and stays out of editable controls', () => {
   assert.equal(movesOnKey('m', { tagName: 'INPUT' }), false);
   assert.equal(movesOnKey('m', { tagName: 'SELECT' }), false);
   assert.equal(movesOnKey('m', { tagName: 'DIV', isContentEditable: true }), false);
+});
+
+test('movesOnNumberKey fires on 1-9 only', () => {
+  assert.equal(movesOnNumberKey('1', null), true);
+  assert.equal(movesOnNumberKey('5', null), true);
+  assert.equal(movesOnNumberKey('9', null), true);
+  assert.equal(movesOnNumberKey('0', null), false);
+  assert.equal(movesOnNumberKey('a', null), false);
+  assert.equal(movesOnNumberKey('m', null), false);
+});
+
+test('movesOnNumberKey stays out of editable controls', () => {
+  assert.equal(movesOnNumberKey('1', { tagName: 'INPUT' }), false);
+  assert.equal(movesOnNumberKey('1', { tagName: 'SELECT' }), false);
+  assert.equal(movesOnNumberKey('1', { tagName: 'DIV', isContentEditable: true }), false);
 });
