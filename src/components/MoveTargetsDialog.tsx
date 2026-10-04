@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { MediaKind } from "../types";
@@ -30,12 +30,32 @@ export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTa
   /** 正在往这个目录移动（等待父层的 onPick 返回） */
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  /** 键盘/鼠标当前选中的行：默认第一项，M 确认即移 */
+  const [active, setActive] = useState(0);
+  const listRef = useRef<HTMLUListElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  const pick = useCallback(async (dir: string) => {
+    if (busy) return;
+    setBusy(dir);
+    const done = await onPick(dir).catch(() => false);
+    setBusy(null);
+    if (done) onClose();
+  }, [busy, onPick, onClose]);
+
+  // 行数与选中行收敛：删行后 active 不能悬空（与待移动条数 prop 同名，叫 rowCount）
+  const rowCount = targets?.length ?? 0;
+  const clamped = rowCount === 0 ? 0 : Math.min(active, rowCount - 1);
 
   useEffect(() => {
     let disposed = false;
     api.loadMoveTargets(kind)
-      .then(list => { if (!disposed) setTargets(list); })
-      .catch(() => { if (!disposed) setTargets([]); });
+      .then(list => {
+        if (disposed) return;
+        setTargets(list);
+        setActive(0);
+      })
+      .catch(() => { if (!disposed) { setTargets([]); setActive(0); } });
     return () => { disposed = true; };
   }, [kind]);
 
@@ -47,13 +67,43 @@ export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTa
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      if (!busy) onClose();
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        if (!busy) onClose();
+        return;
+      }
+      // 上下切行、M 确认移动。不用回车：焦点落在背后按钮上时回车会被吞（表现为按了没反应，
+      // 实际是背后按钮又被点了一次），M 没有这个原生行为，焦点在哪儿都生效。
+      // 忽略按住不放的 repeat：发起移动的那一下 M 还按着时，不能替用户直接移进第一项目录
+      if (busy || rowCount === 0) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setActive((prev) => {
+          const len = listRef.current?.querySelectorAll("[data-row]").length ?? rowCount;
+          if (len === 0) return 0;
+          return e.key === "ArrowDown" ? (prev + 1) % len : (prev - 1 + len) % len;
+        });
+        return;
+      }
+      // 数字键直达：1/2/3… = 清单第 1/2/3… 行，一次按键即移动，省去「切行 + M」两步。
+      // 清单前几项是高频落点（把常用目录放前 3 位），数字键正好对应。同 M 一样忽略 repeat。
+      if (e.key >= "1" && e.key <= "9" && !e.repeat) {
+        e.preventDefault();
+        e.stopPropagation();
+        const dir = targets?.[Number(e.key) - 1];
+        if (dir) void pick(dir);
+      }
+      if ((e.key === "m" || e.key === "M") && !e.repeat) {
+        e.preventDefault();
+        e.stopPropagation();
+        const dir = targets?.[clamped];
+        if (dir) void pick(dir);
+      }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, busy]);
+  }, [onClose, busy, rowCount, clamped, targets, pick]);
 
   const addDir = async () => {
     if (adding) return;
@@ -85,25 +135,37 @@ export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTa
     });
   };
 
-  const pick = async (dir: string) => {
-    if (busy) return;
-    setBusy(dir);
-    const done = await onPick(dir).catch(() => false);
-    setBusy(null);
-    if (done) onClose();
-  };
+  // 选中行越界收敛 effect：删行后 active 不能悬空（clamped 上面已算好）
+  useEffect(() => {
+    if (clamped !== active) setActive(clamped);
+  }, [clamped, active]);
+
+  // 选中行滚动进视野 + 焦点收进对话框：模态层里焦点落在背后按钮上容易误操作，
+  // 收进来之后 ↑↓/M 顺着清单走，Tab 也落在对话框内
+  useEffect(() => {
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-row="${clamped}"]`);
+    if (el) {
+      el.focus({ preventScroll: true });
+      el.scrollIntoView({ block: "nearest" });
+    } else {
+      cancelRef.current?.focus({ preventScroll: true });
+    }
+  }, [clamped, targets]);
 
   return (
     <div className="image-viewer fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" aria-label="选择移动目标目录">
       <div className="w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col rounded-xl border border-white/10 bg-[#0d1420] shadow-2xl">
         <div className="flex items-center gap-3 px-4 py-3 shrink-0 border-b border-white/10">
           <h2 className="text-sm text-gray-200 font-medium">{`移动 ${count} ${noun}到…`}</h2>
+          {targets && targets.length > 0 && (
+            <span className="text-xs text-gray-500 shrink-0">数字键 1-9 直达对应目录</span>
+          )}
           <span className="toolbar-spacer" />
-          <button type="button" className="toolbar-chip" onClick={onClose} title="取消移动（Esc）">
+          <button ref={cancelRef} type="button" className="toolbar-chip" onClick={onClose} title="取消移动（Esc）">
             取消 (Esc)
           </button>
         </div>
-        <ul className="flex-1 overflow-y-auto px-2 py-2">
+        <ul ref={listRef} className="flex-1 overflow-y-auto px-2 py-2">
           {targets === null && (
             <li className="text-gray-500 text-sm p-4">正在读取目录清单…</li>
           )}
@@ -112,15 +174,22 @@ export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTa
               清单还是空的——点下面的「添加目录…」把常用的落点加进来，以后移动就是点一下的事。
             </li>
           )}
-          {targets?.map(dir => (
-            <li key={dir} className="flex items-center gap-1 rounded-lg hover:bg-white/5">
+          {targets?.map((dir, i) => (
+            <li
+              key={dir}
+              className={`flex items-center gap-1 rounded-lg ${i === clamped ? "bg-white/10 ring-1 ring-blue-500/50" : "hover:bg-white/5"}`}
+            >
               <button
                 type="button"
+                data-row={i}
                 disabled={busy !== null}
                 onClick={() => void pick(dir)}
+                onMouseEnter={() => setActive(i)}
+                onFocus={() => setActive(i)}
                 className="flex-1 min-w-0 text-left px-3 py-2.5 text-[13px] text-gray-200 truncate"
-                title={busy === dir ? "正在移动…" : `移动到 ${dir}`}
+                title={busy === dir ? "正在移动…" : `移动到 ${dir}（M）`}
               >
+                {i < 9 && <span className="inline-block w-4 mr-2 text-gray-500 tabular-nums">{i + 1}</span>}
                 {busy === dir ? "移动中… " : ""}{dir}
               </button>
               <button
