@@ -2,6 +2,19 @@
 
 本地媒体管理工具：视频库 + 图片库，专为**大规模本地媒体目录**（十几万量级文件）设计。基于 Tauri 2 + React 19 + Rust，数据全部存本地 SQLite，不上传任何文件。
 
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [项目结构](docs/PROJECT.md) | 架构、目录树、逐文件说明、数据流 |
+| [数据库设计](docs/DATABASE.md) | 表结构、FTS/索引、迁移、自检自愈 |
+| [命令接口](docs/API.md) | Tauri 命令清单、事件清单 |
+| [开发与构建](docs/DEVELOPMENT.md) | 环境、开发、打包、测试、数据目录 |
+| [安全模型](docs/SECURITY.md) | 本地化、CSP/权限取舍、删除与进程安全 |
+| [日志与排查](docs/TROUBLESHOOTING.md) | 日志方案、数据目录、常见问题 |
+
+历史规格与实现计划见 `docs/superpowers/`。
+
 ## 功能
 
 ### 视频库
@@ -73,18 +86,17 @@ node scripts/gen-icon.cjs
 ```
 src/                    # React 前端
   components/           # 图片库 / 视频库 / 播放器 / 分组复核等 UI
-  hooks/                # usePlayer、useDuplicates、useSimilarDetection 等逻辑钩子
-  detectionCache.ts     # 检测结果缓存
-  justifiedLayout.ts    # 两端对齐网格布局算法
-  scanRoots.ts          # 扫描根目录管理
+  hooks/                # usePlayer、useVideos、useImages、useDuplicates 等逻辑钩子
+  *.ts                  # 纯逻辑模块（布局/缓存/扫描合并等，均配 *.test.mjs）
+  api.ts / types.ts     # 命令封装与类型定义
 src-tauri/
   src/commands/         # Tauri command 层（scan/images/videos/thumbnails/removal/…）
   src/commands/image_detect/  # 重复 / 相似 / 动图 / 模板检测
-  src/db/               # SQLite 访问层
-  src/scanner.rs        # 目录扫描器
+  src/db/               # SQLite 访问层（videos/images/progress/settings）
+  src/scanner.rs        # 目录扫描器 + ffprobe/ffmpeg 封装
   src/watcher.rs        # 文件变化监视（防抖增量扫描）
   src/potplayer.rs      # PotPlayer 检测与调用
-docs/                   # 开发计划与规格文档
+docs/                   # 项目文档（结构 / 数据库 / 接口 / 开发 / 安全 / 排障）
 ```
 
 ## 说明
