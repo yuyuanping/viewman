@@ -8,7 +8,7 @@ use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
 use super::thumbnails::clear_thumbnail_cache;
-use super::{undeleted_targets, video_path_or, AppState, MapErrStr};
+use super::{clear_cancel, is_cancelled, undeleted_targets, video_path_or, AppState, MapErrStr};
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
 fn sniff_image_format(header: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -31,7 +31,7 @@ fn read_header(path: &Path) -> Option<[u8; 16]> {
 
 /// 为重名后的文件寻找不冲突的路径：`name.jpg`、`name (2).jpg`、`name (3).jpg` …
 /// 耗尽后报错而不是退回原路径——原路径必然已存在，调用方会直接覆盖文件
-fn unique_path(target: &Path) -> Result<PathBuf, String> {
+pub(crate) fn unique_path(target: &Path) -> Result<PathBuf, String> {
     if !target.exists() {
         return Ok(target.to_path_buf());
     }
@@ -46,10 +46,60 @@ fn unique_path(target: &Path) -> Result<PathBuf, String> {
     Err("无法生成不重名的目标路径".into())
 }
 
+/// 校验移动目标目录：必须存在且为目录。拒绝空路径与带 `..` 逃逸的写法，
+/// 调用方统一走此口，避免把文件移入不存在的路径导致 rename 后库记录悬空。
+pub(crate) fn validated_target_dir(target_dir: &str) -> Result<PathBuf, String> {
+    if target_dir.trim().is_empty() {
+        return Err("目标目录为空".into());
+    }
+    let dir = Path::new(target_dir);
+    // 显式拒绝父目录跳转语义：目标目录应为明确目录，`..` 极易把文件移出扫描根且难以察觉
+    if dir.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(format!("目标目录不合法（含 ..）：{}", target_dir));
+    }
+    if !dir.is_dir() {
+        return Err(format!("目标目录不存在或不是目录：{}", target_dir));
+    }
+    Ok(dir.to_path_buf())
+}
+
 #[tauri::command]
-pub fn get_videos(state: State<AppState>) -> Result<Vec<Video>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_all_videos(&conn).map_err_str()
+pub async fn get_videos(app: tauri::AppHandle) -> Result<Vec<Video>, String> {
+    // 全表下发是秒级开销：扔进阻塞线程池，别堵 Tauri 主线程冻 UI
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_all_videos(&conn).map_err_str()
+    })
+    .await
+    .map_err_str()?
+}
+
+/// 视频库视图：目录前缀 + 文件名搜索下推到 SQL + 分页，大库不再整表过 IPC。
+/// 读走独立只读连接（WAL 并发读），失败回退全局锁；排序仍由前端 Collator 做。
+#[tauri::command]
+pub async fn get_video_view(
+    app: tauri::AppHandle,
+    dir: Option<String>,
+    search: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<db::VideoView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let limit = limit.unwrap_or(2000);
+        let offset = offset.unwrap_or(0);
+        // 优先只读连接，拿不到才用全局锁（库文件极端情况）
+        if let Ok(conn) = super::read_conn_or_lock(&app) {
+            return db::get_video_view(&conn, dir.as_deref(), &search, limit, offset).map_err_str();
+        }
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_video_view(&conn, dir.as_deref(), &search, limit, offset).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
 /// 打开文件并读取文件头：确认可读性，同时用魔数识别"图片伪装成视频"的假视频
@@ -97,14 +147,14 @@ pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<Vide
     }
 }
 
-/// 批量删除视频：一次回收站事务 + 一次数据库事务，返回成功删除的 id。
+/// 批量删除视频：一次回收站事务 + 一次数据库事务，返回三类清单。
 /// 与图片库同一条通路，勾选几十个不再逐个过桥。
 #[tauri::command]
 pub async fn delete_videos(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     video_ids: Vec<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<crate::models::DeletionReport, String> {
     // 库里已经没有记录的 id 视作已删除（口径同图片侧 split_known_targets），
     // 不能因为个别陈旧 id 让整批都删不动
     let (targets, mut deleted): (Vec<(String, String)>, Vec<String>) = {
@@ -112,7 +162,9 @@ pub async fn delete_videos(
         let mut targets = Vec::with_capacity(video_ids.len());
         let mut gone = Vec::new();
         for video_id in &video_ids {
-            match db::get_video_path(&conn, video_id).map_err_str()? {
+            match db::get_video_path(&conn, video_id)
+                .map_err(|e| format!("读取库记录失败（文件未动）：{}", e))?
+            {
                 Some(path) => targets.push((video_id.clone(), path)),
                 None => gone.push(video_id.clone()),
             }
@@ -120,29 +172,39 @@ pub async fn delete_videos(
         (targets, gone)
     };
 
+    // 记录在但磁盘路径已无文件：库记录要清，磁盘无事可做，单独报 stale
+    let stale: Vec<String> = targets
+        .iter()
+        .filter(|(_, path)| !Path::new(path).exists())
+        .map(|(id, _)| id.clone())
+        .collect();
+
     let for_files = targets.clone();
     let survivors = tauri::async_runtime::spawn_blocking(move || undeleted_targets(&for_files))
         .await
         .map_err_str()?;
-    let failed: std::collections::HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
+    let locked: Vec<String> = survivors.into_iter().map(|(id, _)| id).collect();
+    let locked_set: std::collections::HashSet<String> = locked.iter().cloned().collect();
+    let stale_set: std::collections::HashSet<String> = stale.iter().cloned().collect();
     deleted.extend(
         targets
             .iter()
-            .filter(|(id, _)| !failed.contains(id))
+            .filter(|(id, _)| !locked_set.contains(id) && !stale_set.contains(id))
             .map(|(id, _)| id.clone()),
     );
+    // 进回收站的 + 路径失效的，库记录都要清
+    let mut to_clear = deleted.clone();
+    to_clear.extend(stale.clone());
 
-    if !deleted.is_empty() {
+    if !to_clear.is_empty() {
         let conn = state.db.lock().map_err_str()?;
-        let tx = conn.unchecked_transaction().map_err_str()?;
-        db::delete_videos_by_ids(&tx, &deleted).map_err_str()?;
-        tx.commit().map_err_str()?;
-        for id in &deleted {
+        super::delete_records_with_heal(&conn, &to_clear, "视频", db::delete_videos_by_ids)?;
+        for id in &to_clear {
             clear_thumbnail_cache(&app, id);
         }
     }
 
-    Ok(deleted)
+    Ok(crate::models::DeletionReport { deleted, stale, locked })
 }
 
 /// 把"内容实为图片"的假视频转换成图片：按真实格式另存为 .jpg/.png 等新文件，
@@ -372,16 +434,40 @@ pub async fn convert_short_videos(
     Ok(result)
 }
 
-/// 文件移动：同盘 rename；跨盘（Windows ERROR_NOT_SAME_DEVICE）回退为复制+删源。
-/// 目标已存在时直接报错而不做静默覆盖——检查与执行之间的窗口宁可失败也不吞文件。
+/// 文件移动：同盘 rename；跨盘回退为复制+删源。
+/// 目标已存在时直接报错而不做静默覆盖。
+/// TOCTOU 对策：跨盘走"复制到同目录 .tmp 再 rename"两阶段，rename 覆盖语义即并发仲裁，
+/// 不再依赖先查后做；跨盘判定按 ErrorKind::CrossesDevices + Windows 17 双口径。
 pub(crate) fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
     if dst.exists() {
         return Err(format!("目标文件已存在，拒绝覆盖: {}", dst.display()));
     }
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(17) => {
-            std::fs::copy(src, dst).map_err(|e| format!("跨盘复制失败: {}", e))?;
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices || e.raw_os_error() == Some(17) => {
+            // 跨盘：先复制到同目录唯一 tmp（create_new 防并发覆盖），再原子 rename 到最终名
+            let tmp = dst.with_extension(format!(
+                "{}.viewman-part",
+                dst.extension().and_then(|s| s.to_str()).unwrap_or("tmp")
+            ));
+            // tmp 已存在说明上次中断残留，先清掉再 create_new
+            let _ = std::fs::remove_file(&tmp);
+            let mut reader = std::fs::File::open(src).map_err(|e| format!("跨盘复制失败（读源）: {}", e))?;
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| format!("跨盘复制失败（写临时）: {}", e))?;
+            std::io::copy(&mut reader, &mut writer).map_err(|e| format!("跨盘复制失败: {}", e))?;
+            drop(writer);
+            match std::fs::rename(&tmp, dst) {
+                Ok(()) => {}
+                Err(rename_err) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    // 并发下目标已被占：宁可失败也不覆盖
+                    return Err(format!("跨盘写回失败（目标可能已被占用）: {}", rename_err));
+                }
+            }
             std::fs::remove_file(src)
                 .map_err(|e| format!("复制成功但删除源文件失败，请手动清理: {}", e))?;
             Ok(())
@@ -419,18 +505,17 @@ pub async fn move_video(
         let conn = state.db.lock().map_err_str()?;
         let old_path = video_path_or(&conn, &video_id)?;
         let src = Path::new(&old_path);
-        let filename = src
-            .file_name()
-            .ok_or_else(|| "源文件路径无效".to_string())?
-            .to_string_lossy()
-            .to_string();
-        let dir = Path::new(&target_dir);
+        let dir = validated_target_dir(&target_dir)?;
         if same_target_dir(&old_path, &target_dir) {
             return Err("文件已经在该目录中".into());
         }
+        // 非 UTF-8 文件名：用 OsStr 原样拼接，to_string_lossy 只用于库记录与重名后缀
+        let filename_os = src
+            .file_name()
+            .ok_or_else(|| "源文件路径无效".to_string())?;
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
         let ext = src.extension().and_then(|s| s.to_str());
-        let mut candidate = dir.join(&filename);
+        let mut candidate = dir.join(filename_os);
         let mut idx = 1;
         while candidate.exists()
             || db::is_path_taken(&conn, &candidate.to_string_lossy(), &video_id)
@@ -558,12 +643,17 @@ pub async fn convert_hevc_videos(
     let transcoded_dir = app.path().app_data_dir().map_err_str()?.join("transcoded");
     let total = jobs.len();
     let task_app = app.clone();
+    clear_cancel(&app, "hevc");
 
     let (done, errors) = tauri::async_runtime::spawn_blocking(move || {
         let mut done: Vec<(String, String, i64)> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         let mut converted = 0usize;
         for (index, (id, path)) in jobs.iter().enumerate() {
+            // 取消即停：已转好的照常落库返回
+            if is_cancelled(&task_app, "hevc") {
+                break;
+            }
             let p = Path::new(path);
             let emit = |converted: usize, failed: usize| {
                 let _ = task_app.emit(
@@ -586,8 +676,13 @@ pub async fn convert_hevc_videos(
                 emit(converted, errors.len());
                 continue;
             }
-            let tmp = p.with_file_name(format!(".viewman-h264-{}.tmp.mp4", id));
-            if let Err(e) = scanner::transcode_to_h264(path, &tmp) {
+            // 临时文件放 app_data/transcoded：源目录可能只读/无权限/空间不足，
+            // 且转码中途被杀不会在用户目录留下孤儿 tmp
+            let tmp = transcoded_dir.join(format!(".viewman-h264-{}.tmp.mp4", id));
+            if let Err(e) = std::fs::create_dir_all(&transcoded_dir)
+                .map_err(|e| format!("创建转码目录失败: {}", e))
+                .and_then(|()| scanner::transcode_to_h264(path, &tmp))
+            {
                 let _ = std::fs::remove_file(&tmp);
                 errors.push(format!("{} 转码失败: {}", p.display(), e));
                 emit(converted, errors.len());

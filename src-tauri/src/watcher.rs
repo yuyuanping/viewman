@@ -57,6 +57,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub(crate) fn spawn(app: tauri::AppHandle) {
     let roots = read_roots(&app);
 
+    // notify 6 的 recommended_watcher 只接受无界 mpsc::Sender，有界背压做在消费侧：
+    // 防抖循环内 try_recv 一次收走突发堆积，pending 按 (根, 类型) 去重，队列本身不跨窗口堆积
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = match notify::recommended_watcher(tx) {
         Ok(w) => w,
@@ -102,7 +104,8 @@ fn read_roots(app: &tauri::AppHandle) -> Vec<(&'static str, PathBuf)> {
     out
 }
 
-/// 事件主循环：防抖聚合 → 命中的根各跑一次增量扫描 → 刷新 watch 列表
+/// 事件主循环：防抖聚合 → 命中的根各跑一次增量扫描 → 刷新 watch 列表。
+/// 失败退避：同一根连续失败时按 30s×次数（封顶 10min）跳过，避免拔盘后每 3s 全量 walk 一次空转。
 fn event_loop(
     app: tauri::AppHandle,
     rx: Receiver<notify::Result<notify::Event>>,
@@ -110,6 +113,8 @@ fn event_loop(
     mut watcher: notify::RecommendedWatcher,
 ) {
     let mut pending: HashSet<PendingScan> = HashSet::new();
+    let mut backoff: std::collections::HashMap<(PathBuf, &'static str), (u32, std::time::Instant)> =
+        std::collections::HashMap::new();
     loop {
         // 窗口起点：等到第一条事件；无事件时阻塞
         let first = match rx.recv() {
@@ -119,12 +124,19 @@ fn event_loop(
         if let Some(p) = classify(&first, &watched) {
             pending.insert(p);
         }
-        // 静默期满才放行；期间新事件继续入桶
+        // 静默期满才放行；期间新事件继续入桶。通道有界时这里 drain 掉突发堆积，
+        // 只保留 (根, 类型) 去重结果，队列本身不会胀
         loop {
             match rx.recv_timeout(DEBOUNCE) {
                 Ok(ev) => {
                     if let Some(p) = classify(&ev, &watched) {
                         pending.insert(p);
+                    }
+                    // 突发洪峰时把已排队的也一次收走，避免串行 3s 窗口拖长尾
+                    while let Ok(ev) = rx.try_recv() {
+                        if let Some(p) = classify(&ev, &watched) {
+                            pending.insert(p);
+                        }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
@@ -133,7 +145,19 @@ fn event_loop(
         }
         // 串行扫：本线程就是后台线程，避免并发写库
         for p in pending.drain() {
-            run_scan(&app, p.kind, &p.root);
+            let key = (p.root.clone(), p.kind);
+            if let Some((fails, since)) = backoff.get(&key) {
+                let wait = std::time::Duration::from_secs((*fails as u64 * 30).min(600));
+                if since.elapsed() < wait {
+                    continue;
+                }
+            }
+            if run_scan(&app, p.kind, &p.root) {
+                backoff.remove(&key);
+            } else {
+                let fails = backoff.get(&key).map(|(f, _)| *f).unwrap_or(0) + 1;
+                backoff.insert(key, (fails, std::time::Instant::now()));
+            }
         }
         // 重读根表：用户新加/移除的扫描根动态跟进
         refresh_watch_list(&app, &watched, &mut watcher);
@@ -162,7 +186,8 @@ fn classify(
 
 /// 对一个根跑增量扫描，把本轮的增删原样广播出去（前端就地合并，不再整库重拉）。
 /// 失败静默（磁盘可能被拔走），下轮事件再试；失败时不广播，库本来就没改动。
-fn run_scan(app: &tauri::AppHandle, kind: &'static str, root: &PathBuf) {
+/// 返回是否成功，供事件循环做失败退避。
+fn run_scan(app: &tauri::AppHandle, kind: &'static str, root: &PathBuf) -> bool {
     let dir = root.to_string_lossy().to_string();
     let state = app.state::<AppState>();
     let result = match kind {
@@ -174,6 +199,9 @@ fn run_scan(app: &tauri::AppHandle, kind: &'static str, root: &PathBuf) {
     };
     if let Err(e) = result {
         eprintln!("自动重扫失败（{kind} {root:?}）：{e}");
+        false
+    } else {
+        true
     }
 }
 

@@ -51,9 +51,7 @@ export function useHevcConversion(loadVideos: () => Promise<void>, notify: Notif
 
   const convert = useCallback(async () => {
     if (hevcIds.length === 0) return;
-    if (!confirm(
-      `将 ${hevcIds.length} 个 HEVC 视频就地重编码为 H.264（画质略降），原文件移入回收站（清空回收站后不可恢复）。转换耗时较长，确定继续？`,
-    )) return;
+    // 无确认直接执行：转码产物写回原名、原文件进回收站（可恢复），耗时由进度条展示
     setConverting(true);
     setHevcProgress({ processed: 0, total: hevcIds.length });
     try {

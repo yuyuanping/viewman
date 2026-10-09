@@ -1,6 +1,10 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { Video } from "../types";
+
+/** 文件校验并发数：20 路过桥，19 万条不再串行卡死；进度 200ms 节流一次 */
+const CHECK_CONCURRENCY = 20;
+const PROGRESS_THROTTLE_MS = 200;
 
 /** 逐个校验文件：不可读的标记为"丢失"，内容实为图片的标记为"假视频"，只标记不动数据库，避免磁盘离线时误判为已删除 */
 export function useFileCheck(
@@ -13,22 +17,52 @@ export function useFileCheck(
   const [checkProgress, setCheckProgress] = useState<{ processed: number; total: number } | null>(null);
   const [converting, setConverting] = useState(false);
   const [convertingShorts, setConvertingShorts] = useState(false);
+  // 取消标记：开始一轮时新建，取消按钮/重入时置 true，worker 循环据此提前退出
+  const cancelRef = useRef(false);
+
+  const cancelCheck = useCallback(() => {
+    cancelRef.current = true;
+  }, []);
 
   const checkFiles = useCallback(async () => {
-    if (videos.length === 0) return;
+    if (videos.length === 0 || checkProgress !== null) return;
+    cancelRef.current = false;
     const unreadable = new Set<string>();
     const fake = new Set<string>();
-    setCheckProgress({ processed: 0, total: videos.length });
-    try {
-      for (let i = 0; i < videos.length; i++) {
+    const total = videos.length;
+    let processed = 0;
+    let lastEmit = 0;
+    setCheckProgress({ processed: 0, total });
+    const snapshot = videos.slice();
+    let next = 0;
+    const worker = async () => {
+      while (true) {
+        if (cancelRef.current) break;
+        const i = next++;
+        if (i >= snapshot.length) break;
         try {
-          const result = await api.checkVideoFile(videos[i].id);
-          if (result.status === "fake_image") fake.add(videos[i].id);
-          else if (result.status !== "readable") unreadable.add(videos[i].id);
+          const result = await api.checkVideoFile(snapshot[i].id);
+          if (cancelRef.current) break;
+          if (result.status === "fake_image") fake.add(snapshot[i].id);
+          else if (result.status !== "readable") unreadable.add(snapshot[i].id);
         } catch {
-          unreadable.add(videos[i].id);
+          if (!cancelRef.current) unreadable.add(snapshot[i].id);
         }
-        setCheckProgress({ processed: i + 1, total: videos.length });
+        processed += 1;
+        const now = Date.now();
+        if (now - lastEmit >= PROGRESS_THROTTLE_MS || processed >= total) {
+          lastEmit = now;
+          setCheckProgress({ processed, total });
+        }
+      }
+    };
+    try {
+      await Promise.all(
+        Array.from({ length: Math.min(CHECK_CONCURRENCY, snapshot.length) }, () => worker()),
+      );
+      if (cancelRef.current) {
+        onNotice("文件检查已取消（已标记部分保留）。");
+        return;
       }
       setMissingIds(unreadable);
       setFakeIds(fake);
@@ -41,13 +75,10 @@ export function useFileCheck(
     } finally {
       setCheckProgress(null);
     }
-  }, [videos, onNotice]);
+  }, [videos, onNotice, checkProgress]);
 
   const convertFakes = useCallback(async () => {
     if (fakeIds.size === 0 || converting) return;
-    if (!confirm(
-      `将 ${fakeIds.size} 个假视频按真实内容另存为图片文件（.jpg/.png 等），源文件移入回收站并从库中移除。确定？`,
-    )) return;
     setConverting(true);
     try {
       const result = await api.convertFakeImages([...fakeIds]);
@@ -95,9 +126,6 @@ export function useFileCheck(
 
   const convertShorts = useCallback(async () => {
     if (shortIds.size === 0 || convertingShorts) return;
-    if (!confirm(
-      `将对 ${shortIds.size} 个静图视频/图片伪装文件转换为图片（静图视频抽首帧，伪装图片按真实格式另存），在原目录生成同名 .jpg；原文件移入回收站并从库中移除。确定？`,
-    )) return;
     setConvertingShorts(true);
     try {
       const result = await api.convertShortVideos([...shortIds]);
@@ -117,6 +145,6 @@ export function useFileCheck(
     missingIds, clearMissing,
     fakeIds, clearFake, convertFakes, converting,
     shortIds, convertShorts, convertingShorts, shortsDetected, detectShorts, detecting, clearShorts,
-    checkProgress, checking: checkProgress !== null, checkFiles,
+    checkProgress, checking: checkProgress !== null, checkFiles, cancelCheck,
   };
 }

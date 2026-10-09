@@ -4,6 +4,7 @@ import type { Image } from "../types";
 import type { TemplateMatch } from "../api";
 import { formatFileSize, formatResolution } from "../utils";
 import { JustifiedGrid } from "./JustifiedGrid";
+import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
 import { TEMPLATE_THRESHOLD_MAX } from "../hooks/useTemplateSearch";
 
 /** JustifiedGrid 的稳定回调：内联箭头函数每次渲染都换引用，会把布局缓存全部打穿 */
@@ -36,6 +37,12 @@ interface TemplateMatchPanelProps {
   moving?: boolean;
   /** 放大看：以命中清单为翻页范围 */
   onOpenImage: (image: Image, matchIds: string[]) => void;
+  /** 单张移动：右键菜单用，接到父层的移动对话框 */
+  onMoveImage?: (image: Image) => void;
+  /** 单张删除：右键菜单用，进回收站并清理勾选 */
+  onDeleteImage?: (image: Image) => void;
+  /** 非阻塞错误回报（父层转 toast） */
+  onError?: (message: string) => void;
   onClose: () => void;
 }
 
@@ -47,7 +54,7 @@ interface TemplateMatchPanelProps {
 export function TemplateMatchPanel({
   template, matches, imageById, skipped, threshold, onThreshold, searching, progress,
   selectedIds, onToggle, onSelectIds, onClearAll, selectedTotal, onDeleteSelected, deleting,
-  onMoveSelected, moving, onOpenImage, onClose,
+  onMoveSelected, moving, onOpenImage, onMoveImage, onDeleteImage, onError, onClose,
 }: TemplateMatchPanelProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -65,6 +72,10 @@ export function TemplateMatchPanel({
   const visibleIds = useMemo(() => visible.map(row => row.image.id), [visible]);
   const selectedInList = visibleIds.filter(id => selectedIds.has(id)).length;
   const allChecked = visibleIds.length > 0 && selectedInList === visibleIds.length;
+
+  // 命中右键菜单：与网格卡片同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站）
+  const { menu, openMenu, closeMenu } = useContextMenu<Image>();
+  const { reveal, copyName } = useFileMenuActions(onError);
 
   return (
     <div className="image-viewer fixed inset-0 z-40 flex flex-col" role="dialog" aria-modal="true" aria-label="模板匹配结果">
@@ -91,6 +102,16 @@ export function TemplateMatchPanel({
           title="汉明距离阈值（两枚指纹的距离之和）：只显示与模板差这么多位以内的图。往右更宽松，找得多、撞车也多。命中清单已整份返回，改这里只是前端过滤"
         >
           宽容度
+          <button
+            type="button"
+            className="toolbar-chip px-2"
+            disabled={threshold <= 0}
+            onClick={() => onThreshold(threshold - 1)}
+            title="收紧一档（更严格）"
+            aria-label="宽容度减一"
+          >
+            −
+          </button>
           <input
             type="range"
             min={0}
@@ -101,6 +122,16 @@ export function TemplateMatchPanel({
             className="w-28 accent-blue-500"
             aria-label="模板匹配宽容度（汉明距离阈值）"
           />
+          <button
+            type="button"
+            className="toolbar-chip px-2"
+            disabled={threshold >= TEMPLATE_THRESHOLD_MAX}
+            onClick={() => onThreshold(threshold + 1)}
+            title="放宽一档（找得更多）"
+            aria-label="宽容度加一"
+          >
+            ＋
+          </button>
           <span className="tabular-nums text-gray-200">{threshold}</span>
         </label>
         <span className="toolbar-spacer" />
@@ -170,7 +201,7 @@ export function TemplateMatchPanel({
             renderItem={({ hit, image }, imageH) => {
               const selected = selectedIds.has(image.id);
               return (
-                <div className="relative min-w-0">
+                <div className="relative min-w-0" onContextMenu={(e) => openMenu(e, image)}>
                   <div className={`rounded-lg overflow-hidden border border-white/10 bg-[#151f2e]${selected ? " media-selected" : ""}`}>
                     <button
                       type="button"
@@ -221,6 +252,24 @@ export function TemplateMatchPanel({
           />
         )}
       </div>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={closeMenu}
+          label={`${menu.target.filename} 的操作菜单`}
+          items={[
+            { key: "reveal", label: "打开文件所在位置", onSelect: () => reveal(menu.target.path) },
+            { key: "copy", label: "复制文件名", onSelect: () => copyName(menu.target.filename) },
+            ...(onMoveImage
+              ? [{ key: "move", label: "移动到…", onSelect: () => onMoveImage(menu.target) }]
+              : []),
+            ...(onDeleteImage
+              ? [{ key: "delete", label: "删除到回收站", onSelect: () => onDeleteImage(menu.target) }]
+              : []),
+          ]}
+        />
+      )}
     </div>
   );
 }

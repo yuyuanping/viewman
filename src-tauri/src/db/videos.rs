@@ -39,7 +39,6 @@ pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
 /// 某个扫描根（含全部子目录）下的在库视频：扫描启动只需要本根的旧账，
 /// 不必全表拉一遍——那会把其它命令堵在数据库锁后面。前缀已按
 /// dir_prefix_lower 规范成小写带结尾反斜杠，LIKE 对 ASCII 不区分大小写。
-
 pub fn get_videos_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<Vec<Video>> {
     let pattern = format!("{}%", like_escape(prefix_lower));
     let mut stmt = conn.prepare(
@@ -51,11 +50,13 @@ pub fn get_videos_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<
     Ok(videos)
 }
 
+pub(crate) type ThumbnailEntry = (String, String, Option<f64>, Option<String>);
+
 /// 封面批次待办的最小行集 (id, 源路径, 时长, 封面路径)：续跑/生成前的逐条 stat
 /// 要在锁外做，锁内只留这一下查询，全表九列的大行集没必要过一遍
 pub fn get_video_thumbnail_entries(
     conn: &Connection,
-) -> Result<Vec<(String, String, Option<f64>, Option<String>)>> {
+) -> Result<Vec<ThumbnailEntry>> {
     let mut stmt = conn.prepare("SELECT id, path, duration, thumbnail_path FROM videos")?;
     let rows = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
@@ -205,9 +206,86 @@ pub fn save_video_frames(
     Ok(())
 }
 
-pub fn get_video_path(conn: &Connection, video_id: &str) -> Result<Option<String>> {
-    conn.query_row("SELECT path FROM videos WHERE id = ?1", params![video_id], |row| row.get(0))
-        .optional()
+/// 视频库视图：目录前缀 + 文件名搜索下推到 SQL（与图片 get_image_view 同口径），
+/// 行序不定（中文拼音排序由前端 Collator 做），分页 LIMIT/OFFSET 避免 19 万行整表过 IPC。
+/// 搜索优先走 FTS5 MATCH（毫秒级），特殊字符回退 LIKE。
+#[derive(serde::Serialize)]
+pub struct VideoView {
+    pub items: Vec<Video>,
+    pub total: i64,
+    pub total_size: i64,
+}
+
+fn video_dir_like_pattern(dir: &str) -> String {
+    let normalized = dir.replace('/', "\\");
+    let trimmed = normalized.trim_end_matches('\\');
+    format!("{}\\\\%", super::like_escape(trimmed))
+}
+
+pub fn get_video_view(
+    conn: &Connection,
+    dir: Option<&str>,
+    search: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<VideoView> {
+    let limit = limit.clamp(1, 5000);
+    let offset = offset.max(0);
+    let mut filters: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+    if let Some(dir) = dir {
+        if !dir.is_empty() {
+            filters.push("v.path LIKE ? ESCAPE '\\'".into());
+            values.push(video_dir_like_pattern(dir));
+        }
+    }
+    let term = search.trim();
+    // FTS 命中则用 rowid 半连接；失败/无 FTS 时回退 LIKE（调用方无感）
+    let mut use_fts = false;
+    let mut fts_q = String::new();
+    if !term.is_empty() {
+        if let Some(q) = super::fts_query(term) {
+            // 预检 MATCH 语法是否合法，避免非法查询直接报错整单
+            let check = conn.prepare("SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?1 LIMIT 1");
+            if let Ok(mut stmt) = check {
+                if stmt.query_map(params![q], |_| Ok(())).is_ok() {
+                    use_fts = true;
+                    fts_q = q;
+                }
+            }
+        }
+        if use_fts {
+            filters.push("v.rowid IN (SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?)".into());
+            values.push(fts_q.clone());
+        } else {
+            filters.push("v.filename LIKE ? ESCAPE '\\'".into());
+            values.push(format!("%{}%", super::like_escape(term)));
+        }
+    }
+    let where_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", filters.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT v.id, v.path, v.filename, v.duration, v.width, v.height, v.file_size, v.created_at, v.thumbnail_path FROM videos v {where_clause} LIMIT ? OFFSET ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut all_values = values.clone();
+    all_values.push(limit.to_string());
+    all_values.push(offset.to_string());
+    let items = stmt
+        .query_map(rusqlite::params_from_iter(all_values.iter()), |row| video_from_row(row, 8))?
+        .collect::<Result<Vec<_>>>()?;
+
+    let sql = format!("SELECT COUNT(*), COALESCE(SUM(v.file_size), 0) FROM videos v {where_clause}");
+    let (total, total_size) = conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(values.iter()),
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    Ok(VideoView { items, total, total_size })
 }
 
 /// 迁移库记录指向的新路径（文件本体由调用方先行移动）
@@ -260,6 +338,11 @@ pub fn is_path_taken(conn: &Connection, path: &str, exclude_id: &str) -> Result<
         |row| row.get(0),
     )?;
     Ok(n > 0)
+}
+
+pub fn get_video_path(conn: &Connection, video_id: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT path FROM videos WHERE id = ?1", params![video_id], |row| row.get(0))
+        .optional()
 }
 
 pub fn get_video_path_and_duration(conn: &Connection, video_id: &str) -> Result<Option<(String, Option<f64>)>> {
@@ -366,6 +449,64 @@ mod tests {
 
         assert_eq!(get_video_path(&conn, "v1").unwrap(), Some("C:\\v.mp4".to_string()));
         assert_eq!(get_video_path(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn test_video_view_paginates_and_filters() {
+        let conn = setup_test_db();
+        for (id, path, name) in [
+            ("v1", r"D:\vid\alpha.mp4", "alpha.mp4"),
+            ("v2", r"D:\vid\beta.mp4", "beta.mp4"),
+            ("v3", r"D:\vid\sub\gamma.mp4", "gamma.mp4"),
+            ("v4", r"E:\other\delta.mp4", "delta.mp4"),
+        ] {
+            let mut v = sample_video(id, path);
+            v.filename = name.into();
+            v.file_size = 100;
+            insert_video(&conn, &v).unwrap();
+        }
+
+        // 全库视图：总数与总大小一次带回
+        let view = get_video_view(&conn, None, "", 10, 0).unwrap();
+        assert_eq!(view.total, 4);
+        assert_eq!(view.total_size, 400);
+        assert_eq!(view.items.len(), 4);
+
+        // 分页：第 1 页 2 条，第 2 页 2 条，不重不漏
+        let p1 = get_video_view(&conn, None, "", 2, 0).unwrap();
+        let p2 = get_video_view(&conn, None, "", 2, 2).unwrap();
+        assert_eq!(p1.items.len(), 2);
+        assert_eq!(p2.items.len(), 2);
+        let mut ids: Vec<&str> = p1.items.iter().chain(p2.items.iter()).map(|v| v.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["v1", "v2", "v3", "v4"]);
+
+        // 目录前缀只含该目录（含子目录），E 盘的不掺进来
+        let view = get_video_view(&conn, Some(r"D:\vid"), "", 10, 0).unwrap();
+        assert_eq!(view.total, 3);
+
+        // 文件名搜索（FTS 或 LIKE 回退，口径一致）
+        let view = get_video_view(&conn, None, "alpha", 10, 0).unwrap();
+        assert_eq!(view.total, 1);
+        assert_eq!(view.items[0].id, "v1");
+
+        // 目录 + 搜索组合
+        let view = get_video_view(&conn, Some(r"D:\vid"), "gamma", 10, 0).unwrap();
+        assert_eq!(view.total, 1);
+        assert_eq!(view.items[0].id, "v3");
+    }
+
+    #[test]
+    fn test_fts_query_builds_prefix_match() {
+        assert_eq!(crate::db::fts_query(""), None);
+        assert_eq!(crate::db::fts_query("  "), None);
+        // 双引号含注入语义，回退 LIKE
+        assert_eq!(crate::db::fts_query("a\"b"), None);
+        assert_eq!(crate::db::fts_query("宫崎").as_deref(), Some("\"宫崎\"*"));
+        assert_eq!(
+            crate::db::fts_query("a b").as_deref(),
+            Some("\"a\"* AND \"b\"*")
+        );
     }
 
     #[test]

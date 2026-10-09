@@ -4,6 +4,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Image } from "../types";
 import { formatFileSize, formatResolution } from "../utils";
 import { isMovePromptOpen } from "../hooks/useDeleteShortcut";
+import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
 
 interface ImageViewerProps {
   images: Image[];
@@ -16,6 +17,8 @@ interface ImageViewerProps {
   onMove?: (image: Image) => Promise<void>;
   /** 以当前这张为模板找库内相似图；不给就不显示工具栏按钮 */
   onFindSimilar?: (image: Image) => void;
+  /** 操作失败的非阻塞回报（父层转 toast）；不给则静默记日志 */
+  onError?: (message: string) => void;
 }
 
 /** 滚轮每档缩放倍率；缩放范围 clamp 在 10%–800% */
@@ -30,7 +33,10 @@ const SLIDE_DELAYS = [2, 5, 10] as const;
 const clampScale = (v: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
 
 /** 全屏查看当前列表中的图片：← → 翻页，Esc 关闭，Del 删除当前张，M 移动当前张，滚轮缩放，拖拽平移，R 旋转，0 适应窗口 */
-export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMove, onFindSimilar }: ImageViewerProps) {
+export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMove, onFindSimilar, onError }: ImageViewerProps) {
+  // 当前图右键菜单：与网格卡片同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站）
+  const { menu, openMenu, closeMenu } = useContextMenu<Image>();
+  const { reveal, copyName } = useFileMenuActions(onError);
   // zoom=null 表示"适应窗口"；数字是相对原图的缩放倍率
   const [zoom, setZoom] = useState<number | null>(null);
   const [rotation, setRotation] = useState(0);
@@ -121,26 +127,25 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
     setZoom(prev => (prev === 1 ? null : 1));
   }, []);
 
-  /** 删除当前这张：先确认再交给父层，按钮和 Del 快捷键共用这条通路 */
+  /** 删除当前这张：直接交给父层（进回收站，可恢复），按钮和 Del 快捷键共用这条通路 */
   const deleteCurrent = useCallback(async () => {
     if (!image) return;
-    if (!confirm(`确定要删除 "${image.filename}" 到回收站？`)) return;
     try {
       await onDelete(image);
     } catch (err) {
-      alert("删除失败: " + err);
+      onError?.(`删除失败：${String(err)}`);
     }
-  }, [image, onDelete]);
+  }, [image, onDelete, onError]);
 
-  /** 移动当前这张：目录选择与确认在父层，这里只管发起和报错 */
+  /** 移动当前这张：目录选择在父层，这里只管发起和报错 */
   const moveCurrent = useCallback(async () => {
     if (!image || !onMove) return;
     try {
       await onMove(image);
     } catch (err) {
-      alert("移动失败: " + err);
+      onError?.(`移动失败：${String(err)}`);
     }
-  }, [image, onMove]);
+  }, [image, onMove, onError]);
 
   const handleDragStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -247,7 +252,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
         <button
           type="button"
           className="toolbar-chip"
-          onClick={() => revealItemInDir(image.path).catch(err => alert("打开文件所在位置失败: " + err))}
+          onClick={() => revealItemInDir(image.path).catch(err => onError?.(`打开文件所在位置失败：${String(err)}`))}
           title="在资源管理器中定位该文件"
         >
           打开位置
@@ -272,6 +277,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
         onPointerMove={handleDragMove}
         onPointerUp={handleDragEnd}
         onPointerCancel={handleDragEnd}
+        onContextMenu={(e) => openMenu(e, image)}
       >
         {broken ? (
           <p className="text-gray-400 text-sm p-6">该图片当前无法显示（文件可能已被移动、删除或格式不受支持）。</p>
@@ -304,6 +310,40 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
           下一张 →
         </button>
       </div>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={closeMenu}
+          label={`${menu.target.filename} 的操作菜单`}
+          items={[
+            { key: "reveal", label: "打开文件所在位置", onSelect: () => reveal(menu.target.path) },
+            { key: "copy", label: "复制文件名", onSelect: () => copyName(menu.target.filename) },
+            ...(onFindSimilar
+              ? [{ key: "similar", label: "以此为模板找相似", onSelect: () => onFindSimilar(menu.target) }]
+              : []),
+            ...(onMove
+              ? [{
+                  key: "move",
+                  label: "移动到…",
+                  // 用菜单打开时那张（menu.target），不用闭包里的 current：幻灯片可能已经翻页
+                  onSelect: () => {
+                    const v = menu.target;
+                    void onMove(v).catch(err => onError?.(`移动失败：${String(err)}`));
+                  },
+                }]
+              : []),
+            {
+              key: "delete",
+              label: "删除到回收站",
+              onSelect: () => {
+                const v = menu.target;
+                void onDelete(v).catch(err => onError?.(`删除失败：${String(err)}`));
+              },
+            },
+          ]}
+        />
+      )}
     </div>
   );
 }

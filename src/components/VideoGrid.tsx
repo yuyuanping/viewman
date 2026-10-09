@@ -38,7 +38,14 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
   const [start, end] = slice;
 
   return (
-    <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
+    <div
+      className="flex-1 overflow-y-auto"
+      ref={viewportRef}
+      onScroll={onScroll}
+      role="grid"
+      aria-label={`视频网格，共 ${videos.length} 个视频`}
+      aria-rowcount={videos.length}
+    >
       <div className="video-tiles" ref={gridRef}>
         {padTop > 0 && <div data-pad="top" style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
         {videos.slice(start, end).map((video, at) => (

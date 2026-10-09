@@ -6,8 +6,6 @@ import { justifiedRows, justifiedWindow, cardAspect, CARD_TEXT_H } from "../just
 interface ImageGridProps {
   images: Image[];
   duplicateIds?: Set<string>;
-  /** 相似图检测命中的条目（pHash）：琥珀色高亮 */
-  similarIds?: Set<string>;
   /** 动图检测命中的条目（多帧）：紫色高亮 */
   animatedIds?: Set<string>;
   /** 以某张图为模板找库内相似图（右键菜单入口）；不给就不显示菜单项 */
@@ -33,7 +31,7 @@ const OVERSCAN_PX = 800;
  * 按行虚拟化——只渲染可视区 ±OVERSCAN_PX 内的行，行的位置与高度
  * 由 justifiedLayout 纯函数算出，行内绝对定位、行内 flex 排卡片。
  */
-export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, onFindSimilar, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved, resetKey }: ImageGridProps) {
+export function ImageGrid({ images, duplicateIds, animatedIds, onFindSimilar, selectMode, selectedIds, onToggleSelect, onOpen, onScanDirectory, onDeleted, onMoved, resetKey }: ImageGridProps) {
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(0);
   const [viewportW, setViewportW] = useState(0);
@@ -44,8 +42,19 @@ export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, onFin
     viewportRefObj.current = el;
     setViewportEl(el);
   }, []);
+  // 滚动 rAF 节流：高频 scroll 事件只记最新位置，下一帧统一 setState，避免每事件一次重渲染
+  const rafId = useRef(0);
+  const pendingTop = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (rafId.current) cancelAnimationFrame(rafId.current);
+  }, []);
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop);
+    pendingTop.current = e.currentTarget.scrollTop;
+    if (rafId.current) return;
+    rafId.current = requestAnimationFrame(() => {
+      rafId.current = 0;
+      if (pendingTop.current !== null) setScrollTop(pendingTop.current);
+    });
   }, []);
 
   // 视口尺寸跟踪；元素刚挂上时以它的真实滚动位置为准（重挂载后 DOM 归零，
@@ -70,10 +79,30 @@ export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, onFin
     setScrollTop(0);
   }, [resetKey]);
 
-  const aspects = useMemo(
-    () => images.map(img => (img.width && img.height ? img.width / img.height : 1)),
-    [images],
-  );
+  // 宽高比增量缓存：视图每次 setView 换整数组，以前全量 map 重算 O(N)；
+  // 按 id 缓存后只有新图/尺寸变化的才重算，切目录回顶部不再掉帧
+  const aspectCache = useRef(new Map<string, number>());
+  const aspects = useMemo(() => {
+    const cache = aspectCache.current;
+    // 视图缩小时顺手清掉已不在视图的 key，Map 不无限胀
+    if (cache.size > images.length * 2) {
+      const alive = new Set(images.map((img) => img.id));
+      for (const key of cache.keys()) {
+        if (!alive.has(key)) cache.delete(key);
+      }
+    }
+    return images.map((img) => {
+      const hit = cache.get(img.id);
+      const next = img.width && img.height ? img.width / img.height : 1;
+      // 尺寸不变沿用缓存（NaN 保护：宽高缺失恒为 1）
+      if (hit !== undefined && img.width && img.height) {
+        // 粗略校验：缓存值与当前值差异极小则沿用，避免浮点抖动
+        if (Math.abs(hit - next) < 1e-9) return hit;
+      }
+      cache.set(img.id, next);
+      return next;
+    });
+  }, [images]);
   const layout = useMemo(
     () => justifiedRows(aspects, viewportW, TARGET_IMAGE_H, GAP, CARD_TEXT_H),
     [aspects, viewportW],
@@ -111,7 +140,6 @@ export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, onFin
               key={image.id}
               image={image}
               duplicate={duplicateIds?.has(image.id) ?? false}
-              similar={similarIds?.has(image.id) ?? false}
               animated={animatedIds?.has(image.id) ?? false}
               onFindSimilar={onFindSimilar}
               selectMode={selectMode}
@@ -146,7 +174,6 @@ export function ImageGrid({ images, duplicateIds, similarIds, animatedIds, onFin
                     image={image}
                     imageHeight={row.imageH}
                     duplicate={duplicateIds?.has(image.id) ?? false}
-                    similar={similarIds?.has(image.id) ?? false}
                     animated={animatedIds?.has(image.id) ?? false}
                     onFindSimilar={onFindSimilar}
                     selectMode={selectMode}

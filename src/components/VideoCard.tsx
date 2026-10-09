@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
+import { logger } from "../logger";
 import type { Video } from "../types";
 import { copyToClipboard, formatDuration, formatFileSize } from "../utils";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface VideoCardProps {
@@ -24,33 +26,25 @@ interface VideoCardProps {
 export function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, selectMode = false, selected = false, onToggleSelect, onPlay, onDeleted, onMoved }: VideoCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const { menu, openMenu, closeMenu } = useContextMenu<void>();
   const [movePromptOpen, setMovePromptOpen] = useState(false);
-
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
+  // 卡片级操作失败不再 alert 阻塞：行内展示，可关闭
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const openContainingFolder = async () => {
     try {
       await revealItemInDir(video.path);
     } catch (err) {
-      alert("打开文件所在位置失败: " + err);
+      logger.warn("VideoCard", "打开所在位置失败:", err);
+      setActionError(`打开文件所在位置失败：${String(err)}`);
     }
   };
   const copyFilename = async () => {
     try {
       await copyToClipboard(video.filename);
     } catch (err) {
-      alert("复制文件名失败: " + err);
+      logger.warn("VideoCard", "复制文件名失败:", err);
+      setActionError(`复制文件名失败：${String(err)}`);
     }
   };
   const progressPct = progress !== null && video.duration && video.duration > 0
@@ -59,35 +53,41 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
   const thumbnailPath = video.thumbnail_path ?? null;
 
   const handleDelete = async () => {
-    if (!confirm(`确定要删除 "${video.filename}" 到回收站？`)) return;
     setDeleting(true);
+    setActionError(null);
     try {
-      const deleted = await api.deleteVideos([video.id]);
-      if (deleted.length > 0) {
-        onDeleted(video.id);
-      } else {
-        alert("删除失败：文件可能被占用或已不在库中。");
+      const report = await api.deleteVideos([video.id]);
+      if (report.locked.length > 0) {
+        setActionError("删除失败：文件被占用，关闭占用它的程序后重试。");
         setDeleting(false);
+        return;
       }
+      onDeleted(video.id);
     } catch (err) {
-      alert("删除失败: " + err);
+      logger.warn("VideoCard", "删除失败:", err);
+      setActionError(`删除失败：${String(err)}`);
       setDeleting(false);
     }
   };
 
   const handleMove = () => {
-    setMenu(null);
+    closeMenu();
     setMovePromptOpen(true);
   };
+
+  /** 右键菜单：与图片卡片/播放列表同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站） */
+  const menuItems = [
+    { key: "reveal", label: "打开文件所在位置", onSelect: () => { void openContainingFolder(); } },
+    { key: "copy", label: "复制文件名", onSelect: () => { void copyFilename(); } },
+    { key: "move", label: moving ? "移动中…" : "移动到…", disabled: moving, onSelect: handleMove },
+    { key: "delete", label: deleting ? "删除中…" : "删除到回收站", disabled: deleting, onSelect: () => { void handleDelete(); } },
+  ];
 
   return (
     <article
       className={`media-card${missing ? " media-missing" : ""}${fake ? " media-fake" : ""}${selected ? " media-selected" : ""}`}
       title={fake ? "文件内容实为图片，并非视频（可通过工具栏转换为图片文件）" : missing ? "文件当前不可读取（可能已被移动、删除或磁盘未连接）" : duplicate ? "与库内其他文件内容相同（多余副本，可通过工具栏删除）" : undefined}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setMenu({ x: e.clientX, y: e.clientY });
-      }}
+      onContextMenu={(e) => openMenu(e, undefined)}
     >
       <button
         onClick={selectMode ? (e) => onToggleSelect?.(e.shiftKey) : (fake ? undefined : () => onPlay(video))}
@@ -166,14 +166,15 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
           noun="视频"
           count={1}
           onPick={async (dir) => {
-            if (!confirm(`将 "${video.filename}" 移动到:\n${dir}`)) return false;
             setMoving(true);
+            setActionError(null);
             try {
               const newPath = await api.moveVideo(video.id, dir);
               onMoved(video.id, newPath);
               return true;
             } catch (err) {
-              alert("移动失败: " + err);
+              logger.warn("VideoCard", "移动失败:", err);
+              setActionError(`移动失败：${String(err)}`);
               return false;
             } finally {
               setMoving(false);
@@ -183,21 +184,12 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
         />
       )}
       {menu && (
-        <div
-          className="media-context-menu"
-          style={{ left: menu.x, top: menu.y }}
-          onClick={(e) => e.stopPropagation()}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          <button type="button" onClick={() => { setMenu(null); void openContainingFolder(); }}>
-            打开文件所在位置
-          </button>
-          <button type="button" onClick={() => { setMenu(null); void copyFilename(); }}>
-            复制文件名
-          </button>
-          <button type="button" disabled={moving} onClick={() => { setMenu(null); void handleMove(); }}>
-            {moving ? "移动中…" : "移动到…"}
-          </button>
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={closeMenu} label={`${video.filename} 的操作菜单`} />
+      )}
+      {actionError && (
+        <div className="mx-3 mb-3 rounded-lg bg-red-950/90 px-2 py-1.5 text-[11px] leading-4 text-red-200 flex justify-between gap-2">
+          <span className="break-all">{actionError}</span>
+          <button onClick={() => setActionError(null)} aria-label="关闭错误" className="shrink-0 hover:text-white">✕</button>
         </div>
       )}
     </article>

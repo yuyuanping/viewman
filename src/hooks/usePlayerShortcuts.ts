@@ -5,16 +5,18 @@ interface PlayerShortcutActions {
   togglePlay: () => void;
   toggleFullscreen: () => void;
   toggleMute: () => void;
+  /** ↑↓ 步进倍速：+1 加速 / -1 减速，挡位与控制条下拉一致 */
+  stepRate: (delta: number) => void;
 }
 
-// 通用播放器快捷键：空格 播放/暂停，←→ ±10 秒，F 全屏，M 静音，↑↓ 音量
+// 通用播放器快捷键：空格 播放/暂停，←→ ±10 秒，F 全屏，M 静音，↑↓ 步进倍速，Shift+↑↓ 音量
 export function usePlayerShortcuts(videoRef: RefObject<HTMLVideoElement | null>, actions: PlayerShortcutActions) {
-  const { skip, togglePlay, toggleFullscreen, toggleMute } = actions;
+  const { skip, togglePlay, toggleFullscreen, toggleMute, stepRate } = actions;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
-      // 输入控件里有自己的键行为，不劫持
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      // 输入控件里有自己的键行为，不劫持（SELECT 是倍速下拉：聚焦时 ↑↓ 是它原生的换挡）
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
       const el = videoRef.current;
       if (!el) return;
       if (e.key === " ") {
@@ -30,16 +32,18 @@ export function usePlayerShortcuts(videoRef: RefObject<HTMLVideoElement | null>,
         e.preventDefault();
         el.muted = !el.muted;
         toggleMute();
-      } else if (e.key === "ArrowUp") {
+      } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
-        el.volume = Math.min(1, el.volume + 0.1);
-        el.muted = false;
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        el.volume = Math.max(0, el.volume - 0.1);
+        if (e.shiftKey) {
+          // Shift 档是音量：加大音量时顺手解除静音，不然加了也听不见
+          el.volume = e.key === "ArrowUp" ? Math.min(1, el.volume + 0.1) : Math.max(0, el.volume - 0.1);
+          if (e.key === "ArrowUp") el.muted = false;
+        } else {
+          stepRate(e.key === "ArrowUp" ? 1 : -1);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [videoRef, skip, togglePlay, toggleFullscreen, toggleMute]);
+  }, [videoRef, skip, togglePlay, toggleFullscreen, toggleMute, stepRate]);
 }

@@ -266,6 +266,17 @@ export function usePlayerPlayback({ video, initialPosition, onProgress, playlist
     if (el) el.playbackRate = value;
   }, []);
 
+  // 倍速挡位步进（↑ 加速 / ↓ 减速）：走下拉同一条持久化与应用路径，
+  // 控制条上的倍速显示跟着动
+  const stepRate = useCallback((delta: number) => {
+    const idx = (RATES as readonly number[]).indexOf(rate);
+    const next = RATES[Math.min(RATES.length - 1, Math.max(0, (idx < 0 ? 0 : idx) + delta))];
+    setRate(next);
+    localStorage.setItem(RATE_KEY, String(next));
+    const el = videoRef.current;
+    if (el) el.playbackRate = next;
+  }, [rate]);
+
   return {
     videoRef,
     playSrc,
@@ -274,6 +285,7 @@ export function usePlayerPlayback({ video, initialPosition, onProgress, playlist
     duration,
     rate,
     changeRate,
+    stepRate,
     autoMuted,
     unmute,
     clearAutoMuted,

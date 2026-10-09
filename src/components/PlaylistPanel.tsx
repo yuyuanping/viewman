@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { logger } from "../logger";
 import type { Video } from "../types";
-import { formatTime } from "../utils";
+import { copyToClipboard, formatTime } from "../utils";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
 
 interface PlaylistPanelProps {
   playlist: Video[];
@@ -11,28 +13,23 @@ interface PlaylistPanelProps {
   onSelect: (video: Video) => void;
   onDelete?: (video: Video) => void;
   onMove?: (video: Video) => void;
+  /** 非阻塞错误回报（父层转 toast）；不给则只记日志 */
+  onError?: (message: string) => void;
 }
 
-export function PlaylistPanel({ playlist, currentId, progress, onSelect, onDelete, onMove }: PlaylistPanelProps) {
+export function PlaylistPanel({ playlist, currentId, progress, onSelect, onDelete, onMove, onError }: PlaylistPanelProps) {
   const currentItemRef = useRef<HTMLButtonElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; video: Video } | null>(null);
+  const { menu, openMenu, closeMenu } = useContextMenu<Video>();
+
+  const fail = (action: string, err: unknown) => {
+    logger.warn("PlaylistPanel", `${action}失败:`, err);
+    onError?.(`${action}失败：${String(err)}`);
+  };
 
   // 打开/切换时把当前播放项滚动到可视区中部
   useEffect(() => {
     currentItemRef.current?.scrollIntoView({ block: "center" });
   }, [currentId]);
-
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
 
   if (playlist.length === 0) return null;
 
@@ -43,10 +40,7 @@ export function PlaylistPanel({ playlist, currentId, progress, onSelect, onDelet
         const pos = progress?.[item.id] ?? null;
         return (
           <div key={item.id} className="playlist-row group relative"
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setMenu({ x: e.clientX, y: e.clientY, video: item });
-            }}
+            onContextMenu={(e) => openMenu(e, item)}
           >
             <button
               ref={isCurrent ? currentItemRef : undefined}
@@ -84,24 +78,44 @@ export function PlaylistPanel({ playlist, currentId, progress, onSelect, onDelet
         );
       })}
       {menu && (
-        <div
-          className="media-context-menu"
-          style={{ left: menu.x, top: menu.y }}
-          onClick={(e) => e.stopPropagation()}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          <button type="button" onClick={() => {
-            setMenu(null);
-            void revealItemInDir(menu.video.path).catch(err => alert("打开文件所在位置失败: " + err));
-          }}>
-            打开文件所在位置
-          </button>
-          {onMove && (
-            <button type="button" onClick={() => { const v = menu.video; setMenu(null); onMove(v); }}>
-              移动到…
-            </button>
-          )}
-        </div>
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={closeMenu}
+          label={`${menu.target.filename} 的操作菜单`}
+          items={[
+            {
+              key: "reveal",
+              label: "打开文件所在位置",
+              onSelect: () => {
+                const v = menu.target;
+                void revealItemInDir(v.path).catch(err => fail("打开文件所在位置", err));
+              },
+            },
+            {
+              key: "copy",
+              label: "复制文件名",
+              onSelect: () => {
+                const v = menu.target;
+                void copyToClipboard(v.filename).catch(err => fail("复制文件名", err));
+              },
+            },
+            ...(onMove
+              ? [{
+                  key: "move",
+                  label: "移动到…",
+                  onSelect: () => { const v = menu.target; onMove(v); },
+                }]
+              : []),
+            ...(onDelete
+              ? [{
+                  key: "delete",
+                  label: "删除到回收站",
+                  onSelect: () => { const v = menu.target; onDelete(v); },
+                }]
+              : []),
+          ]}
+        />
       )}
     </aside>
   );

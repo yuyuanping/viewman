@@ -8,7 +8,7 @@ use crate::models::{ScanOutcome, Video};
 use crate::scanner;
 
 use super::settings::{remember_root, SCAN_ROOTS_KEY};
-use super::{AppState, MapErrStr};
+use super::{clear_cancel, is_cancelled, AppState, MapErrStr};
 
 /// 扫描任务的完整产出：新文件、可清理的旧 id、告警、摘要。
 type VideoScanOutcome = Result<(Vec<Video>, Vec<String>, Vec<String>, ScanSummary), String>;
@@ -48,6 +48,8 @@ pub async fn scan_directory(
     let dir_path = std::path::PathBuf::from(&dir);
     let dir_for_task = dir.clone();
     let task_app = app.clone();
+    // 本轮取消标记先清（上一轮取消的残留不能带过来），前端 cancel_task("scan-video") 可中途停
+    clear_cancel(&app, "scan-video");
     let (videos, stale_ids, warnings, summary) =
         tauri::async_runtime::spawn_blocking(move || -> VideoScanOutcome {
             // 根目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
@@ -239,6 +241,26 @@ fn build_videos_parallel(
     let processed = AtomicUsize::new(0);
     let probe_failures = AtomicUsize::new(0);
     let write_failures = AtomicUsize::new(0);
+    // 进度节流：每 128 条或 200ms 推一次，避免 10 万文件=10 万次 IPC 洪峰冻 UI
+    // （与 similar.rs EMIT_AT_LEAST 2s 同思路，扫描更频繁些保持进度条顺滑）
+    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
+    let maybe_emit = |done: usize| {
+        let should = done.is_multiple_of(128) || done >= total;
+        if !should {
+            if let Ok(last) = last_emit.lock() {
+                if last.elapsed() < std::time::Duration::from_millis(200) {
+                    return;
+                }
+            }
+        }
+        if let Ok(mut last) = last_emit.lock() {
+            *last = std::time::Instant::now();
+        }
+        let _ = app.emit(
+            "scan-progress",
+            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
+        );
+    };
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -251,6 +273,10 @@ fn build_videos_parallel(
                 s.spawn(|| {
                     let mut out = Vec::new();
                     loop {
+                        // 取消即停：已探明的照常落库返回，不丢进度
+                        if is_cancelled(app, "scan-video") {
+                            break;
+                        }
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         if i >= total {
                             break;
@@ -272,10 +298,7 @@ fn build_videos_parallel(
                         }
                         out.push(video);
                         let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                        let _ = app.emit(
-                            "scan-progress",
-                            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
-                        );
+                        maybe_emit(done);
                     }
                     out
                 })

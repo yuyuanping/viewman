@@ -32,6 +32,8 @@ interface SidebarProps {
   roots: string[];
   removingRoot: boolean;
   onRemoveRoot: (dir: string) => Promise<void>;
+  /** 取消当前扫描：后端 cancel_task(scan-video/scan-image)，已扫部分保留 */
+  onCancelScan?: (task: string) => void;
 }
 
 export function Sidebar({
@@ -40,7 +42,7 @@ export function Sidebar({
   loading, scanProgress, rescanStatus, usePotPlayer, onTogglePotPlayer,
   images, selectedImageDir, onSelectImageDir, onScanImageDirectory,
   imageLoading, imageScanProgress, imageRescanStatus,
-  roots, removingRoot, onRemoveRoot,
+  roots, removingRoot, onRemoveRoot, onCancelScan,
 }: SidebarProps) {
   const [potplayerOk, setPotplayerOk] = useState<boolean | null>(null);
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
@@ -119,6 +121,16 @@ export function Sidebar({
           ? (activeScanProgress ? `扫描中 ${activeScanProgress.processed}/${activeScanProgress.total}` : "扫描中...")
           : isImageTab ? "扫描图片目录" : "扫描视频目录"}
       </button>
+      {activeLoading && onCancelScan && (
+        <button
+          type="button"
+          onClick={() => onCancelScan(isImageTab ? "scan-image" : "scan-video")}
+          className="py-1.5 px-4 rounded text-xs bg-gray-700 hover:bg-gray-600"
+          title="取消当前扫描（已扫入部分保留）"
+        >
+          取消扫描
+        </button>
+      )}
       {activeRescanStatus && (
         <div className="rescan-progress" role="status" aria-live="polite">
           <div className="flex items-center gap-2 text-xs text-gray-300">

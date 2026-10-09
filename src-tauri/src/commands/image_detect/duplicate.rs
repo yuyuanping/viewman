@@ -196,9 +196,11 @@ const PIX_BIG_SHARE: f64 = 0.10;
 /// 96/192 盖到 4 倍放大；8 倍放大在 96/192 都差 5 级上下、256 档差 1.84 过线，
 /// 所以再挂一档 256。只有前一档对不上的候选才会走到下一档，代价只落在极少数条目上。
 const PIX_RESCUE_GRIDS: [usize; 3] = [96, 192, 256];
-/// 32 档差过这个线就不再去试高分辨率档：真副本被采样干涉拉开也就到 8 级上下，
-/// 十几级开外的是平图/连环截图撞哈希，换档位也救不回来，而每一档都是一次 ffmpeg。
-const RESCUE_MEAN_MAX: f64 = 12.0;
+/// 32 档差过这个线就不再去试高分辨率档：绝大多数十几级开外的是平图/连环截图撞哈希，
+/// 换档位也救不回来，而每一档都是一次 ffmpeg。
+/// 线定在 14：真实照片同图不同分辨率实测 32 档 mean=12.625（采样干涉）、96+ 档 mean≈0.2，
+/// 旧 12.0 线把它拦在补救档外面直接漏检；像素层仍是最终判据，放宽只多花几次 ffmpeg。
+const RESCUE_MEAN_MAX: f64 = 14.0;
 
 /// 两幅同档灰度的（平均每级差，差过 16 级的像素占比）
 fn pixel_gap(a: &[u8], b: &[u8]) -> Option<(f64, f64)> {
@@ -223,6 +225,25 @@ pub(crate) fn pixels_close(a: &[u8], b: &[u8]) -> bool {
         Some((mean, share)) => mean <= PIX_MEAN_MAX && share <= PIX_BIG_SHARE,
         None => false,
     }
+}
+
+/// 快检成组（不解像素）：候选池按入库时间升序直接成组，最早那张当保留原件。
+/// 只看双指纹门槛，平图撞车这类误判会进来，靠面板人工复核兜底；胜在跳过全部像素解码。
+pub(crate) fn group_pools_by_time(rows: &[db::ImageSig], pools: Vec<Vec<usize>>) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = pools
+        .into_iter()
+        .map(|mut pool| {
+            pool.sort_by(|&a, &b| {
+                rows[a]
+                    .created_at
+                    .cmp(&rows[b].created_at)
+                    .then_with(|| rows[a].id.cmp(&rows[b].id))
+            });
+            pool.into_iter().map(|i| rows[i].id.clone()).collect()
+        })
+        .collect();
+    groups.sort_by_key(|group: &Vec<String>| std::cmp::Reverse(group.len()));
+    groups
 }
 
 /// 桶里的一个候选
@@ -255,6 +276,16 @@ pub(crate) fn close_against(
     a: &Candidate,
     b: &Candidate,
 ) -> bool {
+    close_against_with(a, b, &mut |index, n| rescue_grid(rows, cache, index, n))
+}
+
+/// 补救档判定（可注入补救像素，便于单测构造 32 档混叠）：32 档先判，差得远但不过
+/// RESCUE_MEAN_MAX 的再逐档试高分辨率网格，任一档对上即同一张
+pub(crate) fn close_against_with(
+    a: &Candidate,
+    b: &Candidate,
+    rescue: &mut dyn FnMut(usize, usize) -> Option<Vec<u8>>,
+) -> bool {
     if pixels_close(&a.pixels, &b.pixels) {
         return true;
     }
@@ -263,10 +294,7 @@ pub(crate) fn close_against(
         return false;
     }
     for &n in &PIX_RESCUE_GRIDS {
-        let (Some(x), Some(y)) = (
-            rescue_grid(rows, cache, a.index, n),
-            rescue_grid(rows, cache, b.index, n),
-        ) else {
+        let (Some(x), Some(y)) = (rescue(a.index, n), rescue(b.index, n)) else {
             continue;
         };
         if pixels_close(&x, &y) {
@@ -353,11 +381,10 @@ pub(crate) fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Ve
                 local
             }));
         }
-        // scope 退出时本来就会把子线程的 panic 再抛一遍，这里的 unwrap 只是照实取值；
-        // 子线程里唯一的 panic 来源（抢锁）已经在 lock_ignoring_poison 里堵掉了
+        // 子线程 panic（如 ffmpeg OOM）不再带崩整单检测：失败分片按空边表计，下次重跑补回
         handles
             .into_iter()
-            .flat_map(|h| h.join().unwrap())
+            .flat_map(|h| h.join().unwrap_or_default())
             .collect()
     });
 
@@ -374,10 +401,13 @@ pub(crate) fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Ve
 
 /// 找出内容相同的重复图片组：不再比字节（重存一遍就漏，读全盘也慢），
 /// 改成"两枚感知哈希圈候选 + 缩略像素定组"——重存/转格式改得动字节，改不动画面。
+/// pixel_verify=false 时跳过像素核对（快检）：候选池按时间直接成组，
+/// 平图撞车会进来，靠面板人工复核；胜在不解码，二次跑秒回。
 #[tauri::command]
 pub async fn find_duplicate_images(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    pixel_verify: bool,
 ) -> Result<DuplicateReport, String> {
     // 判据换成解码指纹之后，ffmpeg 成了硬依赖（老的字节签名不用解码也能算）
     if !crate::scanner::ffmpeg_available() {
@@ -400,8 +430,17 @@ pub async fn find_duplicate_images(
         // 哈希差得远的到不了像素层，绝大多数条目在这一步就被排除
         let candidates = candidate_pools(&pairs, DUP_GATE);
 
-        // 补像素和定组合成一趟：每核对完一个候选池就推一次当前分组
-        let (groups, skipped) = group_pass(&app, &rows, candidates, skipped);
+        let (groups, skipped) = if pixel_verify {
+            // 补像素和定组合成一趟：每核对完一个候选池就推一次当前分组
+            group_pass(&app, &rows, candidates, skipped)
+        } else {
+            let groups = group_pools_by_time(&rows, candidates);
+            let _ = app.emit(
+                "duplicate-progress",
+                DuplicateProgress { processed: 1, total: 1, stage: "grouping", skipped, groups: groups.clone() },
+            );
+            (groups, skipped)
+        };
         let report = DuplicateReport { groups, skipped };
         // 这一趟热跑也要九分钟，落一份缓存，重启后直接接着看
         write_cache(
@@ -410,6 +449,7 @@ pub async fn find_duplicate_images(
             &DuplicateCache {
                 library_count,
                 report: report.clone(),
+                pixel_verify,
             },
         );
         report

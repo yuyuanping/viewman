@@ -1,19 +1,11 @@
-use std::collections::HashSet;
-
-use tauri::Manager;
-
-use crate::db;
-
 use super::{read_cache, remove_cache, AppState, MapErrStr};
-use super::{DUPLICATE_CACHE, SIMILAR_CACHE, VIDEO_DUPLICATE_CACHE};
+use super::{DUPLICATE_CACHE, VIDEO_DUPLICATE_CACHE};
 
 mod detect_util;
 mod duplicate;
-mod similar;
 mod template;
 
 pub use duplicate::*;
-pub use similar::*;
 pub use template::*;
 
 /// 重复图片的进度事件负载（事件名 duplicate-progress）。
@@ -41,59 +33,21 @@ type SigUpdate = (String, i64, i64, Option<String>);
 
 // flush / flush_with_retry / workers / lock_ignoring_poison 已提到 commands.rs 共享
 
-// 缓存的文件名、原子落盘、读不回来当没有：这三件事三趟检测共用一套，实现在 commands.rs。
+// 缓存的文件名、原子落盘、读不回来当没有：这三件事两趟检测共用一套，实现在 commands.rs。
 
 /// 缓存里记着"存这份结果时库里有多少条记录"，数量对不上就说明库变了，界面据此提示过期
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SimilarCache {
-    pub threshold: u32,
-    pub library_count: usize,
-    pub result: SimilarResult,
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateCache {
     pub library_count: usize,
     pub report: DuplicateReport,
+    /// 存这份结果时是否比对了像素：老缓存没这个字段，默认 true（当时只有这一种模式）
+    #[serde(default = "default_pixel_verify")]
+    pub pixel_verify: bool,
 }
 
-#[tauri::command]
-pub async fn get_similar_cache(app: tauri::AppHandle) -> Result<Option<SimilarCache>, String> {
-    let Some(mut cached): Option<SimilarCache> = read_cache(&app, SIMILAR_CACHE).await? else {
-        return Ok(None);
-    };
-    if cached.result.groups.is_empty() {
-        return Ok(Some(cached));
-    }
-    // 旧缓存可能是照着全库算的，会挂着扫描范围外的组员：恢复前按当前扫描根裁一遍，
-    // 跟现跑的口径一致，否则面板里会出现图片库看不到的图。裁到不足两张的组不再算一组。
-    // 裁剪要全表 LIKE 扫描 + 十几万 id 进集合，扔进阻塞线程池；这是启动恢复路径，别占主线程
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let conn = state.db.lock().map_err_str()?;
-        let roots = super::settings::load_roots(&conn, super::settings::IMAGE_SCAN_ROOTS_KEY);
-        // 无扫描根 = 全库都在范围内，裁剪是恒等操作，别白跑一遍全表查询
-        if !roots.is_empty() {
-            let scoped: HashSet<String> = db::image_ids_in_scope(&conn, &roots)
-                .map_err_str()?
-                .into_iter()
-                .collect();
-            cached.result.groups = cached
-                .result
-                .groups
-                .into_iter()
-                .map(|group| group.into_iter().filter(|id| scoped.contains(id)).collect::<Vec<_>>())
-                .filter(|group| group.len() > 1)
-                .collect();
-            cached.result.far.retain(|id| scoped.contains(id));
-            cached.result.hashes.retain(|hit| scoped.contains(&hit.id));
-        }
-        Ok(Some(cached))
-    })
-    .await
-    .map_err_str()?
+fn default_pixel_verify() -> bool {
+    true
 }
 
 #[tauri::command]
@@ -105,7 +59,6 @@ pub async fn get_duplicate_cache(app: tauri::AppHandle) -> Result<Option<Duplica
 #[tauri::command]
 pub async fn clear_detection_cache(app: tauri::AppHandle, which: String) -> Result<(), String> {
     let name = match which.as_str() {
-        "similar" => SIMILAR_CACHE,
         "duplicate" => DUPLICATE_CACHE,
         "videoDuplicate" => VIDEO_DUPLICATE_CACHE,
         other => return Err(format!("未知的检测结果：{other}")),
@@ -119,6 +72,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use crate::scanner;
+    use crate::db;
     use crate::commands::workers;
     use super::detect_util::UnionFind;
     use std::fs;
@@ -367,173 +321,61 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// 一把灌完再聚：返回值是（分组，远亲名单），跟面板看到的一样
-    fn clustered(threshold: u32, items: &[(&str, &str, u64, u64)]) -> (Vec<Vec<String>>, Vec<String>) {
-        let mut graph = SimilarGraph::new(threshold);
-        for &(id, created, phash, dhash) in items {
-            graph.add(id, created, phash, dhash);
-        }
-        graph.scan();
-        let partition = graph.partition();
-        (graph.member_ids(&partition), graph.far_ids(&partition))
+    /// 32 档采样干涉的补救线：真实照片同图不同分辨率实测 32 档 mean=12.625、
+    /// 96+ 档 mean≈0.2——旧 12.0 线把补救档直接堵死导致漏检。
+    /// 构造 32 网格均差 13（过旧线、不过新 14 线），补救档给相同网格，必须判为同一张；
+    /// 若有人把线调回 12（含）以下，这个测试会失败。
+    #[test]
+    fn test_rescue_grid_saves_32px_aliasing() {
+        let px = |v: u8| vec![v; PIX_GRID * PIX_GRID];
+        let mk = |id: &str, index: usize, v: u8| Candidate {
+            index,
+            id: id.to_string(),
+            created_at: String::new(),
+            pixels: px(v),
+        };
+        // 全 100 vs 全 113：每级差 13，mean=13，big=0（13<16），32 档判不同
+        let (a, b) = (mk("a", 0, 100), mk("b", 1, 113));
+        assert!(!pixels_close(&a.pixels, &b.pixels));
+        // 补救档（96/192/256）给完全相同的网格：真副本在高档位是对得上的
+        let rescue_same = vec![77u8; 96 * 96];
+        let mut rescue = |index: usize, n: usize| {
+            assert!([96, 192, 256].contains(&n), "补救档位不应新增");
+            let _ = index;
+            Some(rescue_same.clone())
+        };
+        assert!(close_against_with(&a, &b, &mut rescue));
+        // 补救档也对不上（真不同的图：两边给不同网格）：还是判不同，放宽补救线不制造误判
+        let mut rescue_miss = |index: usize, n: usize| {
+            Some(vec![if index == 0 { 50u8 } else { 200u8 }; n * n])
+        };
+        assert!(!close_against_with(&a, &b, &mut rescue_miss));
     }
 
+    /// 快检成组（不解像素）：候选池按入库时间直接成组，大组排前；像素核对的活儿留给面板人工复核
     #[test]
-    fn test_similar_graph_groups_a_short_chain_and_drops_a_lonely_one() {
-        let (groups, far) = clustered(
-            3,
-            &[
-                ("a", "2026-01-01", 0b0000u64, 0),
-                ("b", "2026-01-01", 0b0011, 0),
-                ("c", "2026-01-01", 0b1111, 0),
-                ("d", "2026-01-01", 0xFFFF_FFFF_FFFF_FFF0, 0),
-            ],
-        );
-        // a~b、b~c 都 ≤3，各自也只有这一个邻居：三张照旧成一组，谁也不像的 d 连组都进不了
-        assert_eq!(groups, vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]);
-        assert!(far.is_empty());
-    }
-
-    /// 这条就是 3.3 万张那组病根的解药：人人都把中心排进自己第一近邻，闭包会把一整片
-    /// 撞车的截图串成一组；现在中心只认名次最好的两个，其余当远亲挂在尾巴上。
-    #[test]
-    fn test_similar_graph_keeps_only_two_skeleton_leaves_per_hub() {
-        let (groups, far) = clustered(
-            3,
-            &[
-                ("hub", "2026-01-01", 0u64, 0),
-                ("n1", "2026-01-01", 0b0000_0011, 0),
-                ("n2", "2026-01-01", 0b0000_1100, 0),
-                ("n3", "2026-01-01", 0b0011_0000, 0),
-                ("n4", "2026-01-01", 0b1100_0000, 0),
-                ("n5", "2026-01-01", 0b0000_0000_0000_0011_0000_0000_0000_0000, 0),
-            ],
-        );
-        // 中心与五张各差 2 位、五张彼此差 4 位：骨架边只留前两枚，后三枚挂成远亲
-        assert_eq!(
-            groups,
-            vec![vec!["hub".to_string(), "n1".to_string(), "n2".to_string(),
-                "n3".to_string(), "n4".to_string(), "n5".to_string()]]
-        );
-        assert_eq!(far, vec!["n3".to_string(), "n4".to_string(), "n5".to_string()]);
-    }
-
-    #[test]
-    fn test_similar_graph_needs_both_fingerprints_to_agree() {
-        // 结构（pHash）一模一样，明暗走向（dHash）相差 20 位：套图换内容的那种，不该算相似
-        let (groups, far) = clustered(
-            3,
-            &[
-                ("left", "2026-01-01", 0b0000, 0xFFFF_FFFF_0000_000F),
-                ("right", "2026-01-02", 0b0000, 0x0000_0000_FFFF_FFF0),
-            ],
-        );
-        assert!(groups.is_empty());
-        assert!(far.is_empty());
-
-        // 同一张图重新存了一遍：两枚指纹完全相同，直接算一组
-        let (groups, _) = clustered(
-            3,
-            &[
-                ("left", "2026-01-01", 0b0000, 0xFFFF_FFFF_0000_000F),
-                ("right", "2026-01-02", 0b0000, 0x0000_0000_FFFF_FFF0),
-                ("again", "2026-01-03", 0b0000, 0xFFFF_FFFF_0000_000F),
-            ],
-        );
-        assert_eq!(groups, vec![vec!["left".to_string(), "again".to_string()]]);
-    }
-
-    #[test]
-    fn test_similar_graph_joins_two_groups_when_a_bridge_arrives() {
-        let mut graph = SimilarGraph::new(2);
-        graph.add("x", "2026-01-01", 0b0000, 0);
-        graph.add("y", "2026-01-02", 0b1111, 0);
-        graph.scan();
-        assert!(graph.partition().groups.is_empty());
-
-        graph.add("bridge", "2026-01-03", 0b0011, 0);
-        graph.scan();
-        let partition = graph.partition();
-        // 补一条边之后两枚孤张被串成一组，成员不重复
-        assert_eq!(
-            graph.member_ids(&partition),
-            vec![vec!["x".to_string(), "y".to_string(), "bridge".to_string()]]
-        );
-    }
-
-    #[test]
-    fn test_similar_graph_routes_identical_hashes_through_one_representative() {
-        let mut graph = SimilarGraph::new(3);
-        for name in ["a", "b", "c"] {
-            graph.add(name, "2026-01-01", 0b0101, 0b0011);
-        }
-        graph.add("far", "2026-01-02", 0xFFFF_FFFF_FFFF_FFF0, 0);
-        graph.scan();
-        let partition = graph.partition();
-        // 同指纹只留一个代表进两两比对表，另外两张直接并进来
-        assert_eq!(graph.reps.len(), 2);
-        assert_eq!(
-            graph.member_ids(&partition),
-            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]
-        );
-    }
-
-    #[test]
-    fn test_similar_graph_orders_group_by_added_time() {
-        let (groups, _) = clustered(
-            3,
-            &[
-                ("late", "2026-03-01", 0b0000, 0),
-                ("early", "2026-01-01", 0b0011, 0),
-            ],
-        );
-        assert_eq!(groups, vec![vec!["early".to_string(), "late".to_string()]]);
-    }
-
-    /// 边是分两趟扫出来的，结果不能取决于这批图何时灌进来
-    #[test]
-    fn test_incremental_scan_matches_a_single_full_scan() {
-        let items: [(&str, &str, u64, u64); 9] = [
-            ("hub", "2026-01-01", 0, 0),
-            ("n1", "2026-01-01", 0b0000_0011, 0),
-            ("n1copy", "2026-01-04", 0b0000_0011, 0),
-            ("n2", "2026-01-02", 0b0000_1100, 0),
-            ("n3", "2026-01-03", 0b0011_0000, 0),
-            ("n4", "2026-01-05", 0b1100_0000, 0),
-            ("n5", "2026-01-06", 0b0000_0000_0000_0011_0000_0000_0000_0000, 0),
-            ("other1", "2026-01-07", 0xFFFF_0000_0000_0003, 0xFFFF),
-            ("other2", "2026-01-08", 0xFFFF_0000_0000_0001, 0xFFFF),
+    fn test_group_pools_by_time_orders_by_created_at() {
+        let row = |id: &str, created: &str| db::ImageSig {
+            id: id.into(),
+            path: format!("C:/pics/{id}.png"),
+            created_at: created.into(),
+            modified_at: None,
+            phash: None,
+            dhash: None,
+            sig_pixels: None,
+            sig_modified_at: None,
+        };
+        let rows = vec![
+            row("late", "2026-03-01"),
+            row("early", "2026-01-01"),
+            row("mid", "2026-02-01"),
+            row("solo-a", "2026-01-02"),
+            row("solo-b", "2026-04-01"),
         ];
-        let full = clustered(3, &items);
-
-        let mut graph = SimilarGraph::new(3);
-        for &(id, created, p, d) in &items[..5] {
-            graph.add(id, created, p, d);
-        }
-        graph.scan();
-        for &(id, created, p, d) in &items[5..] {
-            graph.add(id, created, p, d);
-        }
-        graph.scan();
-        let partition = graph.partition();
-        assert_eq!((graph.member_ids(&partition), graph.far_ids(&partition)), full);
-    }
-
-    #[test]
-    fn test_similar_signatures_cover_group_members_only() {
-        let mut graph = SimilarGraph::new(3);
-        graph.add("a", "2026-01-01", 0xFFFF_FFFF_0000_0001, 0);
-        graph.add("b", "2026-01-02", 0xFFFF_FFFF_0000_0003, 0);
-        graph.add("lonely", "2026-01-03", 0x0000_0000_0000_0000, 0);
-        graph.scan();
-        let partition = graph.partition();
-        // 孤张也回指纹就是白传：19 万条库一次就是十几 MB
-        let sigs = graph.signatures(&partition);
-        assert_eq!(sigs.len(), 2);
-        assert!(sigs.iter().all(|hit| hit.id != "lonely"));
-        let a = sigs.iter().find(|hit| hit.id == "a").unwrap();
-        // 高低 32 位拆开后要能拼回原值
-        assert_eq!(((a.hi as u64) << 32) | a.lo as u64, 0xFFFF_FFFF_0000_0001);
+        // 池是无序下标，出来必须按时间排、最早的当保留原件；大组排前面
+        let groups = group_pools_by_time(&rows, vec![vec![0, 2, 1], vec![3, 4]]);
+        assert_eq!(groups[0], vec!["early".to_string(), "mid".to_string(), "late".to_string()]);
+        assert_eq!(groups[1], vec!["solo-a".to_string(), "solo-b".to_string()]);
     }
 
     /// 确定性伪随机（xorshift64*）：两次跑拿到完全同一批指纹，A/B 才可比
@@ -583,7 +425,8 @@ mod tests {
                     local
                 }));
             }
-            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+            // 子线程 panic 不带崩整单：失败分片按空计
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
 
         let mut uf = UnionFind::new(total);
@@ -764,33 +607,5 @@ mod tests {
             it_t,
             (it_t.as_secs_f64() / ix_t.as_secs_f64() - 1.0) * 100.0
         );
-
-        // ── 端到端：SimilarGraph add + scan + partition，对照历史基线 11.6 秒（同为 14 线程）──
-        let ids: Vec<String> = (0..N).map(|i| format!("img-{i:06}")).collect();
-        let created: Vec<String> = (0..N).map(|i| format!("2026-01-01T00:{:02}:{:02}", i / 3600 % 60, i / 60 % 60)).collect();
-        let mut graph = SimilarGraph::new(10);
-        let t = Instant::now();
-        for i in 0..N {
-            graph.add(ids[i].as_str(), created[i].as_str(), hashes[i].0, hashes[i].1);
-        }
-        let t_add = t.elapsed();
-        let t = Instant::now();
-        graph.scan();
-        let t_scan = t.elapsed();
-        let t = Instant::now();
-        let part = graph.partition();
-        let t_part = t.elapsed();
-        let grouped: usize = part.groups.iter().map(|g| g.len()).sum();
-        println!(
-            "[perf] SimilarGraph(14线程, N={N}): add {:.2?} | scan {:.2?}（历史基线 11.6s）| partition {:.2?}",
-            t_add, t_scan, t_part
-        );
-        println!(
-            "[perf] 分组 {} 个 / 成组 {} 张 / 远亲 {} 张",
-            part.groups.len(),
-            grouped,
-            part.far.len()
-        );
-        assert!(!part.groups.is_empty(), "10% 簇数据应当成组");
     }
 }

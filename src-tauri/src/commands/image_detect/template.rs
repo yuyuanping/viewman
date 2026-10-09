@@ -48,8 +48,7 @@ struct TemplateProgress {
 }
 
 /// 以一张图为模板找库里的相似图（以图搜图）：模板算一遍双指纹，和全库逐一比汉明距离。
-/// 与 find_similar_images 的差别是方向反过来了——不是"谁跟谁成团"，而是"谁跟这张像"，
-/// 所以只做一趟一对一比对（18.6 万条毫秒级），指纹缺的现补（落库，下次就是零头）。
+/// 只做一趟一对一比对（18.6 万条毫秒级），指纹缺的现补（落库，下次就是零头）。
 /// 模板自己不进结果；同图副本距离 0，是最先该看到的那批。
 #[tauri::command]
 pub async fn find_images_like_template(
@@ -105,15 +104,12 @@ pub async fn find_images_like_template(
                 continue;
             }
             let sigs = fresh_by_id.remove(&row.id).or_else(|| pairs[index]);
-            match sigs {
-                Some((phash, dhash)) => {
-                    let dd = template_distance(phash, dhash, t_phash, t_dhash);
-                    if dd <= TEMPLATE_DISTANCE_MAX {
-                        matches.push(TemplateMatch { id: row.id.clone(), distance: dd });
-                    }
+            // 解不出画面的进不了比对：返回值里带上张数，别让"没匹配"被当成定论
+            if let Some((phash, dhash)) = sigs {
+                let dd = template_distance(phash, dhash, t_phash, t_dhash);
+                if dd <= TEMPLATE_DISTANCE_MAX {
+                    matches.push(TemplateMatch { id: row.id.clone(), distance: dd });
                 }
-                // 解不出画面的进不了比对：返回值里带上张数，别让"没匹配"被当成定论
-                None => {}
             }
         }
         matches.sort_by(|a, b| a.distance.cmp(&b.distance).then_with(|| a.id.cmp(&b.id)));

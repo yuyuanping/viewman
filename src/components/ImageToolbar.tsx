@@ -21,15 +21,6 @@ interface ImageToolbarProps {
   /** 重复组也走分组面板审阅：删除按「删除所选」/Del 那条通路，不再一键清空副本 */
   onOpenDuplicateGroups: () => void;
   onClearDuplicates: () => void;
-  /** 相似图检测（pHash）：分组面板审阅，副本自动勾进多选 */
-  onDetectSimilar: () => void;
-  detectingSimilar: boolean;
-  similarDetected: boolean;
-  similarGroupCount: number;
-  /** 检测进行中已比对的张数，边算边出组时用来显示进度 */
-  similarProgress: { processed: number; total: number } | null;
-  onOpenSimilarGroups: () => void;
-  onClearSimilar: () => void;
   /** 动图检测：文件头数帧，命中高亮，勾选后走「删除所选」批量清理 */
   onDetectAnimated: () => void;
   detectingAnimated: boolean;
@@ -77,13 +68,6 @@ export function ImageToolbar({
   duplicateGroupCount,
   onOpenDuplicateGroups,
   onClearDuplicates,
-  onDetectSimilar,
-  detectingSimilar,
-  similarDetected,
-  similarGroupCount,
-  similarProgress,
-  onOpenSimilarGroups,
-  onClearSimilar,
   onDetectAnimated,
   detectingAnimated,
   animatedDetected,
@@ -169,45 +153,6 @@ export function ImageToolbar({
             {duplicateGroupCount} 组重复 · 查看
           </button>
           <button type="button" className="toolbar-chip" onClick={onClearDuplicates} title="清除重复检测结果">
-            ✕
-          </button>
-        </>
-      )}
-      {(!similarDetected || similarGroupCount === 0) && !detectingSimilar && (
-        <button
-          type="button"
-          className="toolbar-chip"
-          onClick={onDetectSimilar}
-          disabled={detectingSimilar}
-          title="感知哈希比对，找出相似但不相同的连拍/截图系列；每组保留最早一张，其余自动勾进多选"
-        >
-          {detectingSimilar
-            ? `比对中…${similarProgress ? ` ${similarProgress.processed}/${similarProgress.total}` : ""}`
-            : "检测相似图片"}
-        </button>
-      )}
-      {/* 检测还在跑就把面板关掉时，工具栏必须留着入口：进度和已出的组都在里面 */}
-      {detectingSimilar && (
-        <button
-          type="button"
-          className="toolbar-chip"
-          onClick={onOpenSimilarGroups}
-          title="检测仍在进行，打开面板看进度和已经出来的组"
-        >
-          {`比对中…${similarProgress ? ` ${similarProgress.processed}/${similarProgress.total}` : ""} · 查看`}
-        </button>
-      )}
-      {similarDetected && similarGroupCount > 0 && (
-        <>
-          <button
-            type="button"
-            className="toolbar-chip"
-            onClick={onOpenSimilarGroups}
-            title="逐组查看相似图片，可改保留哪一张"
-          >
-            {similarGroupCount} 组相似 · 查看
-          </button>
-          <button type="button" className="toolbar-chip" onClick={onClearSimilar} title="清除相似检测结果">
             ✕
           </button>
         </>

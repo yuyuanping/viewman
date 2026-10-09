@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
+import { logger } from "../logger";
 import type { Image } from "../types";
 import { CARD_TEXT_H } from "../justifiedLayout";
 import { copyToClipboard, formatFileSize, formatResolution } from "../utils";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
 
 interface ImageCardProps {
@@ -14,8 +16,6 @@ interface ImageCardProps {
   selectMode?: boolean;
   selected?: boolean;
   duplicate?: boolean;
-  /** 相似图检测命中（pHash）：琥珀色边框提示，区别于红色重复 */
-  similar?: boolean;
   /** 动图检测命中（多帧）：紫色边框 + 左上角「动图」标记 */
   animated?: boolean;
   /** 以这张图为模板找库内相似图；不给就不显示右键菜单项 */
@@ -27,75 +27,81 @@ interface ImageCardProps {
   onMoved: (imageId: string, newPath: string) => void;
 }
 
-export function ImageCard({ image, imageHeight, selectMode = false, selected = false, duplicate = false, similar = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
+export function ImageCard({ image, imageHeight, selectMode = false, selected = false, duplicate = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const { menu, openMenu, closeMenu } = useContextMenu<void>();
   const [movePromptOpen, setMovePromptOpen] = useState(false);
-
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
+  // 卡片级操作失败行内展示，不阻塞
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const openContainingFolder = async () => {
     try {
       await revealItemInDir(image.path);
     } catch (err) {
-      alert("打开文件所在位置失败: " + err);
+      logger.warn("ImageCard", "打开所在位置失败:", err);
+      setActionError(`打开文件所在位置失败：${String(err)}`);
     }
   };
   const copyFilename = async () => {
     try {
       await copyToClipboard(image.filename);
     } catch (err) {
-      alert("复制文件名失败: " + err);
+      logger.warn("ImageCard", "复制文件名失败:", err);
+      setActionError(`复制文件名失败：${String(err)}`);
     }
   };
 
   const handleDelete = async () => {
-    if (!confirm(`确定要删除 "${image.filename}" 到回收站？`)) return;
     setDeleting(true);
+    setActionError(null);
     try {
-      const deleted = await api.deleteImages([image.id]);
-      if (deleted.length > 0) {
-        onDeleted(image.id);
-      } else {
-        alert("删除失败：文件可能被占用或已不在库中。");
+      const report = await api.deleteImages([image.id]);
+      if (report.locked.length > 0) {
+        setActionError("删除失败：文件被占用，关闭占用它的程序后重试。");
         setDeleting(false);
+        return;
       }
+      onDeleted(image.id);
     } catch (err) {
-      alert("删除失败: " + err);
+      logger.warn("ImageCard", "删除失败:", err);
+      setActionError(`删除失败：${String(err)}`);
       setDeleting(false);
     }
   };
 
   const handleMove = () => {
-    setMenu(null);
+    closeMenu();
     setMovePromptOpen(true);
   };
+
+  /** 右键菜单：与视频卡片/播放列表同一套，另加模板找相似 */
+  const menuItems = [
+    { key: "reveal", label: "打开文件所在位置", onSelect: () => { void openContainingFolder(); } },
+    { key: "copy", label: "复制文件名", onSelect: () => { void copyFilename(); } },
+    ...(onFindSimilar
+      ? [{ key: "similar", label: "以此为模板找相似", onSelect: () => onFindSimilar(image) }]
+      : []),
+    { key: "move", label: moving ? "移动中…" : "移动到…", disabled: moving, onSelect: handleMove },
+    { key: "delete", label: deleting ? "删除中…" : "删除到回收站", disabled: deleting, onSelect: () => { void handleDelete(); } },
+  ];
 
   // 没有封面缓存时直接引用原图：靠 loading="lazy" 兜住首屏，生成封面后走缩略图
   const preview = image.thumbnail_path ?? image.path;
 
   return (
     <article
-      className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${similar ? " image-similar" : ""}${animated ? " image-animated" : ""}`}
-      title={duplicate ? "与库内其他图片内容相同（多余副本，可在工具栏「重复图片分组」里审阅后删除）" : similar ? "与库内其他图片视觉相似（连拍/截图系列）" : animated ? "多帧动图（GIF/APNG/动态 WebP），勾选后可批量清理" : undefined}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setMenu({ x: e.clientX, y: e.clientY });
-      }}
+      className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${animated ? " image-animated" : ""}`}
+      title={duplicate ? "与库内其他图片内容相同（多余副本，可在工具栏「重复图片分组」里审阅后删除）" : animated ? "多帧动图（GIF/APNG/动态 WebP），勾选后可批量清理" : undefined}
+      onContextMenu={(e) => openMenu(e, undefined)}
     >
       <button
-        onClick={selectMode ? (e) => onToggleSelect?.(e.shiftKey) : () => onOpen(image)}
+        onClick={(e) => {
+          // 多选模式里点击切换勾选；没进多选时 Shift 点也按选择算（连选入口，资源管理器式），
+          // 普通点击仍是打开查看器
+          if (selectMode || e.shiftKey) onToggleSelect?.(e.shiftKey);
+          else onOpen(image);
+        }}
         disabled={deleting}
         className="block w-full text-left"
         aria-label={selectMode ? (selected ? `取消选择 ${image.filename}` : `选择 ${image.filename}`) : `查看 ${image.filename}`}
@@ -135,14 +141,15 @@ export function ImageCard({ image, imageHeight, selectMode = false, selected = f
           noun="图片"
           count={1}
           onPick={async (dir) => {
-            if (!confirm(`将 "${image.filename}" 移动到:\n${dir}`)) return false;
             setMoving(true);
+            setActionError(null);
             try {
               const newPath = await api.moveImage(image.id, dir);
               onMoved(image.id, newPath);
               return true;
             } catch (err) {
-              alert("移动失败: " + err);
+              logger.warn("ImageCard", "移动失败:", err);
+              setActionError(`移动失败：${String(err)}`);
               return false;
             } finally {
               setMoving(false);
@@ -152,26 +159,12 @@ export function ImageCard({ image, imageHeight, selectMode = false, selected = f
         />
       )}
       {menu && (
-        <div
-          className="media-context-menu"
-          style={{ left: menu.x, top: menu.y }}
-          onClick={(e) => e.stopPropagation()}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          <button type="button" onClick={() => { setMenu(null); void openContainingFolder(); }}>
-            打开文件所在位置
-          </button>
-          <button type="button" onClick={() => { setMenu(null); void copyFilename(); }}>
-            复制文件名
-          </button>
-          {onFindSimilar && (
-            <button type="button" onClick={() => { setMenu(null); onFindSimilar(image); }}>
-              以此为模板找相似
-            </button>
-          )}
-          <button type="button" disabled={moving} onClick={() => { setMenu(null); void handleMove(); }}>
-            {moving ? "移动中…" : "移动到…"}
-          </button>
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={closeMenu} label={`${image.filename} 的操作菜单`} />
+      )}
+      {actionError && (
+        <div className="mx-2 mb-2 rounded-lg bg-red-950/90 px-2 py-1.5 text-[11px] leading-4 text-red-200 flex justify-between gap-2">
+          <span className="break-all">{actionError}</span>
+          <button onClick={() => setActionError(null)} aria-label="关闭错误" className="shrink-0 hover:text-white">✕</button>
         </div>
       )}
     </article>

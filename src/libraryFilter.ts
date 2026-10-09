@@ -1,8 +1,13 @@
-/** 视频与图片共用的目录 + 文件名过滤 */
+/** 视频与图片共用的目录 + 文件名过滤：前缀与搜索词只归一化一次，逐条只做一次小写 */
 export function filterMedia<T extends { path: string; filename: string }>(items: T[], directory: string | null, query: string): T[] {
   const prefix = directory === null ? null : directory.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase() + "\\";
   const search = query.trim().toLowerCase();
-  return items.filter(item => (prefix === null || item.path.replace(/\//g, "\\").toLowerCase().startsWith(prefix)) && item.filename.toLowerCase().includes(search));
+  if (prefix === null && search === "") return items.slice();
+  return items.filter(item => {
+    if (search !== "" && !item.filename.toLowerCase().includes(search)) return false;
+    if (prefix !== null && !item.path.replace(/\//g, "\\").toLowerCase().startsWith(prefix)) return false;
+    return true;
+  });
 }
 
 export function selectedDirectoryLabel(directory: string | null, allLabel = "所有视频"): string {
@@ -81,9 +86,12 @@ export function filterByMedia<T extends { duration?: number | null; file_size: n
 
 export function sortMedia<T extends SortableVideo>(items: T[], field: SortField, direction: SortDirection): T[] {
   const factor = direction === "asc" ? 1 : -1;
+  // created_at/modified_at 均为 "YYYY-MM-DD HH:MM:SS" 的 ISO 风格文本，字典序即时间序，
+  // 直接用 </> 比较，避免 localeCompare 逐次重建 collation（19 万条下数秒级开销）。
+  const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
   const compare = (a: T, b: T) => {
     if (field === "filename") return factor * filenameCollator.compare(a.filename, b.filename);
-    if (field === "created_at") return factor * a.created_at.localeCompare(b.created_at);
+    if (field === "created_at") return factor * compareText(a.created_at, b.created_at);
     if (field === "modified_at") {
       // 修改时间缺失（老库未迁移）的条目恒排末尾
       const left = a.modified_at ?? null;
@@ -91,7 +99,7 @@ export function sortMedia<T extends SortableVideo>(items: T[], field: SortField,
       if (left === null && right === null) return 0;
       if (left === null) return 1;
       if (right === null) return -1;
-      return factor * left.localeCompare(right);
+      return factor * compareText(left, right);
     }
     const left = field === "duration" ? a.duration ?? null : a.file_size;
     const right = field === "duration" ? b.duration ?? null : b.file_size;

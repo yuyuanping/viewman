@@ -5,7 +5,22 @@ use tauri::{Emitter, Manager, State};
 use crate::db;
 use crate::scanner;
 
-use super::{video_path_or, AppState, MapErrStr};
+use super::videos::unique_path;
+use super::{is_cancelled, clear_cancel, video_path_or, AppState, MapErrStr};
+
+/// 封面扩展名：libwebp 可用即 webp（体积 -40%），否则回退 jpg。老 jpg 缓存照读不误。
+pub(crate) fn thumb_ext() -> &'static str {
+    if scanner::webp_available() {
+        "webp"
+    } else {
+        "jpg"
+    }
+}
+
+pub(crate) fn thumb_file(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+    // 新缓存按当前编码器扩展名；老 jpg 缓存由 collect_orphan 的双后缀探测兼容
+    dir.join(format!("{}.{}", id, thumb_ext()))
+}
 
 #[derive(Clone, serde::Serialize)]
 pub struct ThumbnailProgress {
@@ -67,7 +82,8 @@ impl Drop for BatchGuard<'_> {
 }
 
 /// 上次抽好帧却没来得及写库的孤儿缓存：文件还在就收集起来，不再抽帧。
-/// 只碰文件系统不碰数据库——调用方必须先把数据库锁放掉再做这步逐条 stat
+/// 只碰文件系统不碰数据库——调用方必须先把数据库锁放掉再做这步逐条 stat。
+/// 新老扩展名都认（webp 迁移前的 jpg 孤儿同样登记回来）。
 fn collect_orphan_registers(
     dir: &std::path::Path,
     entries: &[(String, Option<String>)],
@@ -77,9 +93,17 @@ fn collect_orphan_registers(
         if cached_thumbnail_usable(path) {
             continue;
         }
-        let out = dir.join(format!("{}.jpg", id));
-        if std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
-            found.push((id.clone(), out.to_string_lossy().to_string()));
+        let out = thumb_file(dir, id);
+        let legacy = dir.join(format!("{}.jpg", id));
+        let hit = if std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+            Some(out)
+        } else if std::fs::metadata(&legacy).map(|m| m.len() > 0).unwrap_or(false) {
+            Some(legacy)
+        } else {
+            None
+        };
+        if let Some(p) = hit {
+            found.push((id.clone(), p.to_string_lossy().to_string()));
         }
     }
     found
@@ -107,10 +131,13 @@ fn register_orphans(
     registered
 }
 
-/// 封面缓存文件名由条目 id 决定，条目移除后一并清理，避免留下孤儿文件
+/// 封面缓存文件名由条目 id 决定，条目移除后一并清理，避免留下孤儿文件。
+/// 新老扩展名都清（webp 迁移前的 jpg 不留尾巴）。
 pub(crate) fn clear_thumbnail_cache(app: &tauri::AppHandle, id: &str) {
     if let Ok(dir) = app.path().app_data_dir() {
-        let _ = std::fs::remove_file(dir.join("thumbnails").join(format!("{}.jpg", id)));
+        let base = dir.join("thumbnails");
+        let _ = std::fs::remove_file(base.join(format!("{}.webp", id)));
+        let _ = std::fs::remove_file(base.join(format!("{}.jpg", id)));
     }
 }
 
@@ -130,14 +157,18 @@ pub(crate) fn cleanup_orphan_thumbnail_files(app: &tauri::AppHandle) -> usize {
     remove_orphan_thumbnail_files(&dir.join("thumbnails"), &alive)
 }
 
-/// 纯磁盘操作部分：删除 alive 集合之外的 `{id}.jpg`，以及主已不在的 `{id}.part.jpg`
-/// （抽帧中途崩溃留下的临时文件）。非 .jpg 的东西一律不碰。
+/// 纯磁盘操作部分：删除 alive 集合之外的 `{id}.jpg`/`.webp`，以及主已不在的
+/// `{id}.part.jpg`/`.part.webp`（抽帧中途崩溃留下的临时文件）。其他扩展一律不碰。
 fn remove_orphan_thumbnail_files(dir: &std::path::Path, alive: &std::collections::HashSet<String>) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().map(|e| !e.eq_ignore_ascii_case("jpg")).unwrap_or(true) {
+        let is_thumb = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg") || e.eq_ignore_ascii_case("webp"));
+        if !is_thumb {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -187,6 +218,8 @@ pub(crate) async fn run_thumbnail_jobs(
     }
 
     let task_app = app.clone();
+    // 本轮取消标记先清掉（上一轮取消的残留不能带到这一轮）
+    clear_cancel(app, event);
     let joined = tauri::async_runtime::spawn_blocking(move || -> (usize, usize) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tauri::Manager;
@@ -208,28 +241,41 @@ pub(crate) async fn run_thumbnail_jobs(
             for _ in 0..workers {
                 scope.spawn(|| {
                     loop {
+                        // 取消检查：前端 cancel_task 后当前批次内尽快停，不再开新 ffmpeg
+                        if is_cancelled(&task_app, event) {
+                            break;
+                        }
                         let index = next_index.fetch_add(1, Ordering::SeqCst);
                         if index >= jobs.len() {
                             break;
                         }
                         let job = &jobs[index];
-                        let out = dir.join(format!("{}.jpg", job.id));
+                        // 老 jpg 缓存仍有效则沿用（webp 迁移不强制重抽 19 万张）；
+                        // 新抽的走当前编码器扩展名；登记时写实际存在的那一份路径
+                        let legacy = dir.join(format!("{}.jpg", job.id));
+                        let legacy_ok =
+                            std::fs::metadata(&legacy).map(|m| m.len() > 0).unwrap_or(false);
+                        let out = thumb_file(&dir, &job.id);
                         // 上次中途关闭留下的孤儿文件：直接登记，不重新抽帧
                         let existing_ok =
                             std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
-                        let ok = existing_ok || {
-                            // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张 jpg。
-                            // 临时名必须以 .jpg 结尾：ffmpeg 按扩展名选封装格式，
-                            // `.jpg.part` 会直接失败。临时名带 id，多 worker 互不踩
-                            let part = dir.join(format!("{}.part.jpg", job.id));
+                        let ready: Option<std::path::PathBuf> = if existing_ok {
+                            Some(out)
+                        } else if legacy_ok {
+                            Some(legacy)
+                        } else {
+                            // 抽帧写临时名，成功才改名——ffmpeg 中途被杀不会留下半张图。
+                            // 临时名与目标同扩展名：ffmpeg 按扩展名选封装格式，
+                            // `{id}.part` 类无扩展名会直接失败。临时名带 id，多 worker 互不踩
+                            let part = dir.join(format!("{}.part.{}", job.id, thumb_ext()));
                             let result = scanner::extract_thumbnail(&job.source, &part, job.duration)
                                 .and_then(|()| std::fs::rename(&part, &out).map_err_str());
                             let _ = std::fs::remove_file(&part);
-                            result.is_ok()
+                            result.is_ok().then_some(out)
                         };
-                        if ok {
+                        if let Some(final_path) = ready {
                             if let Ok(conn) = state.db.lock() {
-                                let _ = persist(&conn, &job.id, &out.to_string_lossy());
+                                let _ = persist(&conn, &job.id, &final_path.to_string_lossy());
                             }
                             generated.fetch_add(1, Ordering::SeqCst);
                         } else {
@@ -503,34 +549,36 @@ pub async fn capture_frame(
         let src = std::path::Path::new(&path);
         let parent = src.parent().ok_or("无法确定视频所在目录")?;
         let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "frame".into());
-        // 文件名带毫秒：只到秒的话同一位置重复截图会静默覆盖上一张
+        // 文件名带毫秒：只到秒的话同一位置重复截图会静默覆盖上一张。
+        // 用总毫秒拆分时/分/秒，避免 (position%60).round()==60 的非法秒值（如 61.9s→01m62s）。
         let stamp = if position > 0.0 {
-            let ms = ((position * 1000.0).round() % 1000.0) as u32;
+            let total_ms = (position * 1000.0).round().max(0.0) as u64;
             format!(
                 "_{:02}m{:02}s{:03}",
-                (position / 60.0).floor() as u32,
-                (position % 60.0).round() as u32,
-                ms
+                total_ms / 60000,
+                (total_ms % 60000) / 1000,
+                total_ms % 1000
             )
         } else {
             "_start".to_string()
         };
-        let out = parent.join(format!("{}_{}.png", stem, stamp));
+        // 同一位置重复截图不再 -y 静默覆盖：自动加 " (2)" 后缀
+        let out = unique_path(&parent.join(format!("{}_{}.png", stem, stamp)))?;
 
         // -ss 0 不传：ffmpeg 62 对 image2/mjpeg 的 0 偏移 seek 会跳过唯一一帧（同 extract_thumbnail）
+        // 不传 -y：输出路径已由 unique_path 保证不重名，-y 会掩盖并发竞态的覆盖
         let mut cmd = crate::scanner::hidden_command("ffmpeg");
-        cmd.arg("-y");
         if position > 0.0 {
             cmd.args(["-ss", &position.to_string()]);
         }
-        let output = cmd
-            .args([
-                "-i", &path,
-                "-frames:v", "1",
-                &out.to_string_lossy(),
-            ])
-            .output()
-            .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+        cmd.args([
+            "-i",
+            &path,
+            "-frames:v",
+            "1",
+            &out.to_string_lossy(),
+        ]);
+        let output = crate::scanner::output_timeout(cmd, 60, "ffmpeg 截图")?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
             return Err(format!("截图失败: {}", detail.chars().take(200).collect::<String>()));

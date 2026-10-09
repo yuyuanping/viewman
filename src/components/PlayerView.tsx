@@ -18,11 +18,13 @@ interface PlayerViewProps {
   onSelect?: (video: Video) => void;
   onDelete?: (video: Video) => void;
   onMove?: (video: Video) => void;
+  /** 非阻塞错误回报（父层转 toast） */
+  onError?: (message: string) => void;
 }
 
 const PLAYLIST_VISIBLE_KEY = "viewman.playlistVisible";
 
-export function PlayerView({ video, initialPosition, onClose, onProgress, onFallback, playlist, playlistProgress, onSelect, onDelete, onMove }: PlayerViewProps) {
+export function PlayerView({ video, initialPosition, onClose, onProgress, onFallback, playlist, playlistProgress, onSelect, onDelete, onMove, onError }: PlayerViewProps) {
   const playback = usePlayerPlayback({ video, initialPosition, onProgress, playlist, onSelect });
   const { targetRef: overlayRef, isFullscreen, toggleFullscreen } = useFullscreen<HTMLDivElement>();
   const { fitBoxRef, rot, rotateFrame, videoStyle } = useVideoRotation(video.id);
@@ -63,6 +65,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
     togglePlay: playback.togglePlay,
     toggleFullscreen,
     toggleMute: playback.clearAutoMuted,
+    stepRate: playback.stepRate,
   });
 
   return (
@@ -101,6 +104,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
             onSelect={onSelect}
             onDelete={onDelete}
             onMove={onMove}
+            onError={onError}
           />
         )}
       </div>
@@ -207,7 +211,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
               onChange={playback.changeRate}
               className={`player-rate-select rounded-full px-3 py-1.5 text-xs font-medium cursor-pointer outline-none transition bg-white/10 text-white/90 hover:bg-white/15 [&>option]:bg-gray-900 [&>option]:text-white ${playback.rate !== 1 ? "!bg-blue-600 text-white hover:!bg-blue-500" : ""}`}
               aria-label="播放倍速"
-              title="播放倍速"
+              title="播放倍速（播放时按 ↑/↓ 也可加减挡）"
             >
               {RATES.map(r => (
                 <option key={r} value={r}>{r}× 倍速</option>

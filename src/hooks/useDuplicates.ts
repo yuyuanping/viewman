@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DuplicateProgressPayload, DuplicateReport } from "../api";
+import type { DeletionReport, DuplicateProgressPayload, DuplicateReport } from "../api";
 import { pruneGroupsToLive, restoredResultStale } from "../detectionCache";
 import { useTauriEvent } from "./useTauriEvent";
 import type { Notify } from "./useToasts";
@@ -7,10 +7,10 @@ import type { Notify } from "./useToasts";
 interface DuplicateOptions {
   detect: () => Promise<DuplicateReport>;
   /**
-   * 把这一批移入回收站，返回真正删掉的 id。
+   * 把这一批移入回收站，返回三类清单。
    * 删完之后本地清单怎么更新（就地剔除还是整库重拉）由实现方决定，这里不假设。
    */
-  remove: (ids: string[]) => Promise<string[]>;
+  remove: (ids: string[]) => Promise<DeletionReport>;
   /** 提示文案里的媒体名称 */
   unit: string;
   /** 检测要逐张跑 ffmpeg 时才给：进度事件名，不传就没有进度 */
@@ -124,23 +124,23 @@ export function useDuplicates(
   const deleteExtras = useCallback(async () => {
     const ids = [...extraIds];
     if (ids.length === 0) return;
-    if (!confirm(`每个重复组保留最早添加的一个，将其余 ${ids.length} 个副本移入回收站？`)) return;
+    // 无确认直接执行：每个重复组保留最早添加的一个，其余副本进回收站
     setDeleting(true);
     let ok = 0;
-    let failed = 0;
+    let locked = 0;
     try {
-      const deleted = await remove(ids);
-      ok = deleted.length;
-      failed = ids.length - deleted.length;
+      const report = await remove(ids);
+      ok = report.deleted.length + report.stale.length;
+      locked = report.locked.length;
     } catch (e) {
-      failed = ids.length;
+      locked = ids.length;
       notify(`删除重复副本失败：${String(e)}`, "error");
     }
     // 本次会话不再显示结果；盘上的缓存留着——下次启动照现在的库裁一遍再摆出来，
     // 删失败（文件被占用）留下的那些副本就还能看见
     setRawGroups([]);
     setDetected(false);
-    notify(failed > 0 ? `已删除 ${ok} 个重复副本，${failed} 个失败（可能被占用）` : `已删除 ${ok} 个重复副本到回收站。`);
+    notify(locked > 0 ? `已删除 ${ok} 个重复副本，${locked} 个被占用删不掉（关闭占用程序后重跑检测再删）` : `已删除 ${ok} 个重复副本到回收站。`);
     setDeleting(false);
   }, [extraIds, notify, remove, unit]);
 

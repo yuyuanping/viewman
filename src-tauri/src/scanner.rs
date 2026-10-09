@@ -21,6 +21,67 @@ pub(crate) fn hidden_command(program: &str) -> Command {
     cmd
 }
 
+/// 带超时的进程执行：网络盘 hung 住时 ffmpeg/ffprobe 可能永远不返回，
+/// 坏文件卡死一个 worker 就会拖慢整批。超时杀掉进程并报错，调用方按"探测失败"处理。
+/// probe 类默认 30s，转码/全片扫描类由调用方传更大值。
+pub(crate) fn output_timeout(
+    mut cmd: Command,
+    secs: u64,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use wait_timeout::ChildExt;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("无法运行 {}: {}", what, e))?;
+    let timeout = std::time::Duration::from_secs(secs);
+    match child
+        .wait_timeout(timeout)
+        .map_err(|e| format!("{} 等待失败: {}", what, e))?
+    {
+        Some(_) => {
+            // 正常退出：收集输出（管道已接管，wait_with_output 不会堵）
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut out) = child.stdout.take() {
+                let _ = out.read_to_end(&mut stdout);
+            }
+            if let Some(mut err) = child.stderr.take() {
+                let _ = err.read_to_end(&mut stderr);
+            }
+            let status = child.wait().map_err(|e| format!("{} 回收失败: {}", what, e))?;
+            Ok(std::process::Output { status, stdout, stderr })
+        }
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(format!("{} 超时（{}s 未返回，疑似坏文件或网络盘 hung 住）", what, secs))
+        }
+    }
+}
+
+/// 本机 ffmpeg 是否带 libwebp 编码器：缩略图 WebP 化的前提，不带则回退 jpg。
+/// 结果缓存，进程内只探测一次。
+pub fn webp_available() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        output_timeout(
+            {
+                let mut c = hidden_command("ffmpeg");
+                c.args(["-hide_banner", "-encoders"]);
+                c
+            },
+            15,
+            "ffmpeg",
+        )
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("libwebp"))
+        .unwrap_or(false)
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput {
     streams: Vec<FfprobeStream>,
@@ -77,17 +138,18 @@ pub(crate) fn ffmpeg_err(output: &std::process::Output) -> String {
 }
 
 pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
-    let output = hidden_command("ffprobe")
-        .args(image_input_opts(path))
-        .args([
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            "-show_streams",
-            path,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run ffprobe: {}. Is ffmpeg installed?", e))?;
+    let mut cmd = hidden_command("ffprobe");
+    cmd.args(image_input_opts(path)).args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        path,
+    ]);
+    // 探测类 30s 超时：网络盘 hung 住不再卡死 worker
+    let output = output_timeout(cmd, 30, "ffprobe")?;
 
     if !output.status.success() {
         return Err(format!("ffprobe failed for: {}", path));
@@ -372,17 +434,22 @@ fn gray_grid(path: &str, n: usize, seek: Option<f64>) -> Option<Vec<u8>> {
     if let Some(at) = &seek_arg {
         cmd.args(["-ss", at]);
     }
-    let mut output = cmd
-        .args([
-            "-i", path,
-            "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", n, n),
-            "-frames:v", "1",
-            "-f", "rawvideo",
-            "-pix_fmt", "gray",
-            "-",
-        ])
-        .output()
-        .ok()?;
+    let mut output = output_timeout(
+        {
+            cmd.args([
+                "-i", path,
+                "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", n, n),
+                "-frames:v", "1",
+                "-f", "rawvideo",
+                "-pix_fmt", "gray",
+                "-",
+            ]);
+            cmd
+        },
+        30,
+        "ffmpeg",
+    )
+    .ok()?;
     if !output.status.success() || output.stdout.len() < n * n {
         return None;
     }
@@ -490,20 +557,19 @@ pub fn hamming_distance(a: u64, b: u64) -> u32 {
 
 /// 读取视频流编码名（h264/hevc/...），读不出时返回 None
 pub fn video_codec_name(video_path: &str) -> Option<String> {
-    let output = hidden_command("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            video_path,
-        ])
-        .output()
-        .ok()?;
+    let mut cmd = hidden_command("ffprobe");
+    cmd.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]);
+    let output = output_timeout(cmd, 30, "ffprobe").ok()?;
     if !output.status.success() {
         return None;
     }
@@ -511,34 +577,34 @@ pub fn video_codec_name(video_path: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// 转码为 H.264 + AAC 写入 out_path，供 WebView2 解不了 HEVC 时内置播放使用
+/// 转码为 H.264 + AAC 写入 out_path，供 WebView2 解不了 HEVC 时内置播放使用。
+/// 300s 超时：长片转码慢但须有上限，超时按失败处理、残留文件清掉。
 pub fn transcode_to_h264(video_path: &str, out_path: &Path) -> Result<(), String> {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建转码目录失败: {}", e))?;
     }
-    let output = hidden_command("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            video_path,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-        ])
-        .arg(out_path)
-        .output()
-        .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+    let mut cmd = hidden_command("ffmpeg");
+    cmd.args([
+        "-y",
+        "-i",
+        video_path,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+    ])
+    .arg(out_path);
+    let output = output_timeout(cmd, 300, "ffmpeg 转码")?;
     if !output.status.success() {
         let _ = fs::remove_file(out_path);
         return Err(ffmpeg_err(&output));
@@ -550,20 +616,20 @@ pub fn transcode_to_h264(video_path: &str, out_path: &Path) -> Result<(), String
 }
 
 /// 用 mpdecimate 去除重复帧后统计剩余画面数，判断是否"近似静图"。无法解码时返回 None
+/// 全片解码类 120s 超时
 pub fn unique_frame_count(video_path: &str) -> Option<usize> {
-    let output = hidden_command("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-i",
-            video_path,
-            "-vf",
-            "mpdecimate",
-            "-f",
-            "null",
-            "-",
-        ])
-        .output()
-        .ok()?;
+    let mut cmd = hidden_command("ffmpeg");
+    cmd.args([
+        "-hide_banner",
+        "-i",
+        video_path,
+        "-vf",
+        "mpdecimate",
+        "-f",
+        "null",
+        "-",
+    ]);
+    let output = output_timeout(cmd, 120, "ffmpeg").ok()?;
     if !output.status.success() {
         return None;
     }
@@ -586,19 +652,18 @@ pub fn extract_full_frame(video_path: &str, out_path: &Path) -> Result<(), Strin
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
     }
-    let output = hidden_command("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            video_path,
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            &out_path.to_string_lossy(),
-        ])
-        .output()
-        .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+    let mut cmd = hidden_command("ffmpeg");
+    cmd.args([
+        "-y",
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        &out_path.to_string_lossy(),
+    ]);
+    let output = output_timeout(cmd, 120, "ffmpeg 抽帧")?;
     if !output.status.success() {
         return Err(ffmpeg_err(&output));
     }
@@ -628,8 +693,25 @@ pub fn extract_thumbnail(
         if seconds > 0.0 {
             cmd.args(["-ss", &seconds.to_string()]);
         }
-        let output = cmd
-            .args([
+        // WebP 封面（.webp）：libwebp 体积比 mjpeg 小约 40%，网格加载更快；
+        // jpg 保持原参数，老缓存与无 libwebp 的机器不受影响
+        let out_str = out_path.to_string_lossy().to_string();
+        if out_str.to_lowercase().ends_with(".webp") {
+            cmd.args([
+                "-i",
+                video_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                &format!("scale={}:-2", THUMBNAIL_WIDTH),
+                "-c:v",
+                "libwebp",
+                "-quality",
+                "80",
+                &out_str,
+            ]);
+        } else {
+            cmd.args([
                 "-i",
                 video_path,
                 "-frames:v",
@@ -638,10 +720,11 @@ pub fn extract_thumbnail(
                 &format!("scale={}:-2", THUMBNAIL_WIDTH),
                 "-q:v",
                 "4",
-                &out_path.to_string_lossy(),
-            ])
-            .output()
-            .map_err(|e| format!("无法运行 ffmpeg: {}", e))?;
+                &out_str,
+            ]);
+        }
+        // 抽帧类 60s 超时
+        let output = output_timeout(cmd, 60, "ffmpeg 抽帧")?;
 
         if !output.status.success() {
             return Err(ffmpeg_err(&output));

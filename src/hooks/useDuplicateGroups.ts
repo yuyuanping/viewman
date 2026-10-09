@@ -17,6 +17,8 @@ interface DuplicateGroupOptions {
   setSelectMode: (on: boolean) => void;
   setSelectedIds: Dispatch<SetStateAction<Set<string>>>;
   notify: Notify;
+  /** 是否比对像素：关掉就是快检（只看双指纹门槛，误判多、秒回），由面板开关控制 */
+  pixelVerify: boolean;
 }
 
 /** 进度里带上的阶段与累计跳过的张数 */
@@ -35,15 +37,17 @@ const NO_PROGRESS = null;
  * 勾选走增量：只补新冒出来的副本，用户手动取消过的不会被擅自勾回去。
  * 公共的状态机（组/保留张/自动勾选/缓存恢复）在 useGroupReviewCore，这里只留查重自己的部分。
  */
-export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, libraryVersion, setSelectMode, setSelectedIds, notify }: DuplicateGroupOptions) {
+export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, libraryVersion, setSelectMode, setSelectedIds, notify, pixelVerify }: DuplicateGroupOptions) {
   const [skipped, setSkipped] = useState(0);
   const [progress, setProgress] = useState<DuplicateRunProgress | null>(NO_PROGRESS);
+  /** 缓存那份结果用的模式（null = 本轮现跑的，自然与开关一致） */
+  const [cachePixelVerify, setCachePixelVerify] = useState<boolean | null>(null);
 
   const {
     setGroups, detected, setDetected, detecting, setDetecting, panelOpen, setPanelOpen,
     ranLive, imageById, aliveGroups, extras, stale,
     beginRun, markLiveResult, restoreFromCache, resetResults,
-    keep, autoSelect, clearSelection, setGroupSelection,
+    keep, autoSelect, selectAll, clearSelection, setGroupSelection,
   } = useGroupReviewCore({ fetchImagesByIds, libraryTotal, libraryVersion, setSelectMode, setSelectedIds, toAliveGroups: aliveGroupsForDuplicates });
 
   // 事件收不到只是看不到中间进度，检测结束时仍会拿到完整结果
@@ -64,6 +68,8 @@ export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, libraryVers
       if (!cached || cached.report.groups.length === 0 || ranLive.current) return;
       restoreFromCache(cached.report.groups, cached.libraryCount);
       setSkipped(cached.report.skipped ?? 0);
+      // 老缓存没这个字段，按 true 理解（当时只有比对像素一种模式）
+      setCachePixelVerify(cached.pixelVerify ?? true);
     }).catch(() => { /* 读不到缓存就是还没跑过检测 */ });
   }, []);
 
@@ -71,28 +77,30 @@ export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, libraryVers
     setDetecting(true);
     beginRun();
     setSkipped(0);
+    setCachePixelVerify(null);
     try {
-      const found = await api.findDuplicateImages();
+      const found = await api.findDuplicateImages(pixelVerify);
       markLiveResult();
       setSkipped(found.skipped ?? 0);
+      const mode = pixelVerify ? "" : "（快检，未比对像素）";
       if (found.groups.length === 0) {
         setDetected(false);
         setPanelOpen(false);
         // 解不出画面的条目根本没进比对，不报出来的话"没有重复"会被当成定论
-        notify(found.skipped ? `没有发现内容相同的重复图片。另有 ${found.skipped} 张解不出画面，未参与比对。` : "没有发现内容相同的重复图片。");
+        notify(found.skipped ? `没有发现内容相同的重复图片${mode}。另有 ${found.skipped} 张解不出画面，未参与比对。` : `没有发现内容相同的重复图片${mode}。`);
         return;
       }
       setGroups(found.groups);
       setDetected(true);
       const copies = found.groups.reduce((n, g) => n + g.length - 1, 0);
-      notify(`检测完成：${found.groups.length} 组重复图片，副本已勾上 ${copies} 张${found.skipped ? `，另有 ${found.skipped} 张解不出画面未参与比对` : ""}。`);
+      notify(`检测完成${mode}：${found.groups.length} 组重复图片，副本已勾上 ${copies} 张${found.skipped ? `，另有 ${found.skipped} 张解不出画面未参与比对` : ""}。`);
     } catch (e) {
       notify(`检测重复失败：${String(e)}`, "error");
     } finally {
       setDetecting(false);
       setProgress(NO_PROGRESS);
     }
-  }, [notify, setDetecting, beginRun, markLiveResult, setDetected, setPanelOpen, setGroups]);
+  }, [notify, pixelVerify, setDetecting, beginRun, markLiveResult, setDetected, setPanelOpen, setGroups]);
 
   const clear = useCallback(() => {
     resetResults();
@@ -120,7 +128,9 @@ export function useDuplicateGroups({ fetchImagesByIds, libraryTotal, libraryVers
     clear,
     keep,
     autoSelect,
+    selectAll,
     clearSelection,
     setGroupSelection,
+    cachePixelVerify,
   };
 }

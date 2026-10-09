@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import type { ThumbnailProgressPayload } from "../api";
+import { logger } from "../logger";
+import { useTauriEvent } from "./useTauriEvent";
 import type { Notify } from "./useToasts";
 
 interface ThumbnailOptions {
@@ -26,27 +27,22 @@ export function useThumbnailGeneration(
 ) {
   const [thumbProgress, setThumbProgress] = useState<{ processed: number; total: number } | null>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    listen<ThumbnailProgressPayload>(event, (received) => {
-      const { processed, total, done } = received.payload;
-      setThumbProgress(done ? null : { processed, total });
-    }).then((fn) => {
-      if (disposed) fn(); else unlisten = fn;
-    }).catch(() => { /* 事件监听失败不影响手动刷新 */ });
-    return () => { disposed = true; unlisten?.(); };
-  }, [event]);
+  // 与 useScanProgress 同一条订阅通路：useTauriEvent 统一处理竞态与清理，不再手写 listen
+  useTauriEvent<ThumbnailProgressPayload>(
+    event,
+    (payload) => setThumbProgress(payload.done ? null : { processed: payload.processed, total: payload.total }),
+    (e) => logger.warn("thumbnail", `事件订阅失败 (${event}):`, e),
+  );
 
   // 启动续跑：关程序时没跑完的批次，下次打开接着生成。进度走同一个事件通道，
-  // 跑完刷新一次列表；失败只静默放弃，不打扰启动流程
+  // 跑完刷新一次列表；失败记 warn 不打扰启动流程
   useEffect(() => {
     let cancelled = false;
     resume().then(didResume => {
       if (cancelled || !didResume) return;
       notify(`检测到上次未完成的${unit}封面生成，已自动继续。`);
       return reload();
-    }).catch(() => { /* 续跑失败不影响启动 */ });
+    }).catch((e) => logger.warn("thumbnail", `续跑失败 (${unit}):`, e));
     return () => { cancelled = true; };
   }, [resume, reload, notify, unit]);
 

@@ -65,3 +65,13 @@ pub struct ConversionResult {
     pub converted: usize,
     pub errors: Vec<String>,
 }
+
+/// 批量删除的结果：三类分开报，免得"记录路径已失效"被当成"删掉了"或"被占用"。
+/// deleted 含"库里早没记录"的陈旧 id（直接计成功）；stale 是记录还在但磁盘路径已无文件的，
+/// 库记录一并清理，磁盘无事可做；locked 是磁盘有文件但回收站进不去的，需关占用程序重试。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeletionReport {
+    pub deleted: Vec<String>,
+    pub stale: Vec<String>,
+    pub locked: Vec<String>,
+}

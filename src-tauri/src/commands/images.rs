@@ -13,16 +13,22 @@ use super::scan::{
 };
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbEntry, ThumbJob};
-use super::videos::{move_file, same_target_dir};
-use super::{undeleted_targets, AppState, MapErrStr};
+use super::videos::{move_file, same_target_dir, validated_target_dir};
+use super::{clear_cancel, is_cancelled, undeleted_targets, AppState, MapErrStr};
 
 /// 扫描任务的完整产出：新文件、可清理的旧 id、告警、摘要。
 type ImageScanOutcome = Result<(Vec<Image>, Vec<String>, Vec<String>, ScanSummary), String>;
 
 #[tauri::command]
-pub fn get_images(state: State<AppState>) -> Result<Vec<Image>, String> {
-    let conn = state.db.lock().map_err_str()?;
-    db::get_all_images(&conn).map_err_str()
+pub async fn get_images(app: tauri::AppHandle) -> Result<Vec<Image>, String> {
+    // 全表下发是秒级开销：扔进阻塞线程池，别堵 Tauri 主线程冻 UI
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err_str()?;
+        db::get_all_images(&conn).map_err_str()
+    })
+    .await
+    .map_err_str()?
 }
 
 /// 图片库视图：扫描范围 + 目录前缀 + 文件名子串过滤下推到 SQL，前端不再整表过桥。
@@ -101,6 +107,7 @@ pub async fn scan_image_directory(
     let dir_path = PathBuf::from(&dir);
     let dir_for_task = dir.clone();
     let task_app = app.clone();
+    clear_cancel(&app, "scan-image");
     let (images, stale_ids, warnings, summary) =
         tauri::async_runtime::spawn_blocking(move || -> ImageScanOutcome {
             // 根目录打不开时直接报错，绝不把"没扫到"当成"已删除"去清库
@@ -220,6 +227,25 @@ fn build_images_parallel(
     let processed = AtomicUsize::new(0);
     let probe_failures = AtomicUsize::new(0);
     let write_failures = AtomicUsize::new(0);
+    // 进度节流：每 128 张或 200ms 推一次，避免 10 万文件=10 万次 IPC 洪峰
+    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
+    let maybe_emit = |done: usize| {
+        let should = done.is_multiple_of(128) || done >= total;
+        if !should {
+            if let Ok(last) = last_emit.lock() {
+                if last.elapsed() < std::time::Duration::from_millis(200) {
+                    return;
+                }
+            }
+        }
+        if let Ok(mut last) = last_emit.lock() {
+            *last = std::time::Instant::now();
+        }
+        let _ = app.emit(
+            "image-scan-progress",
+            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
+        );
+    };
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -232,6 +258,9 @@ fn build_images_parallel(
                 s.spawn(|| {
                     let mut out = Vec::new();
                     loop {
+                        if is_cancelled(app, "scan-image") {
+                            break;
+                        }
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         if i >= total {
                             break;
@@ -253,10 +282,7 @@ fn build_images_parallel(
                         }
                         out.push(image);
                         let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                        let _ = app.emit(
-                            "image-scan-progress",
-                            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
-                        );
+                        maybe_emit(done);
                     }
                     out
                 })
@@ -390,7 +416,7 @@ pub async fn fix_mismatched_extensions(
                 report.already_matched += 1;
                 continue;
             }
-            // 目标重名时加 " (2)" 后缀，口径同 move_image
+            // 目标重名时加 " (2)" 后缀，口径同 move_image，999 封顶防无限循环
             let (Some(dir), Some(stem)) = (p.parent(), p.file_stem()) else {
                 report.failed += 1;
                 continue;
@@ -398,9 +424,18 @@ pub async fn fix_mismatched_extensions(
             let stem = stem.to_string_lossy().to_string();
             let mut target = dir.join(format!("{stem}.{ext}"));
             let mut n = 2;
+            let mut overflow = false;
             while target.exists() {
+                if n > 999 {
+                    overflow = true;
+                    break;
+                }
                 target = dir.join(format!("{stem} ({n}).{ext}"));
                 n += 1;
+            }
+            if overflow {
+                report.failed += 1;
+                continue;
             }
             if std::fs::rename(p, &target).is_err() {
                 report.failed += 1;
@@ -432,7 +467,7 @@ pub async fn fix_mismatched_extensions(
     .map_err_str()?
 }
 
-/// 批量删除图片：一次回收站事务 + 一次数据库事务，返回成功删除的 id。
+/// 批量删除图片：一次回收站事务 + 一次数据库事务，返回三类清单。
 /// 逐张删时每张都要过一次 IPC、一次 shell 调用和一次事务落盘，勾选几百张就是十几秒。
 /// 库里已经没有记录的 id 视作已删除，见 split_known_targets。
 #[tauri::command]
@@ -440,35 +475,46 @@ pub async fn delete_images(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     image_ids: Vec<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<crate::models::DeletionReport, String> {
     let (targets, mut deleted): (Vec<(String, String)>, Vec<String>) = {
         let conn = state.db.lock().map_err_str()?;
-        split_known_targets(&conn, &image_ids)?
+        split_known_targets(&conn, &image_ids).map_err(|e| format!("读取库记录失败（文件未动）：{}", e))?
     };
+
+    // 记录在但磁盘路径已无文件：库记录要清，磁盘无事可做，单独报 stale
+    let stale: Vec<String> = targets
+        .iter()
+        .filter(|(_, path)| !Path::new(path).exists())
+        .map(|(id, _)| id.clone())
+        .collect();
 
     let for_files = targets.clone();
     let survivors = tauri::async_runtime::spawn_blocking(move || undeleted_targets(&for_files))
         .await
         .map_err_str()?;
-    let failed: HashSet<String> = survivors.into_iter().map(|(id, _)| id).collect();
+    let locked: Vec<String> = survivors.into_iter().map(|(id, _)| id).collect();
+    let locked_set: HashSet<String> = locked.iter().cloned().collect();
+    let stale_set: HashSet<String> = stale.iter().cloned().collect();
     deleted.extend(
         targets
             .iter()
-            .filter(|(id, _)| !failed.contains(id))
+            .filter(|(id, _)| !locked_set.contains(id) && !stale_set.contains(id))
             .map(|(id, _)| id.clone()),
     );
+    // 进回收站的 + 路径失效的，库记录都要清
+    let mut to_clear = deleted.clone();
+    to_clear.extend(stale.clone());
 
-    if !deleted.is_empty() {
+    if !to_clear.is_empty() {
         let conn = state.db.lock().map_err_str()?;
-        let tx = conn.unchecked_transaction().map_err_str()?;
-        db::delete_images_by_ids(&tx, &deleted).map_err_str()?;
-        tx.commit().map_err_str()?;
-        for id in &deleted {
+        // 自愈删除：坏行触发 malformed 时原地重建 FTS 重试，仍不行才把自检结果带回来
+        super::delete_records_with_heal(&conn, &to_clear, "图片", db::delete_images_by_ids)?;
+        for id in &to_clear {
             clear_thumbnail_cache(&app, id);
         }
     }
 
-    Ok(deleted)
+    Ok(crate::models::DeletionReport { deleted, stale, locked })
 }
 
 /// 把图片文件移动到目标文件夹并同步库记录路径；目标重名时自动加 " (2)" 后缀，
@@ -485,18 +531,16 @@ pub async fn move_image(
             .map_err_str()?
             .ok_or_else(|| format!("Image not found: {}", image_id))?;
         let src = Path::new(&old_path);
-        let filename = src
-            .file_name()
-            .ok_or_else(|| "源文件路径无效".to_string())?
-            .to_string_lossy()
-            .to_string();
-        let dir = Path::new(&target_dir);
+        let dir = validated_target_dir(&target_dir)?;
         if same_target_dir(&old_path, &target_dir) {
             return Err("文件已经在该目录中".into());
         }
+        let filename_os = src
+            .file_name()
+            .ok_or_else(|| "源文件路径无效".to_string())?;
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
         let ext = src.extension().and_then(|s| s.to_str());
-        let mut candidate = dir.join(&filename);
+        let mut candidate = dir.join(filename_os);
         let mut idx = 1;
         while candidate.exists()
             || db::is_image_path_taken(&conn, &candidate.to_string_lossy(), &image_id)

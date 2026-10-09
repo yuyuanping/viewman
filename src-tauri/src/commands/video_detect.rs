@@ -102,8 +102,8 @@ fn ensure_anchors(
             Some(thumb) if Path::new(thumb).exists() => Some(thumb.to_string()),
             _ => {
                 // 抽帧落到缩略图目录并登记：这趟活儿顺手把缺的封面补齐，
-                // 下次「生成缩略图」就不必再为这条重复解码。
-                let out = thumb_dir.join(format!("{}.jpg", row.id));
+                // 下次「生成缩略图」就不必再为这条重复解码。扩展名跟缩略图管线一致。
+                let out = super::thumbnails::thumb_file(thumb_dir, &row.id);
                 match scanner::extract_thumbnail(&row.path, &out, row.duration) {
                     Ok(()) => {
                         if let Ok(conn) = app.state::<AppState>().db.lock() {

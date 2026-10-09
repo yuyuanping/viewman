@@ -2,11 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Image } from "../types";
 import type { SimilarGroup } from "../similarGroups";
-import { hashDistance, KEEP_RULES, groupsMatching } from "../similarGroups";
-import type { HashPair, KeepRule } from "../similarGroups";
+import { groupsMatching } from "../similarGroups";
 import { formatFileSize, formatResolution } from "../utils";
 import { JustifiedGrid } from "./JustifiedGrid";
-import { SIMILAR_THRESHOLD_MAX, SIMILAR_THRESHOLD_MIN } from "../hooks/useSimilarDetection";
+import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
 
 /** 一组超过这个张数就先折起来：几百张一次铺出来既卡又没法逐张比对 */
 const COLLAPSE_AT = 24;
@@ -17,28 +16,28 @@ const aspectOfEntry = (entry: { image: Image }) =>
 const keyOfEntry = (entry: { image: Image }) => entry.image.id;
 
 interface GroupReviewPanelProps {
-  /** 文案里指代这一批条目的名词（"相似图片" / "重复图片"），标题和提示都由它拼 */
+  /** 文案里指代这一批条目的名词（"重复图片"），标题和提示都由它拼 */
   noun: string;
-  /** 进度前缀：相似是"补算指纹"，重复是"核对候选" */
+  /** 进度前缀：重复检测是"核对候选" */
   progressLabel: string;
   /** 组：已裁掉不在库的组员，keep 是本组保留的那张 */
   groups: SimilarGroup[];
   imageById: Map<string, Image>;
-  /** 组内成员指纹：只随最终完整结果回来，用来标"距保留张几位"并按它排序。重复组没有这个 */
-  hashById?: Map<string, HashPair>;
   selectedIds: Set<string>;
   onToggle: (image: Image) => void;
   /** 把该组的保留项换成这张，其余重新勾上（第一参数是本组当前的保留张） */
   onKeep: (fromKeep: string, keepId: string) => void;
   /** 按"每组只留当前保留张"重刷勾选 */
   onAutoSelect: () => void;
+  /** 本面板全部组员（含保留张）一次勾上 */
+  onSelectAll: () => void;
   /** 清空整个待删清单（含本面板之外的勾选） */
   onClearAll: () => void;
   /** 整组勾选翻转：on=true 连保留张一起勾，on=false 只取消这组的 */
   onSelectGroup: (ids: string[], on: boolean) => void;
   /** 当前列表里已勾中的条目数（含本面板之外的） */
   selectedTotal: number;
-  /** 直接走工具栏那条批量删除通路（进回收站前有二次确认） */
+  /** 直接走工具栏那条批量删除通路 */
   onDeleteSelected: () => void;
   deleting: boolean;
   /** 批量移动勾中的图片到别的文件夹（弹系统目录选择器）；不给就不显示这个按钮 */
@@ -49,31 +48,32 @@ interface GroupReviewPanelProps {
   fixingExtensions?: boolean;
   /** 检测仍在跑：每推一次，分组整份换新 */
   detecting: boolean;
-  /** 换宽容度后正在重新比对（指纹已缓存，只是重算分组） */
-  recalculating?: boolean;
   /** 补算/核对的进度；没有中间进度时这条不出现 */
   progress: { processed: number; total: number } | null;
   /** 结论的保留意见（比如"另有 N 张解不出画面"）：不说清的话"没有重复"会被当成定论 */
   caveat?: string;
-  /** 汉明距离阈值：越大越宽松，相似多但误判也多。不给就不显示这根滑杆 */
-  threshold?: number;
-  onThreshold?: (threshold: number) => void;
-  /** 每组默认留哪张：影响所有没手动点过「留」的组。不给就不显示这个下拉 */
-  keepRule?: KeepRule;
-  onKeepRule?: (rule: KeepRule) => void;
+  /** 是否比对像素：关掉就是快检（只看双指纹门槛，误判多、秒回）。不给就不显示这个开关 */
+  pixelVerify?: boolean;
+  onPixelVerify?: (verify: boolean) => void;
   /** 放大看：以整组为翻页范围，方便逐张比对 */
   onOpenImage: (image: Image, groupIds: string[]) => void;
+  /** 单张移动：右键菜单用，接到父层的移动对话框 */
+  onMoveImage?: (image: Image) => void;
+  /** 单张删除：右键菜单用，进回收站并清理勾选 */
+  onDeleteImage?: (image: Image) => void;
+  /** 非阻塞错误回报（父层转 toast） */
+  onError?: (message: string) => void;
   onClose: () => void;
 }
 
 /**
- * 分组审阅面板（相似图 / 重复图共用）：每组单独一块，组员并排显示，勾中的走"删除所选"那条通路。
+ * 分组审阅面板（重复图）：每组单独一块，组员并排显示，勾中的走"删除所选"那条通路。
  * 检测是边算边推的，所以面板开着就能看到逐渐变长的清单，不必等全库跑完。
  * 块上加了 content-visibility，几千组时只有滚进视口的才参与布局。
- * 宽容度滑杆和选主下拉只有相似检测给（重复判据没有这两个旋钮）。
+ * 比对像素开关只有重复检测给。
  */
 export function GroupReviewPanel({
-  noun, progressLabel, groups, imageById, hashById, selectedIds, onToggle, onKeep, onAutoSelect, onClearAll, onSelectGroup, selectedTotal, onDeleteSelected, deleting, onMoveSelected, moving, onFixExtensions, fixingExtensions, detecting, recalculating, progress, caveat, threshold, onThreshold, keepRule, onKeepRule, onOpenImage, onClose,
+  noun, progressLabel, groups, imageById, selectedIds, onToggle, onKeep, onAutoSelect, onSelectAll, onClearAll, onSelectGroup, selectedTotal, onDeleteSelected, deleting, onMoveSelected, moving, onFixExtensions, fixingExtensions, detecting, progress, caveat, pixelVerify, onPixelVerify, onOpenImage, onMoveImage, onDeleteImage, onError, onClose,
 }: GroupReviewPanelProps) {
   /** 展开过的组（按当前的保留张记着）：组员太多的组默认只铺前若干张 */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -110,6 +110,10 @@ export function GroupReviewPanel({
 
   const visible = useMemo(() => groupsMatching(groups, query, imageById), [groups, query, imageById]);
 
+  // 组员右键菜单：与网格卡片同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站）
+  const { menu, openMenu, closeMenu } = useContextMenu<Image>();
+  const { reveal, copyName } = useFileMenuActions(onError);
+
   return (
     <div className="image-viewer fixed inset-0 z-40 flex flex-col" role="dialog" aria-modal="true" aria-label={`${noun}分组`}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 shrink-0">
@@ -118,47 +122,32 @@ export function GroupReviewPanel({
           {groups.length} 组 · 组内已勾 {selectedInGroups}
           {progress && ` · ${progressLabel} ${progress.processed}/${progress.total}`}
           {caveat && ` · ${caveat}`}
-          {recalculating && " · 重新比对中…"}
         </span>
-        {onThreshold && threshold !== undefined && (
+        {onPixelVerify && pixelVerify !== undefined && (
           <label
-            className="flex items-center gap-1.5 text-xs text-gray-400"
-            title="汉明距离阈值：往右更宽松（相似找得多、误判也多），往左更严格。指纹已存库，改完只是重新比对，不用重跑 ffmpeg"
+            className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer"
+            title="开：候选组逐张解像素核对（准，慢，首次几分钟）；关：只看双指纹门槛直接成组（快，误判多，靠人工复核）。改完重跑一次检测生效"
           >
-            宽容度
             <input
-              type="range"
-              min={SIMILAR_THRESHOLD_MIN}
-              max={SIMILAR_THRESHOLD_MAX}
-              step={1}
-              value={threshold}
-              disabled={detecting || !!recalculating}
-              onChange={(e) => onThreshold(Number(e.target.value))}
-              className="w-28 accent-blue-500"
-              aria-label="相似判定宽容度（汉明距离阈值）"
+              type="checkbox"
+              checked={pixelVerify}
+              disabled={detecting}
+              onChange={(e) => onPixelVerify(e.target.checked)}
+              className="accent-blue-500"
+              aria-label="是否比对像素"
             />
-            <span className="tabular-nums text-gray-200">{threshold}</span>
-          </label>
-        )}
-        {onKeepRule && keepRule !== undefined && (
-          <label
-            className="flex items-center gap-1.5 text-xs text-gray-400"
-            title="每组默认保留哪一张：套图里通常想留分辨率或体积最大的那张。手动点过「留」的组不受影响"
-          >
-            选主
-            <select
-              className="toolbar-select"
-              value={keepRule}
-              onChange={(e) => onKeepRule(e.target.value as KeepRule)}
-              aria-label="每组默认保留哪张"
-            >
-              {KEEP_RULES.map(rule => (
-                <option key={rule.value} value={rule.value}>{rule.label}</option>
-              ))}
-            </select>
+            比对像素
           </label>
         )}
         <span className="toolbar-spacer" />
+        <button
+          type="button"
+          className="toolbar-chip"
+          onClick={onSelectAll}
+          title="本面板所有组员（含每组标着「保留」的那张）全部勾上"
+        >
+          全选
+        </button>
         <button
           type="button"
           className="toolbar-chip"
@@ -182,7 +171,7 @@ export function GroupReviewPanel({
             className="toolbar-chip"
             onClick={onMoveSelected}
             disabled={moving || selectedTotal === 0}
-            title="把已勾中的图片移动到另一个文件夹（M，会先弹目录选择器，移动前再确认一次）"
+            title="把已勾中的图片移动到另一个文件夹（M，会先弹目录选择器）"
           >
             {moving ? "移动中…" : `移动所选 (${selectedTotal})`}
           </button>
@@ -191,8 +180,8 @@ export function GroupReviewPanel({
           type="button"
           className="toolbar-chip"
           onClick={onDeleteSelected}
-          disabled={deleting || selectedTotal === 0}
-          title="把已勾中的图片移入回收站（Del，删除前会再确认一次）"
+            disabled={deleting || selectedTotal === 0}
+            title="把已勾中的图片移入回收站（Del）"
         >
           {deleting ? "删除中…" : `删除所选 (${selectedTotal})`}
         </button>
@@ -240,17 +229,10 @@ export function GroupReviewPanel({
           <p className="text-gray-500 text-sm p-4">{`没有文件名或路径含「${query.trim()}」的${noun}组——这张图不在任何一组里。`}</p>
         )}
         {visible.map((group, index) => {
-          // 骨架在前、远亲在后，各自距保留张越近越排前：胖组里真正要看的总是那几枚几乎一样的
-          const farSet = new Set(group.far);
           const ranked = group.ids
             .map(id => imageById.get(id))
             .filter((image): image is Image => image !== undefined)
-            .map(image => ({
-              image,
-              far: farSet.has(image.id),
-              dist: hashById ? hashDistance(hashById.get(image.id), hashById.get(group.keep)) : null,
-            }))
-            .sort((a, b) => Number(a.far) - Number(b.far) || (a.dist ?? 99) - (b.dist ?? 99));
+            .map(image => ({ image }));
           const folded = ranked.length > COLLAPSE_AT && !expanded.has(group.keep);
           const shown = folded ? ranked.slice(0, COLLAPSE_AT) : ranked;
           const memberIds = ranked.map(r => r.image.id);
@@ -265,11 +247,6 @@ export function GroupReviewPanel({
               <header className="flex items-center gap-2 text-xs text-gray-400 mb-2 sticky top-0 py-1 bg-[#04070de6] z-10">
                 <span className="text-gray-200 font-medium">组 {index + 1}</span>
                 <span className="tabular-nums">{ranked.length} 张</span>
-                {group.far.length > 0 && (
-                  <span className="tabular-nums text-amber-400/80" title="有相近的图、只是没连上这组的骨架：列出来给人过目，不会自动勾上">
-                    远亲 {group.far.length}
-                  </span>
-                )}
                 <span className={`tabular-nums ${selectedInGroup > 0 ? "text-blue-400" : "text-gray-500"}`}>
                   已勾 {selectedInGroup}
                 </span>
@@ -290,11 +267,11 @@ export function GroupReviewPanel({
                 width={contentWidth}
                 textH={46}
                 targetImageH={200}
-                renderItem={({ image, dist, far }, imageH) => {
+                renderItem={({ image }, imageH) => {
                   const selected = selectedIds.has(image.id);
                   const isKeep = group.keep === image.id;
                   return (
-                    <div className="relative min-w-0">
+                    <div className="relative min-w-0" onContextMenu={(e) => openMenu(e, image)}>
                       <div className={`rounded-lg overflow-hidden border border-white/10 bg-[#151f2e]${selected ? " media-selected" : ""}`}>
                         <button
                           type="button"
@@ -323,8 +300,6 @@ export function GroupReviewPanel({
                             </span>
                             <span className="block text-[10px] leading-4 text-gray-500 mt-0.5 tabular-nums">
                               {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
-                              {dist !== null && <span className={dist === 0 ? "text-emerald-400" : undefined}> · 距 {dist}</span>}
-                              {far && <span className="text-amber-400/80"> · 远亲</span>}
                             </span>
                           </span>
                         </button>
@@ -372,6 +347,24 @@ export function GroupReviewPanel({
           );
         })}
       </div>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={closeMenu}
+          label={`${menu.target.filename} 的操作菜单`}
+          items={[
+            { key: "reveal", label: "打开文件所在位置", onSelect: () => reveal(menu.target.path) },
+            { key: "copy", label: "复制文件名", onSelect: () => copyName(menu.target.filename) },
+            ...(onMoveImage
+              ? [{ key: "move", label: "移动到…", onSelect: () => onMoveImage(menu.target) }]
+              : []),
+            ...(onDeleteImage
+              ? [{ key: "delete", label: "删除到回收站", onSelect: () => onDeleteImage(menu.target) }]
+              : []),
+          ]}
+        />
+      )}
     </div>
   );
 }

@@ -71,7 +71,42 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             sig_pixels BLOB,
             sig_modified_at TEXT,
             is_animated INTEGER
-        );"
+        );
+        -- 全文索引：文件名/路径 FTS5，前缀搜索从 O(N) LIKE 到毫秒级 MATCH；
+        -- content 同步由触发器维护，老库 ensure_fts 回填
+        CREATE VIRTUAL TABLE IF NOT EXISTS videos_fts USING fts5(filename, path, content='videos', content_rowid='rowid');
+        CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(filename, path, content='images', content_rowid='rowid');
+        CREATE TRIGGER IF NOT EXISTS videos_fts_insert AFTER INSERT ON videos BEGIN
+            INSERT INTO videos_fts(rowid, filename, path) VALUES (new.rowid, new.filename, new.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS videos_fts_delete AFTER DELETE ON videos BEGIN
+            INSERT INTO videos_fts(videos_fts, rowid, filename, path) VALUES ('delete', old.rowid, old.filename, old.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS videos_fts_update AFTER UPDATE ON videos BEGIN
+            INSERT INTO videos_fts(videos_fts, rowid, filename, path) VALUES ('delete', old.rowid, old.filename, old.path);
+            INSERT INTO videos_fts(rowid, filename, path) VALUES (new.rowid, new.filename, new.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS images_fts_insert AFTER INSERT ON images BEGIN
+            INSERT INTO images_fts(rowid, filename, path) VALUES (new.rowid, new.filename, new.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS images_fts_delete AFTER DELETE ON images BEGIN
+            INSERT INTO images_fts(images_fts, rowid, filename, path) VALUES ('delete', old.rowid, old.filename, old.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS images_fts_update AFTER UPDATE ON images BEGIN
+            INSERT INTO images_fts(images_fts, rowid, filename, path) VALUES ('delete', old.rowid, old.filename, old.path);
+            INSERT INTO images_fts(rowid, filename, path) VALUES (new.rowid, new.filename, new.path);
+        END;
+        -- 十万级前缀 LIKE + 检测待办查询的索引：无索引即全表扫描
+        CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(path);
+        CREATE INDEX IF NOT EXISTS idx_videos_filename ON videos(filename);
+        CREATE INDEX IF NOT EXISTS idx_videos_codec ON videos(video_codec);
+        CREATE INDEX IF NOT EXISTS idx_videos_thumbnail_null ON videos(thumbnail_path) WHERE thumbnail_path IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_images_path ON images(path);
+        CREATE INDEX IF NOT EXISTS idx_images_filename ON images(filename);
+        CREATE INDEX IF NOT EXISTS idx_images_phash_null ON images(phash) WHERE phash IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_images_animated_null ON images(is_animated) WHERE is_animated IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_images_thumbnail_null ON images(thumbnail_path) WHERE thumbnail_path IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_watch_progress_updated ON watch_progress(updated_at);"
     )
 }
 
@@ -143,6 +178,75 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 老库 FTS 回填：触发器只管新写入，老记录需 rebuild 一次；幂等，可每次启动跑
+pub(crate) fn ensure_fts(conn: &Connection) -> Result<()> {
+    // 表不存在（极老库）则 create_tables 已建；这里只回填内容
+    let videos: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0)).unwrap_or(-1);
+    if videos == 0 {
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM videos", [], |r| r.get(0)).unwrap_or(0);
+        if n > 0 {
+            conn.execute("INSERT INTO videos_fts(videos_fts) VALUES ('rebuild')", [])?;
+        }
+    }
+    let images: i64 = conn.query_row("SELECT COUNT(*) FROM images_fts", [], |r| r.get(0)).unwrap_or(-1);
+    if images == 0 {
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0)).unwrap_or(0);
+        if n > 0 {
+            conn.execute("INSERT INTO images_fts(images_fts) VALUES ('rebuild')", [])?;
+        }
+    }
+    Ok(())
+}
+
+/// 整库完整性校验：返回 "ok"，否则返回首条损坏描述。
+/// 删除报 malformed 时先跑这个定性——是 FTS 索引坏（可无损重建）还是主表坏（需从备份恢复）。
+pub fn integrity_check(conn: &Connection) -> Result<String> {
+    let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>>>()?;
+    Ok(rows.into_iter().next().unwrap_or_else(|| "ok".into()))
+}
+
+/// 无损重建 FTS 索引：主表数据不动，只重建全文索引与回填。
+/// 触发器仍在，重建后继续增量同步。返回重建后的 videos_fts / images_fts 行数。
+pub fn rebuild_fts(conn: &Connection) -> Result<(i64, i64)> {
+    // 表缺失（极老库中途升级失败）的先补上，IF NOT EXISTS 保证幂等
+    create_tables(conn)?;
+    conn.execute("INSERT INTO videos_fts(videos_fts) VALUES ('rebuild')", [])?;
+    conn.execute("INSERT INTO images_fts(images_fts) VALUES ('rebuild')", [])?;
+    let v: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0))?;
+    let i: i64 = conn.query_row("SELECT COUNT(*) FROM images_fts", [], |r| r.get(0))?;
+    Ok((v, i))
+}
+
+/// 用户搜索词 → FTS5 前缀查询；含双引号/空词返回 None 调用方回退 LIKE。
+/// 如 `宫崎` → `"宫崎"*`，多词按空格拆成 AND 前缀。
+pub fn fts_query(term: &str) -> Option<String> {
+    let t = term.trim();
+    if t.is_empty() || t.contains('"') {
+        return None;
+    }
+    let parts: Vec<String> = t
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{}\"*", w.replace('*', "").replace('\'', "''")))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(" AND "))
+}
+
+/// 只读查询的新连接：WAL 下多读并发，读命令不再跟写抢同一把全局锁。
+/// 调用方每次用完即 drop；失败时调用方可回退到全局锁连接。
+pub fn open_read_conn(db_path: &str) -> Result<Connection> {
+    let conn = Connection::open(db_path)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    Ok(conn)
+}
+
 pub fn init_db(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -151,8 +255,13 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
     // 主动制造"进程被杀"的场景，库本身必须经得起杀。
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // 单连接 + 多线程抢锁：扫描 8 线程逐条 insert 时极易 SQLITE_BUSY，
+    // 5s busy_timeout 让写等待而不是直接失败（flush 重试是第二道保险）
+    conn.pragma_update(None, "busy_timeout", 5000)?;
     create_tables(&conn)?;
     ensure_columns(&conn)?;
+    // FTS 回填失败不致命（搜索回退 LIKE），记错即可
+    let _ = ensure_fts(&conn);
     Ok(conn)
 }
 
@@ -199,6 +308,54 @@ mod tests {
 
     fn query_position(conn: &Connection, video_id: &str) -> Option<f64> {
         conn.query_row("SELECT position FROM watch_progress WHERE video_id = ?1", [video_id], |r| r.get(0)).ok()
+    }
+
+    #[test]
+    fn test_fts_triggers_track_video_lifecycle() {
+        let conn = setup_test_db();
+        insert_video(&conn, &sample_video("v1", "C:/v/alpha.mp4")).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+
+        // MATCH 能命中文件名
+        let hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM videos_fts WHERE videos_fts MATCH '\"alpha\"*'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hit, 1);
+
+        delete_videos_by_ids(&conn, &["v1".to_string()]).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+
+        // 回填幂等：空库 rebuild 不报错不增行
+        ensure_fts(&conn).unwrap();
+        ensure_fts(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_integrity_ok_and_fts_rebuild_is_lossless() {
+        let conn = setup_test_db();
+        assert_eq!(integrity_check(&conn).unwrap(), "ok");
+
+        insert_video(&conn, &sample_video("v1", "C:/v/a.mp4")).unwrap();
+        insert_image(&conn, &sample_image("i1", "C:/p/b.png")).unwrap();
+        // 模拟 FTS 索引损坏（主表不动）：删掉索引行，MATCH 查不到
+        conn.execute("DELETE FROM images_fts", []).unwrap();
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH '\"b\"*'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 0);
+
+        let (v, i) = rebuild_fts(&conn).unwrap();
+        assert_eq!((v, i), (1, 1));
+        // 主表数据无损，索引恢复可用
+        assert_eq!(get_all_videos(&conn).unwrap().len(), 1);
+        assert_eq!(get_all_images(&conn).unwrap().len(), 1);
+        assert_eq!(integrity_check(&conn).unwrap(), "ok");
     }
 
     #[test]

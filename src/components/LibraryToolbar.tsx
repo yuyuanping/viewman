@@ -18,6 +18,8 @@ interface LibraryToolbarProps {
   onCheckFiles: () => void;
   checking: boolean;
   checkProgress: { processed: number; total: number } | null;
+  /** 文件检查取消：后端无状态，前端 worker 标记即停 */
+  onCancelCheck?: () => void;
   missingCount: number;
   onClearMissing: () => void;
   fakeCount: number;
@@ -64,6 +66,9 @@ interface LibraryToolbarProps {
   deletingSelected: boolean;
   onMoveSelected: () => void;
   movingSelected: boolean;
+  /** 批量移动进度（8 并发）与取消 */
+  moveProgress?: { processed: number; total: number } | null;
+  onCancelMove?: () => void;
   onExitSelect: () => void;
   /** 从当前过滤结果里随机打开一个 */
   onRandomPick: () => void;
@@ -104,6 +109,7 @@ export function LibraryToolbar({
   onCheckFiles,
   checking,
   checkProgress,
+  onCancelCheck,
   missingCount,
   onClearMissing,
   fakeCount,
@@ -149,6 +155,8 @@ export function LibraryToolbar({
   deletingSelected,
   onMoveSelected,
   movingSelected,
+  moveProgress,
+  onCancelMove,
   onExitSelect,
   onRandomPick,
   onOpenHistory,
@@ -406,8 +414,15 @@ export function LibraryToolbar({
             disabled={deletingSelected || movingSelected || selectedCount === 0}
             title="将选中的视频移动到指定文件夹"
           >
-            {movingSelected ? "移动中…" : "移动所选"}
+            {movingSelected
+              ? `移动中 ${moveProgress ? `${moveProgress.processed}/${moveProgress.total}` : ""}`
+              : "移动所选"}
           </button>
+          {movingSelected && onCancelMove && (
+            <button type="button" className="toolbar-chip" onClick={onCancelMove} title="取消剩余移动（已完成的保留）">
+              取消移动
+            </button>
+          )}
           <button type="button" className="toolbar-chip" onClick={onExitSelect} disabled={deletingSelected || movingSelected} title="退出多选模式">
             退出
           </button>
@@ -418,12 +433,39 @@ export function LibraryToolbar({
         className="toolbar-chip"
         onClick={onCheckFiles}
         disabled={checking}
-        title="逐个检查文件是否仍可读取"
+        title="并发检查文件是否仍可读取"
       >
         {checking
           ? `检查中 ${checkProgress ? `${checkProgress.processed}/${checkProgress.total}` : ""}`
           : "检查文件状态"}
       </button>
+      {checking && onCancelCheck && (
+        <button type="button" className="toolbar-chip" onClick={onCancelCheck} title="取消剩余检查（已标记部分保留）">
+          取消检查
+        </button>
+      )}
+      {(checking && checkProgress) || (movingSelected && moveProgress) ? (
+        <span
+          className="toolbar-progress"
+          role="progressbar"
+          aria-label={checking ? "文件检查进度" : "批量移动进度"}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={
+            checking && checkProgress
+              ? Math.round((checkProgress.processed / Math.max(1, checkProgress.total)) * 100)
+              : moveProgress
+                ? Math.round((moveProgress.processed / Math.max(1, moveProgress.total)) * 100)
+                : 0
+          }
+        >
+          {checking && checkProgress
+            ? `${Math.round((checkProgress.processed / Math.max(1, checkProgress.total)) * 100)}%`
+            : moveProgress
+              ? `${Math.round((moveProgress.processed / Math.max(1, moveProgress.total)) * 100)}%`
+              : ""}
+        </span>
+      ) : null}
     </div>
   );
 }

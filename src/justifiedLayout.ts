@@ -72,7 +72,7 @@ export function justifiedRows(
 
 /**
  * 行窗口裁剪（纯函数）：返回与可视区 ±overscan 相交的行下标区间 [start, end)。
- * 行数在几万级，线性扫足够快，不需要二分。
+ * 行 top/bottom 单调递增，二分定位：万行级每滚动帧线性扫太贵。
  */
 export function justifiedWindow(
   rows: JustifiedRow[],
@@ -80,9 +80,22 @@ export function justifiedWindow(
   viewportH: number,
   overscan: number,
 ): [number, number] {
-  let start = 0;
-  while (start < rows.length && rows[start].bottom <= scrollTop - overscan) start++;
-  let end = start;
-  while (end < rows.length && rows[end].top < scrollTop + viewportH + overscan) end++;
-  return [start, end];
+  const lo = scrollTop - overscan;
+  const hi = scrollTop + viewportH + overscan;
+  // 首个 bottom > lo 的行
+  let left = 0, right = rows.length;
+  while (left < right) {
+    const mid = (left + right) >> 1;
+    if (rows[mid].bottom <= lo) left = mid + 1;
+    else right = mid;
+  }
+  const start = left;
+  // 首个 top >= hi 的行即 end
+  left = start; right = rows.length;
+  while (left < right) {
+    const mid = (left + right) >> 1;
+    if (rows[mid].top < hi) left = mid + 1;
+    else right = mid;
+  }
+  return [start, left];
 }

@@ -14,6 +14,17 @@ import type {
 /** 全部 Tauri 命令的类型化封装：组件与 hooks 一律经此调用，不散落裸 invoke */
 export const api = {
   getVideosWithProgress: () => invoke<VideoWithProgress[]>("get_videos_with_progress"),
+  /** 视频库视图：目录前缀 + 文件名搜索已在后端做完 + 分页，大库不再整表过桥 */
+  getVideoView: (dir: string | null, search: string, limit = 2000, offset = 0) =>
+    invoke<VideoViewPayload>("get_video_view", { dir, search, limit, offset }),
+  /** 长任务取消：scan-video/scan-image/hevc/thumb-*，后台循环每批检查 */
+  cancelTask: (task: string) => invoke<void>("cancel_task", { task }),
+  /** 数据库自检：返回 "ok" 或首条损坏描述 */
+  checkDbIntegrity: () => invoke<string>("check_db_integrity"),
+  /** 无损重建 FTS 索引（主表不动），返回索引行数描述 */
+  rebuildFtsIndexes: () => invoke<string>("rebuild_fts_indexes"),
+  /** 库文件路径：主表损坏需手动恢复时用 */
+  dbFilePath: () => invoke<string>("db_file_path"),
   getRecentlyPlayed: () => invoke<RecentlyPlayed[]>("get_recently_played"),
   /** 完整播放历史（无条数上限） */
   getPlayHistory: () => invoke<RecentlyPlayed[]>("get_play_history"),
@@ -31,8 +42,8 @@ export const api = {
   convertHevcVideos: (videoIds: string[]) =>
     invoke<ConversionResult>("convert_hevc_videos", { videoIds }),
   findDuplicateVideos: () => invoke<string[][]>("find_duplicate_videos"),
-  /** 批量删除视频：一次回收站事务 + 一次库事务，返回真正删掉的 id */
-  deleteVideos: (videoIds: string[]) => invoke<string[]>("delete_videos", { videoIds }),
+  /** 批量删除视频：返回三类清单（删掉/路径失效/被锁），见 DeletionReport */
+  deleteVideos: (videoIds: string[]) => invoke<DeletionReport>("delete_videos", { videoIds }),
   moveVideo: (videoId: string, targetDir: string) =>
     invoke<string>("move_video", { videoId, targetDir }),
   generateThumbnails: (videoIds: string[]) =>
@@ -62,8 +73,8 @@ export const api = {
   /** 按 id 批量取图：检测面板元数据与"id 还活着吗"的收敛判定 */
   getImagesByIds: (ids: string[]) => invoke<Image[]>("get_images_by_ids", { ids }),
   scanImageDirectory: (dir: string) => invoke<ScanOutcome<Image>>("scan_image_directory", { dir }),
-  /** 批量删除图片：一次回收站事务 + 一次库事务，返回真正删掉的 id */
-  deleteImages: (imageIds: string[]) => invoke<string[]>("delete_images", { imageIds }),
+  /** 批量删除图片：返回三类清单（删掉/路径失效/被锁），见 DeletionReport */
+  deleteImages: (imageIds: string[]) => invoke<DeletionReport>("delete_images", { imageIds }),
   /** 扩展名修正：把内容与扩展名不符的图按文件头就地改名并同步库记录 */
   fixMismatchedExtensions: () =>
     invoke<{ renamed: number; alreadyMatched: number; unrecognized: number; failed: number }>(
@@ -76,13 +87,8 @@ export const api = {
   resumeImageThumbnails: () => invoke<boolean>("resume_thumbnails", { kind: "image" }),
   /** 动图检测：按文件头结构数帧（GIF/APNG/动态 WebP/AVIF 序列），返回多帧图片的 id */
   findAnimatedImages: () => invoke<string[]>("find_animated_images"),
-  findDuplicateImages: () => invoke<DuplicateReport>("find_duplicate_images"),
-  /**
-   * 相似图检测（pHash）：汉明距离 ≤ threshold 算一组。
-   * 指纹落在库里，只有新图/改过的图才重算，所以改阈值只是重新比对，几秒就回。
-   * 除了分组，还带回组内各成员的指纹（拆成两个 32 位），面板据此算"距保留张几位"。
-   */
-  findSimilarImages: (threshold: number) => invoke<SimilarResult>("find_similar_images", { threshold }),
+  findDuplicateImages: (pixelVerify: boolean) =>
+    invoke<DuplicateReport>("find_duplicate_images", { pixelVerify }),
   /**
    * 模板匹配（以图搜图）：以一张图为模板，返回库内与它的指纹距离（两枚哈希求和）
    * ≤ 48 的全部命中，按距离升序。指纹已缓存的只做一趟一对一比对，缺的现补并落库。
@@ -93,7 +99,6 @@ export const api = {
    * 上一趟检测的落盘结果（没有则 null）。检测一趟动辄几分钟，重启后先看缓存里的组，
    * 数字对不上 libraryCount 就说明库动过、结果不含新增的那批，界面得提示一句。
    */
-  getSimilarCache: () => invoke<SimilarCache | null>("get_similar_cache"),
   getDuplicateCache: () => invoke<DuplicateCache | null>("get_duplicate_cache"),
   /** 视频侧同理：上一趟重复视频检测的落盘结果（打开应用时先恢复出来看） */
   getVideoDuplicateCache: () => invoke<VideoDuplicateCache | null>("get_video_duplicate_cache"),
@@ -101,7 +106,22 @@ export const api = {
   clearDetectionCache: (which: DetectionKind) => invoke<void>("clear_detection_cache", { which }),
 };
 
-export type DetectionKind = "similar" | "duplicate" | "videoDuplicate";
+export type DetectionKind = "duplicate" | "videoDuplicate";
+
+/** 视频库视图的一页：当前目录/搜索条件下的分页行 + 聚合（计数、总大小） */
+export interface VideoViewPayload {
+  items: Video[];
+  total: number;
+  total_size: number;
+}
+
+/** 批量删除的三类回报：deleted 删掉（含陈旧 id），stale 记录在但磁盘路径已无文件
+ *  （库记录一并清理，磁盘无事可做），locked 磁盘有文件但进不了回收站（关占用程序重试） */
+export interface DeletionReport {
+  deleted: string[];
+  stale: string[];
+  locked: string[];
+}
 
 /** 图片库视图的一页：当前目录/搜索条件下的全部行 + 聚合（计数、总大小） */
 export interface ImageViewPayload {
@@ -117,36 +137,17 @@ export interface ImageStatsPayload {
   dirs: Array<[string, number]>;
 }
 
-export interface SimilarCache {
-  threshold: number;
-  libraryCount: number;
-  result: SimilarResult;
-}
-
 export interface DuplicateCache {
   libraryCount: number;
   report: DuplicateReport;
+  /** 存这份结果时是否比对了像素：老缓存没有该字段，按 true 理解 */
+  pixelVerify?: boolean;
 }
 
 /** 重复视频的缓存只有分组：视频侧没有指纹面板，不需要回传每条的指纹 */
 export interface VideoDuplicateCache {
   libraryCount: number;
   groups: string[][];
-}
-
-/** 一张图的 64 位指纹，高低 32 位分开传（JS 位运算只有 32 位） */
-export interface SimilarHash {
-  id: string;
-  lo: number;
-  hi: number;
-}
-
-export interface SimilarResult {
-  groups: string[][];
-  /** 挂在组尾的远亲（组员之一）：有邻居但没连上骨架，可见但不自动勾 */
-  far: string[];
-  /** 只含成组的图片：孤张不给，免得整库指纹白传一趟 */
-  hashes: SimilarHash[];
 }
 
 /** 模板匹配的一条命中：图片 id + 与模板的指纹距离（pHash 与 dHash 的汉明距离之和） */
@@ -187,17 +188,6 @@ export interface DuplicateReport {
   skipped?: number;
 }
 
-/** 后端 similar-progress 事件负载 */
-export interface SimilarProgressPayload {
-  /** 本次需要补算指纹的张数（已缓存的不计在内） */
-  processed: number;
-  total: number;
-  done: boolean;
-  /** 当前的完整分组（口径换了组会缩小，所以整份给，前端整份替换） */
-  groups: string[][];
-  /** 挂在组尾的远亲（组员之一）：可见但不自动勾 */
-  far: string[];
-}
 
 /** 后端 scan-progress / image-scan-progress 事件负载（两套库共用同一形状） */
 export interface ScanProgressPayload {

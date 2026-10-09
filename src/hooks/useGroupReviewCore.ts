@@ -16,14 +16,14 @@ export interface GroupReviewCoreOptions {
   libraryVersion: number;
   setSelectMode: (on: boolean) => void;
   setSelectedIds: Dispatch<SetStateAction<Set<string>>>;
-  /** 「活组」口径两组不同：查重按组员存活裁剪，相似还叠加 keepRule 与远亲降级 */
+  /** 「活组」口径：按组员是否还在库里裁剪（toAliveGroups 由调用方注入，便于各自收紧） */
   toAliveGroups: (groups: string[][], imageById: Map<string, Image>, chosenKeeps: Set<string>) => SimilarGroup[];
 }
 
 /**
- * 分组审阅类检测（重复/相似）的公共核心：分组与保留张状态、成组元数据现查、
+ * 分组审阅类检测（重复图）的公共核心：分组与保留张状态、成组元数据现查、
  * 增量自动勾选、keep/autoSelect/整组勾选这些面板动作，以及缓存恢复的骨架。
- * 各自的检测请求、进度事件与特有字段（skipped/hashById/far/keepRule）留在各自的 hook 里。
+ * 各自的检测请求、进度事件与特有字段（skipped）留在各自的 hook 里。
  */
 export function useGroupReviewCore({ fetchImagesByIds, libraryTotal, libraryVersion, setSelectMode, setSelectedIds, toAliveGroups }: GroupReviewCoreOptions) {
   const [groups, setGroups] = useState<string[][]>([]);
@@ -141,6 +141,27 @@ export function useGroupReviewCore({ fetchImagesByIds, libraryTotal, libraryVers
     for (const id of extras) autoSelected.current.add(id);
   }, [extras, setSelectMode, setSelectedIds]);
 
+  /** 面板总全选：全部组员（含保留张）一次勾上 */
+  const selectAll = useCallback(() => {
+    setSelectMode(true);
+    setSelectedIds(new Set(aliveGroups.flatMap(g => g.ids)));
+  }, [aliveGroups, setSelectMode, setSelectedIds]);
+
+  /** 新结果一到默认勾上全部组员（含保留张）：元数据（imageById）还没回来时先等，
+   *  就绪才勾，保证勾的是活组员、不含已退库的旧 id */
+  const selectedAllKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (groups.length === 0) {
+      selectedAllKey.current = null;
+      return;
+    }
+    const key = groups.map(g => g.join(",")).join("|");
+    if (selectedAllKey.current === key || aliveGroups.length === 0) return;
+    selectedAllKey.current = key;
+    setSelectMode(true);
+    setSelectedIds(new Set(aliveGroups.flatMap(g => g.ids)));
+  }, [groups, aliveGroups, setSelectMode, setSelectedIds]);
+
   /** 一键清空待删清单：面板里的「取消全选」按下去就该什么都不会删 */
   const clearSelection = useCallback(() => {
     setSelectedIds(new Set());
@@ -186,6 +207,7 @@ export function useGroupReviewCore({ fetchImagesByIds, libraryTotal, libraryVers
     resetResults,
     keep,
     autoSelect,
+    selectAll,
     clearSelection,
     setGroupSelection,
   };

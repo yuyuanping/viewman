@@ -80,27 +80,50 @@ export function useImages() {
     }
   }, [runScan]);
 
-  /** 打开应用时自动重新扫描已记录的图片目录；个别目录失败只汇总提示 */
+  /** 打开应用时自动重新扫描已记录的图片目录；个别目录失败只汇总提示。
+   *  失败根 30 秒后自动再试一轮：外置硬盘/加密盘刚登录时还没就绪，首轮全灭不代表真坏了。
+   *  每条失败都带上后端原因，不再只报目录名让人猜。 */
   const rescanAll = useCallback(async () => {
     const roots = await loadScanRoots("image");
     if (roots.length === 0) return;
     setLoading(true);
-    const failed: string[] = [];
+    const failed: Array<{ dir: string; reason: string }> = [];
     try {
       for (let i = 0; i < roots.length; i++) {
         setRescanStatus({ current: i + 1, total: roots.length, dir: roots[i] });
-        if (await runScan(roots[i]) !== null) {
-          failed.push(roots[i]);
-        }
+        const reason = await runScan(roots[i]);
+        if (reason !== null) failed.push({ dir: roots[i], reason });
       }
     } finally {
       setRescanStatus(null);
       setLoading(false);
     }
-    if (failed.length > 0) {
-      setError(`部分图片目录自动扫描失败：${failed.join("、")}（磁盘可能未连接；扫描失败的目录不会被清理）`);
-    }
+    if (failed.length === 0) return;
+    // 延迟再试一轮，只试失败的根；成功则清错，免得外置盘每次开机都背一次"失败"
+    window.setTimeout(async () => {
+      const still: typeof failed = [];
+      for (const { dir } of failed) {
+        const reason = await runScan(dir);
+        if (reason !== null) still.push({ dir, reason });
+      }
+      if (still.length === 0) {
+        setError(null);
+      } else {
+        setError(describeRescanFailure(still));
+      }
+    }, 30_000);
+    setError(describeRescanFailure(failed));
   }, [runScan]);
+
+  /** 重扫失败汇总：目录 + 后端原因（截断防刷屏），磁盘离线类的提示保留 */
+  function describeRescanFailure(failed: Array<{ dir: string; reason: string }>): string {
+    const shown = failed.slice(0, 2).map(({ dir, reason }) => {
+      const short = reason.replace(/^图片扫描失败，未完成更新：/, "").slice(0, 80);
+      return `${dir}（${short}）`;
+    }).join("、");
+    const more = failed.length > 2 ? `等 ${failed.length} 个目录` : "";
+    return `部分图片目录自动扫描失败：${shown}${more}。30 秒后会自动再试一轮；目录若已删除请在侧栏移除，失败目录的库记录不会被清理。`;
+  }
 
   const loadImages = useCallback(async () => {
     setLoading(true);

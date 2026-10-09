@@ -283,20 +283,6 @@ pub fn get_image_sigs_scoped(conn: &Connection, roots: &[String]) -> Result<Vec<
     get_image_sigs_where(conn, &where_clause, &values)
 }
 
-/// 扫描范围内的图片 id 集合：恢复旧检测结果缓存时，把范围外的组员按当前口径裁掉
-pub fn image_ids_in_scope(conn: &Connection, roots: &[String]) -> Result<Vec<String>> {
-    let (scope, values) = scope_clause(roots);
-    let where_clause = scope
-        .map(|c| format!("WHERE {}", c))
-        .unwrap_or_default();
-    let sql = format!("SELECT id FROM images {where_clause}");
-    let mut stmt = conn.prepare(&sql)?;
-    let ids = stmt
-        .query_map(rusqlite::params_from_iter(values.iter()), |row| row.get(0))?
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ids)
-}
-
 /// 一批指纹写回库（一次事务）：(image_id, phash, dhash, 指纹对应的文件修改时间)。
 /// 两枚出自同一次解码，所以总是一起写。
 pub fn save_image_sigs(
