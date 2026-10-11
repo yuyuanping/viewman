@@ -15,7 +15,7 @@ import logging.handlers
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import aiohttp
 
@@ -140,7 +140,7 @@ class Bot:
         low = text.lower()
         return any(t.lower() in low for t in self.block_terms if t)
 
-    def _kick_magnets(self, text: str, mid: Optional[int] = None) -> None:
+    def _kick_magnets(self, text: str, mid: int | None = None) -> None:
         # 磁力链接落库即唤醒 sweeper 去登记，不等 20 秒班车：remove_magnets.py
         # 按行删 messages，晚登记的那条链接就只剩 Excel 里没人知道了。
         if not self.magnets or "magnet:" not in text.lower():
@@ -163,7 +163,7 @@ class Bot:
         try:
             await ws.send_json({"action": action, "params": params, "echo": echo})
             full = await asyncio.wait_for(fut, timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("[API TIMEOUT] %s", action)
             return None
         except Exception as e:
@@ -177,7 +177,7 @@ class Bot:
                      json.dumps(full, ensure_ascii=False)[:300])
         return None
 
-    async def get_file_url(self, file_id: str) -> Optional[str]:
+    async def get_file_url(self, file_id: str) -> str | None:
         """通过 NapCat HTTP API (get_file) 取文件本地路径。
 
         NapCat 把本地绝对路径放在 data.file 还是 data.url 并不统一（另一字段留空
@@ -366,7 +366,7 @@ class Bot:
             # clear 放在 wait 之后：唤醒期间到达的链接不会丢，最坏是多跑一轮。
             try:
                 await asyncio.wait_for(self.magnet_kick.wait(), SWEEP_INTERVAL)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             self.magnet_kick.clear()
 
@@ -392,7 +392,7 @@ class Bot:
         while True:
             try:
                 await asyncio.wait_for(self.backfill_kick.wait(), BACKFILL_INTERVAL)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             self.backfill_kick.clear()
             if self._ws is None or self._ws.closed:

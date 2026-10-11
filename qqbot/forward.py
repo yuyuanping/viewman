@@ -1,7 +1,7 @@
 """合并转发（asyncio）：递归展开（最多 3 层），媒体单次下载，返回格式化文本。"""
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from storage import md5_hint, is_sticker
 

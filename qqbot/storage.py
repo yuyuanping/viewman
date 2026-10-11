@@ -10,7 +10,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Coroutine, Optional
+from collections.abc import Callable, Coroutine
 from uuid import uuid4
 
 import aiohttp
@@ -62,7 +62,7 @@ def _hash_file(path: Path) -> tuple[str, int]:
 _MD5_RE = re.compile(r"[0-9a-fA-F]{32}")
 
 
-def md5_hint(ref: Optional[str]) -> Optional[str]:
+def md5_hint(ref: str | None) -> str | None:
     """从 file 字段名里提取原件 md5，供下载前查盘免重拉。"""
     stem = Path(ref or "").stem
     return stem.lower() if _MD5_RE.fullmatch(stem) else None
@@ -112,7 +112,7 @@ class Storage:
         # 全局限速（令牌桶）：每秒最多下载 dl_limit 个媒体，超出排队等令牌。
         # 默认 None=不限速；腾讯对短时高频资源拉取有风控熔断
         # （Resource type disabled, success N / failure M），限速让流量更像真人。
-        self.dl_limit: Optional[float] = None
+        self.dl_limit: float | None = None
         self._tokens = 1.0
         self._last_refill = time.monotonic()
         self._dl_limit_lock = asyncio.Lock()
@@ -189,7 +189,7 @@ class Storage:
             return self._scope_dir(self.priv_img, self.grp_img, scope)
         return self.vid_all        # 视频统一目录，不分来源
 
-    def _existing(self, digest: str, kind: str) -> Optional[Path]:
+    def _existing(self, digest: str, kind: str) -> Path | None:
         """该 md5 的已落盘文件。图片查 private/group 两侧；视频查统一目录
         外加 private|group/videos 两个历史位置（迁移搬空前仍可能非空）。"""
         bases = ((self.priv_img, self.grp_img) if kind == "image"
@@ -245,7 +245,7 @@ class Storage:
         return self.msg_dir / f"{self._today()}.md"
 
     # ---- 文本 ----
-    def append_text(self, text: str, prefix: str = "", ts: Optional[int] = None) -> None:
+    def append_text(self, text: str, prefix: str = "", ts: int | None = None) -> None:
         # 句柄常开按日轮换：省去每段消息一次 open/close；flush 保证崩溃不丢
         # ts 传消息真实 unix 时间戳（BACKFILL 补录的历史消息必须用它定日，
         # 否则历史消息会写进处理时刻所在的当天 md —— 曾在停机补拉后把
@@ -285,7 +285,7 @@ class Storage:
             self._tokens = max(self._tokens - 1, 0)
 
     async def _stream_to(self, url: str, kind: str,
-                         tmp: Path) -> Optional[tuple[str, int, str]]:
+                         tmp: Path) -> tuple[str, int, str] | None:
         """流式下载 url 到 tmp：1MB 块边写边算 md5，内存占用与文件大小无关。
         失败重试 1 次（并清掉残件）；成功返回 (md5hex, bytes, Content-Type)。"""
         timeout = aiohttp.ClientTimeout(total=_TIMEOUT_BY_KIND.get(kind, 30))
@@ -310,7 +310,7 @@ class Storage:
 
     # ---- 图片/视频 ----
     async def save_media(self, url: str, kind: str, scope: str = "private",
-                         expect_md5: Optional[str] = None) -> Optional[dict]:
+                         expect_md5: str | None = None) -> dict | None:
         """下载图片或视频，按 MD5 命名去重。图片按 scope 分流 private/group；
         视频统一入 videos/（scope 只对图片有意义）。
         支持两类来源：http(s) 直链；本地绝对路径（NapCat 有时直接给 nt_qq
@@ -369,7 +369,7 @@ class Storage:
                     # 本地原件（NapCat 缓存）：复制进统一目录，不动原件。
                     # 先写 .part 再 replace：中断不会留下顶着 md5 名的半文件
                     # （会被 dup 检查复用、被 backfill_media 洗白成有效登记）
-                    part = base / f"~dl{uuid4().hex}.part"
+                    part = path.parent / f"~dl{uuid4().hex}.part"
                     try:
                         await asyncio.to_thread(shutil.copyfile, url, part)
                     except Exception:
@@ -389,8 +389,8 @@ class Storage:
 
     # ---- 文件 ----
     async def save_file(self, file_id_or_url: str, filename: str,
-                        get_url: Callable[[str], Coroutine[None, None, Optional[str]]],
-                        scope: str = "private") -> Optional[dict]:
+                        get_url: Callable[[str], Coroutine[None, None, str | None]],
+                        scope: str = "private") -> dict | None:
         """下载文件，按 MD5 命名去重。三种来源：http(s) 直链；本地绝对路径；
         文件 ID 经 get_url 解析（NapCat 通常给本地路径）——解析是慢 API 调用，
         放在下载并发额度之外，NapCat 卡住时不会占死下载槽。传输流式落盘，

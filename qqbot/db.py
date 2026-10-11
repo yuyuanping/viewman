@@ -18,7 +18,6 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 MAX_EVENT_TRIES = 6   # 事件重试上限，穷尽转 dead
 MAX_DL_TRIES = 8     # 单条媒体/转发下载的快重试上限（约 4 小时窗口）
