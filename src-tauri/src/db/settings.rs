@@ -1,9 +1,13 @@
-use rusqlite::{Connection, OptionalExtension, Result, params};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 /// 读取字符串设置项
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| row.get(0))
-        .optional()
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 /// 写入（覆盖）字符串设置项
@@ -35,6 +39,9 @@ mod tests {
 
         // 覆盖写入只保留最新值
         set_setting(&conn, "scan_roots", "[]").unwrap();
-        assert_eq!(get_setting(&conn, "scan_roots").unwrap().as_deref(), Some("[]"));
+        assert_eq!(
+            get_setting(&conn, "scan_roots").unwrap().as_deref(),
+            Some("[]")
+        );
     }
 }

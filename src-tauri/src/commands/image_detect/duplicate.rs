@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tauri::{Emitter, State};
 
-use crate::commands::{flush, flush_with_retry, lock_ignoring_poison, workers, write_cache};
 use super::{AppState, MapErrStr, DUPLICATE_CACHE};
 use super::{DuplicateCache, DuplicateProgress, DuplicateReport, SigUpdate};
+use crate::commands::{flush, flush_with_retry, lock_ignoring_poison, workers, write_cache};
 use crate::db;
 use crate::scanner;
 
@@ -26,7 +26,16 @@ fn ensure_sigs(
     const EMIT_EVERY: usize = 256;
     const FLUSH_EVERY: usize = 64;
     let total = indexes.len();
-    let _ = app.emit(event, DuplicateProgress { processed: 0, total, stage: "sigs", skipped: 0, groups: Vec::new() });
+    let _ = app.emit(
+        event,
+        DuplicateProgress {
+            processed: 0,
+            total,
+            stage: "sigs",
+            skipped: 0,
+            groups: Vec::new(),
+        },
+    );
     if total == 0 {
         return 0;
     }
@@ -50,7 +59,12 @@ fn ensure_sigs(
                     match scanner::image_hashes(&row.path) {
                         Some((phash, dhash)) => {
                             lock_ignoring_poison(hits).push((index, phash, dhash));
-                            batch.push((row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone()));
+                            batch.push((
+                                row.id.clone(),
+                                phash as i64,
+                                dhash as i64,
+                                row.modified_at.clone(),
+                            ));
                         }
                         None => {
                             failed.fetch_add(1, Ordering::Relaxed);
@@ -63,7 +77,13 @@ fn ensure_sigs(
                     if processed % EMIT_EVERY == 0 || processed == total {
                         let _ = app.emit(
                             event,
-                            DuplicateProgress { processed, total, stage: "sigs", skipped: failed.load(Ordering::Relaxed), groups: Vec::new() },
+                            DuplicateProgress {
+                                processed,
+                                total,
+                                stage: "sigs",
+                                skipped: failed.load(Ordering::Relaxed),
+                                groups: Vec::new(),
+                            },
                         );
                     }
                 }
@@ -98,7 +118,13 @@ fn group_pass(
     let skipped = already_skipped;
     let _ = app.emit(
         "duplicate-progress",
-        DuplicateProgress { processed: 0, total, stage: "grouping", skipped, groups: Vec::new() },
+        DuplicateProgress {
+            processed: 0,
+            total,
+            stage: "grouping",
+            skipped,
+            groups: Vec::new(),
+        },
     );
     if total == 0 {
         return (Vec::new(), skipped);
@@ -229,7 +255,10 @@ pub(crate) fn pixels_close(a: &[u8], b: &[u8]) -> bool {
 
 /// 快检成组（不解像素）：候选池按入库时间升序直接成组，最早那张当保留原件。
 /// 只看双指纹门槛，平图撞车这类误判会进来，靠面板人工复核兜底；胜在跳过全部像素解码。
-pub(crate) fn group_pools_by_time(rows: &[db::ImageSig], pools: Vec<Vec<usize>>) -> Vec<Vec<String>> {
+pub(crate) fn group_pools_by_time(
+    rows: &[db::ImageSig],
+    pools: Vec<Vec<usize>>,
+) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = pools
         .into_iter()
         .map(|mut pool| {
@@ -307,7 +336,11 @@ pub(crate) fn close_against_with(
 /// 一个桶内定组：按入库时间升序，最早那张当保留原件，其余逐张跟它核对——
 /// 只对得上的进组，对不下的留给下一轮另起一组（所以一组内任意两张都是直接比过的）。
 pub(crate) fn group_bucket(rows: &[db::ImageSig], mut pool: Vec<Candidate>) -> Vec<Vec<String>> {
-    pool.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    pool.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     // 缓存按池开：一个池通常三五张，犯不着把整库的高清像素攒在手里
     let mut cache: HashMap<(usize, usize), Vec<u8>> = HashMap::new();
     let mut groups: Vec<Vec<String>> = Vec::new();
@@ -371,7 +404,9 @@ pub(crate) fn candidate_pools(pairs: &[Option<(u64, u64)>], gate: u32) -> Vec<Ve
                 while i < total {
                     let (pi, di) = (reps[i].1, reps[i].2);
                     for j in 0..i {
-                        let dd = (pi ^ reps[j].1).count_ones().max((di ^ reps[j].2).count_ones());
+                        let dd = (pi ^ reps[j].1)
+                            .count_ones()
+                            .max((di ^ reps[j].2).count_ones());
                         if dd <= gate {
                             local.push((i as u32, j as u32));
                         }
@@ -425,7 +460,13 @@ pub async fn find_duplicate_images(
         rows.retain(|row| Path::new(&row.path).exists());
         let mut pairs: Vec<Option<(u64, u64)>> = rows.iter().map(|row| row.cached_sigs()).collect();
         let need_sigs: Vec<usize> = (0..rows.len()).filter(|&i| pairs[i].is_none()).collect();
-        let skipped = ensure_sigs(&app, &rows, &need_sigs, pairs.as_mut_slice(), "duplicate-progress");
+        let skipped = ensure_sigs(
+            &app,
+            &rows,
+            &need_sigs,
+            pairs.as_mut_slice(),
+            "duplicate-progress",
+        );
 
         // 哈希差得远的到不了像素层，绝大多数条目在这一步就被排除
         let candidates = candidate_pools(&pairs, DUP_GATE);
@@ -437,7 +478,13 @@ pub async fn find_duplicate_images(
             let groups = group_pools_by_time(&rows, candidates);
             let _ = app.emit(
                 "duplicate-progress",
-                DuplicateProgress { processed: 1, total: 1, stage: "grouping", skipped, groups: groups.clone() },
+                DuplicateProgress {
+                    processed: 1,
+                    total: 1,
+                    stage: "grouping",
+                    skipped,
+                    groups: groups.clone(),
+                },
             );
             (groups, skipped)
         };

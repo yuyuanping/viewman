@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{params, Connection, Result};
 
 use super::videos::video_from_row;
 use crate::models::{RecentlyPlayed, VideoProgress};
@@ -20,13 +20,15 @@ pub fn get_recently_played(conn: &Connection, limit: i64) -> Result<Vec<Recently
          ORDER BY wp.updated_at DESC
          LIMIT ?1"
     )?;
-    let rows = stmt.query_map(params![limit], |row| {
-        Ok(RecentlyPlayed {
-            video: video_from_row(row, 10)?,
-            position: row.get(8)?,
-            updated_at: row.get(9)?,
-        })
-    })?.collect::<Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok(RecentlyPlayed {
+                video: video_from_row(row, 10)?,
+                position: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -36,12 +38,14 @@ pub fn get_videos_with_progress(conn: &Connection) -> Result<Vec<VideoProgress>>
          FROM videos v LEFT JOIN watch_progress wp ON v.id = wp.video_id
          ORDER BY v.filename"
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(VideoProgress {
-            video: video_from_row(row, 9)?,
-            position: row.get::<_, Option<f64>>(8)?,
-        })
-    })?.collect::<Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(VideoProgress {
+                video: video_from_row(row, 9)?,
+                position: row.get::<_, Option<f64>>(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -51,7 +55,12 @@ mod tests {
     use crate::db::{insert_video, sample_video, setup_test_db};
 
     fn query_position(conn: &Connection, video_id: &str) -> Option<f64> {
-        conn.query_row("SELECT position FROM watch_progress WHERE video_id = ?1", [video_id], |r| r.get(0)).ok()
+        conn.query_row(
+            "SELECT position FROM watch_progress WHERE video_id = ?1",
+            [video_id],
+            |r| r.get(0),
+        )
+        .ok()
     }
 
     #[test]

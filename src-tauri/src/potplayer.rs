@@ -27,11 +27,19 @@ pub fn find_potplayer() -> Option<PathBuf> {
 fn find_via_registry() -> Option<PathBuf> {
     let keys = [
         (winreg::enums::HKEY_CURRENT_USER, r"SOFTWARE\DAUM\PotPlayer"),
-        (winreg::enums::HKEY_LOCAL_MACHINE, r"SOFTWARE\DAUM\PotPlayer"),
-        (winreg::enums::HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\DAUM\PotPlayer"),
+        (
+            winreg::enums::HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\DAUM\PotPlayer",
+        ),
+        (
+            winreg::enums::HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\WOW6432Node\DAUM\PotPlayer",
+        ),
     ];
     for &(hkey, subkey) in &keys {
-        if let Ok(hk) = winreg::RegKey::predef(hkey).open_subkey_with_flags(subkey, winreg::enums::KEY_READ) {
+        if let Ok(hk) =
+            winreg::RegKey::predef(hkey).open_subkey_with_flags(subkey, winreg::enums::KEY_READ)
+        {
             if let Ok(path_str) = hk.get_value::<String, _>("InstallPath") {
                 let p = PathBuf::from(&path_str);
                 if p.join("PotPlayer.exe").exists() {
@@ -52,7 +60,8 @@ pub fn launch(path: &str, seek: Option<f64>) -> Result<(), String> {
             cmd.arg(format!("/seek={}", s));
         }
     }
-    cmd.spawn().map_err(|e| format!("Failed to launch PotPlayer: {}", e))?;
+    cmd.spawn()
+        .map_err(|e| format!("Failed to launch PotPlayer: {}", e))?;
     Ok(())
 }
 
@@ -81,9 +90,19 @@ pub fn get_status(video_path: &str) -> PotPlayerStatus {
             position_source: position.map(|_| "live"),
         }
     } else if potplayer_window_exists() {
-        PotPlayerStatus { running: false, state: "unknown", position: None, position_source: None }
+        PotPlayerStatus {
+            running: false,
+            state: "unknown",
+            position: None,
+            position_source: None,
+        }
     } else {
-        PotPlayerStatus { running: false, state: "stopped", position: None, position_source: None }
+        PotPlayerStatus {
+            running: false,
+            state: "stopped",
+            position: None,
+            position_source: None,
+        }
     }
 }
 
@@ -99,7 +118,10 @@ const FALSE: BOOL = 0;
 
 #[link(name = "user32")]
 extern "system" {
-    fn EnumWindows(lpEnumFunc: Option<unsafe extern "system" fn(HWND, LPARAM) -> BOOL>, lParam: LPARAM) -> BOOL;
+    fn EnumWindows(
+        lpEnumFunc: Option<unsafe extern "system" fn(HWND, LPARAM) -> BOOL>,
+        lParam: LPARAM,
+    ) -> BOOL;
     fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
     fn IsWindowVisible(hWnd: HWND) -> BOOL;
 }
@@ -136,10 +158,7 @@ fn find_potplayer_window(filename: &str) -> Option<String> {
         result: None,
     };
     unsafe {
-        EnumWindows(
-            Some(enum_proc),
-            &mut ctx as *mut EnumCtx as LPARAM,
-        );
+        EnumWindows(Some(enum_proc), &mut ctx as *mut EnumCtx as LPARAM);
     }
     ctx.result
 }

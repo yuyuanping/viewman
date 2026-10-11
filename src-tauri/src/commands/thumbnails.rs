@@ -6,7 +6,7 @@ use crate::db;
 use crate::scanner;
 
 use super::videos::unique_path;
-use super::{is_cancelled, clear_cancel, video_path_or, AppState, MapErrStr};
+use super::{clear_cancel, is_cancelled, video_path_or, AppState, MapErrStr};
 
 /// 封面扩展名：libwebp 可用即 webp（体积 -40%），否则回退 jpg。老 jpg 缓存照读不误。
 pub(crate) fn thumb_ext() -> &'static str {
@@ -95,9 +95,15 @@ fn collect_orphan_registers(
         }
         let out = thumb_file(dir, id);
         let legacy = dir.join(format!("{}.jpg", id));
-        let hit = if std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+        let hit = if std::fs::metadata(&out)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
             Some(out)
-        } else if std::fs::metadata(&legacy).map(|m| m.len() > 0).unwrap_or(false) {
+        } else if std::fs::metadata(&legacy)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
             Some(legacy)
         } else {
             None
@@ -118,7 +124,9 @@ fn register_orphans(
     if updates.is_empty() {
         return 0;
     }
-    let Ok(tx) = conn.unchecked_transaction() else { return 0 };
+    let Ok(tx) = conn.unchecked_transaction() else {
+        return 0;
+    };
     let mut registered = 0;
     for (id, path) in updates {
         if persist(&tx, id, path).is_ok() {
@@ -146,32 +154,51 @@ pub(crate) fn clear_thumbnail_cache(app: &tauri::AppHandle, id: &str) {
 /// 那是"抽好帧没来得及写库"的孤儿，resume_thumbnails 要靠它们登记回来。
 /// 返回删除的文件数，失败（目录不存在等）一律返回 0，不影响启动。
 pub(crate) fn cleanup_orphan_thumbnail_files(app: &tauri::AppHandle) -> usize {
-    let Ok(dir) = app.path().app_data_dir() else { return 0 };
-    let Some(state) = app.try_state::<AppState>() else { return 0 };
+    let Ok(dir) = app.path().app_data_dir() else {
+        return 0;
+    };
+    let Some(state) = app.try_state::<AppState>() else {
+        return 0;
+    };
     let alive = {
         let Ok(conn) = state.db.lock() else { return 0 };
-        let Ok(image_ids) = db::get_all_image_ids(&conn) else { return 0 };
-        let Ok(video_ids) = db::get_all_video_ids(&conn) else { return 0 };
-        image_ids.into_iter().chain(video_ids).collect::<std::collections::HashSet<_>>()
+        let Ok(image_ids) = db::get_all_image_ids(&conn) else {
+            return 0;
+        };
+        let Ok(video_ids) = db::get_all_video_ids(&conn) else {
+            return 0;
+        };
+        image_ids
+            .into_iter()
+            .chain(video_ids)
+            .collect::<std::collections::HashSet<_>>()
     };
     remove_orphan_thumbnail_files(&dir.join("thumbnails"), &alive)
 }
 
 /// 纯磁盘操作部分：删除 alive 集合之外的 `{id}.jpg`/`.webp`，以及主已不在的
 /// `{id}.part.jpg`/`.part.webp`（抽帧中途崩溃留下的临时文件）。其他扩展一律不碰。
-fn remove_orphan_thumbnail_files(dir: &std::path::Path, alive: &std::collections::HashSet<String>) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+fn remove_orphan_thumbnail_files(
+    dir: &std::path::Path,
+    alive: &std::collections::HashSet<String>,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_thumb = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg") || e.eq_ignore_ascii_case("webp"));
+        let is_thumb = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            e.eq_ignore_ascii_case("jpg")
+                || e.eq_ignore_ascii_case("jpeg")
+                || e.eq_ignore_ascii_case("webp")
+        });
         if !is_thumb {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
         let id = stem.strip_suffix(".part").unwrap_or(stem);
         if !alive.contains(id) && std::fs::remove_file(&path).is_ok() {
             removed += 1;
@@ -197,7 +224,13 @@ pub(crate) async fn run_thumbnail_jobs(
     if total == 0 {
         let _ = app.emit(
             event,
-            ThumbnailProgress { processed: 0, total: 0, done: true, generated: 0, failed: 0 },
+            ThumbnailProgress {
+                processed: 0,
+                total: 0,
+                done: true,
+                generated: 0,
+                failed: 0,
+            },
         );
         return Ok(0);
     }
@@ -206,7 +239,10 @@ pub(crate) async fn run_thumbnail_jobs(
     if !state.thumb_running.lock().map_err_str()?.insert(event) {
         return Err("该库已有封面生成任务在运行。".into());
     }
-    let _guard = BatchGuard { running: &state.thumb_running, event };
+    let _guard = BatchGuard {
+        running: &state.thumb_running,
+        event,
+    };
 
     // 落库"批次进行中"：进程中途被杀时标志留着，下次启动自动续跑。
     // 目录先取好——它若失败，标志已写却没人来清，会变成每次启动都重试的幽灵批次
@@ -253,12 +289,14 @@ pub(crate) async fn run_thumbnail_jobs(
                         // 老 jpg 缓存仍有效则沿用（webp 迁移不强制重抽 19 万张）；
                         // 新抽的走当前编码器扩展名；登记时写实际存在的那一份路径
                         let legacy = dir.join(format!("{}.jpg", job.id));
-                        let legacy_ok =
-                            std::fs::metadata(&legacy).map(|m| m.len() > 0).unwrap_or(false);
+                        let legacy_ok = std::fs::metadata(&legacy)
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false);
                         let out = thumb_file(&dir, &job.id);
                         // 上次中途关闭留下的孤儿文件：直接登记，不重新抽帧
-                        let existing_ok =
-                            std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
+                        let existing_ok = std::fs::metadata(&out)
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false);
                         let ready: Option<std::path::PathBuf> = if existing_ok {
                             Some(out)
                         } else if legacy_ok {
@@ -268,8 +306,9 @@ pub(crate) async fn run_thumbnail_jobs(
                             // 临时名与目标同扩展名：ffmpeg 按扩展名选封装格式，
                             // `{id}.part` 类无扩展名会直接失败。临时名带 id，多 worker 互不踩
                             let part = dir.join(format!("{}.part.{}", job.id, thumb_ext()));
-                            let result = scanner::extract_thumbnail(&job.source, &part, job.duration)
-                                .and_then(|()| std::fs::rename(&part, &out).map_err_str());
+                            let result =
+                                scanner::extract_thumbnail(&job.source, &part, job.duration)
+                                    .and_then(|()| std::fs::rename(&part, &out).map_err_str());
                             let _ = std::fs::remove_file(&part);
                             result.is_ok().then_some(out)
                         };
@@ -301,7 +340,10 @@ pub(crate) async fn run_thumbnail_jobs(
             }
         });
 
-        (generated.load(Ordering::SeqCst), failed.load(Ordering::SeqCst))
+        (
+            generated.load(Ordering::SeqCst),
+            failed.load(Ordering::SeqCst),
+        )
     })
     .await;
 
@@ -315,7 +357,13 @@ pub(crate) async fn run_thumbnail_jobs(
 
     let _ = app.emit(
         event,
-        ThumbnailProgress { processed: total, total, done: true, generated, failed },
+        ThumbnailProgress {
+            processed: total,
+            total,
+            done: true,
+            generated,
+            failed,
+        },
     );
 
     Ok(generated)
@@ -335,7 +383,12 @@ pub async fn generate_thumbnails(
         db::get_video_thumbnail_entries(&conn)
             .map_err_str()?
             .into_iter()
-            .map(|(id, source, duration, thumbnail_path)| ThumbEntry { id, source, duration, thumbnail_path })
+            .map(|(id, source, duration, thumbnail_path)| ThumbEntry {
+                id,
+                source,
+                duration,
+                thumbnail_path,
+            })
             .collect()
     };
     let jobs: Vec<ThumbJob> = candidates
@@ -343,7 +396,11 @@ pub async fn generate_thumbnails(
         .filter(|e| video_ids.iter().any(|id| id == &e.id))
         // 缓存文件仍在的跳过；文件被删掉的会重新生成
         .filter(|e| !cached_thumbnail_usable(&e.thumbnail_path))
-        .map(|e| ThumbJob { id: e.id, source: e.source, duration: e.duration })
+        .map(|e| ThumbJob {
+            id: e.id,
+            source: e.source,
+            duration: e.duration,
+        })
         .collect();
 
     run_thumbnail_jobs(&app, jobs, "thumbnail-progress", db::set_thumbnail).await
@@ -383,12 +440,22 @@ pub async fn resume_thumbnails(
                 "video" => Ok(db::get_video_thumbnail_entries(&conn)
                     .map_err_str()?
                     .into_iter()
-                    .map(|(id, source, duration, thumbnail_path)| ThumbEntry { id, source, duration, thumbnail_path })
+                    .map(|(id, source, duration, thumbnail_path)| ThumbEntry {
+                        id,
+                        source,
+                        duration,
+                        thumbnail_path,
+                    })
                     .collect()),
                 _ => Ok(db::get_image_thumbnail_entries(&conn)
                     .map_err_str()?
                     .into_iter()
-                    .map(|(id, source, thumbnail_path)| ThumbEntry { id, source, duration: None, thumbnail_path })
+                    .map(|(id, source, thumbnail_path)| ThumbEntry {
+                        id,
+                        source,
+                        duration: None,
+                        thumbnail_path,
+                    })
                     .collect()),
             }
         })
@@ -399,10 +466,11 @@ pub async fn resume_thumbnails(
         .iter()
         .map(|e| (e.id.clone(), e.thumbnail_path.clone()))
         .collect();
-    let registers =
-        tauri::async_runtime::spawn_blocking(move || collect_orphan_registers(&dir, &orphan_entries))
-            .await
-            .map_err_str()?;
+    let registers = tauri::async_runtime::spawn_blocking(move || {
+        collect_orphan_registers(&dir, &orphan_entries)
+    })
+    .await
+    .map_err_str()?;
     let recovered = {
         let conn = state.db.lock().map_err_str()?;
         register_orphans(&conn, &registers, persist)
@@ -411,10 +479,7 @@ pub async fn resume_thumbnails(
     let flag_key = thumb_flag_key(event);
     let interrupted = {
         let conn = state.db.lock().map_err_str()?;
-        db::get_setting(&conn, &flag_key)
-            .map_err_str()?
-            .as_deref()
-            == Some(event)
+        db::get_setting(&conn, &flag_key).map_err_str()?.as_deref() == Some(event)
     };
     if !interrupted {
         return Ok(recovered > 0);
@@ -424,7 +489,11 @@ pub async fn resume_thumbnails(
     let jobs: Vec<ThumbJob> = entries
         .into_iter()
         .filter(|e| !cached_thumbnail_usable(&e.thumbnail_path))
-        .map(|e| ThumbJob { id: e.id, source: e.source, duration: e.duration })
+        .map(|e| ThumbJob {
+            id: e.id,
+            source: e.source,
+            duration: e.duration,
+        })
         .collect();
     if jobs.is_empty() {
         // 标志还挂着但活儿已经没了：清掉，免得每次启动都白查一遍
@@ -448,18 +517,19 @@ mod tests {
     #[test]
     fn test_recover_orphan_thumbnails_only_registers_real_files() {
         let conn = setup_test_db();
-        let dir = std::env::temp_dir().join(format!("viewman-thumb-recover-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("viewman-thumb-recover-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
         for id in ["v1", "v2", "v3", "v4"] {
             insert_video(&conn, &sample_video(id, &format!(r"C:\media\{id}.mp4"))).unwrap();
         }
-        std::fs::write(dir.join("v1.jpg"), [0u8; 10]).unwrap();  // 有文件的孤儿 → 登记
-        std::fs::write(dir.join("v2.jpg"), b"").unwrap();        // 空文件不算抽帧成功 → 跳过
+        std::fs::write(dir.join("v1.jpg"), [0u8; 10]).unwrap(); // 有文件的孤儿 → 登记
+        std::fs::write(dir.join("v2.jpg"), b"").unwrap(); // 空文件不算抽帧成功 → 跳过
         let usable = dir.join("v3.jpg");
-        std::fs::write(&usable, [0u8; 10]).unwrap();             // 库里已有可用封面 → 不碰
-        // v4 磁盘上没有文件 → 跳过
+        std::fs::write(&usable, [0u8; 10]).unwrap(); // 库里已有可用封面 → 不碰
+                                                     // v4 磁盘上没有文件 → 跳过
         db::set_thumbnail(&conn, "v3", &usable.to_string_lossy()).unwrap();
 
         let entries = vec![
@@ -471,7 +541,10 @@ mod tests {
         let registers = collect_orphan_registers(&dir, &entries);
         assert_eq!(
             registers,
-            vec![("v1".to_string(), dir.join("v1.jpg").to_string_lossy().into_owned())]
+            vec![(
+                "v1".to_string(),
+                dir.join("v1.jpg").to_string_lossy().into_owned()
+            )]
         );
 
         let recovered = register_orphans(&conn, &registers, db::set_thumbnail);
@@ -480,10 +553,19 @@ mod tests {
         let rows = get_all_videos(&conn).unwrap();
         let expected_v1 = dir.join("v1.jpg");
         assert_eq!(
-            rows.iter().find(|v| v.id == "v1").unwrap().thumbnail_path.as_deref(),
+            rows.iter()
+                .find(|v| v.id == "v1")
+                .unwrap()
+                .thumbnail_path
+                .as_deref(),
             Some(expected_v1.to_string_lossy().as_ref())
         );
-        assert!(rows.iter().find(|v| v.id == "v3").unwrap().thumbnail_path.is_some());
+        assert!(rows
+            .iter()
+            .find(|v| v.id == "v3")
+            .unwrap()
+            .thumbnail_path
+            .is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -497,7 +579,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("viewman-thumb-reg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         insert_video(&conn, &sample_video("v1", r"C:\media\v1.mp4")).unwrap();
-        let registers = vec![("v1".to_string(), dir.join("v1.jpg").to_string_lossy().into_owned())];
+        let registers = vec![(
+            "v1".to_string(),
+            dir.join("v1.jpg").to_string_lossy().into_owned(),
+        )];
         assert_eq!(register_orphans(&conn, &registers, db::set_thumbnail), 1);
         assert_eq!(
             get_all_videos(&conn).unwrap()[0].thumbnail_path.as_deref(),
@@ -513,12 +598,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let alive: std::collections::HashSet<_> = ["a1", "a2"].into_iter().map(String::from).collect();
-        std::fs::write(dir.join("a1.jpg"), [0u8; 4]).unwrap();      // 有主 → 保留
+        let alive: std::collections::HashSet<_> =
+            ["a1", "a2"].into_iter().map(String::from).collect();
+        std::fs::write(dir.join("a1.jpg"), [0u8; 4]).unwrap(); // 有主 → 保留
         std::fs::write(dir.join("a2.part.jpg"), [0u8; 4]).unwrap(); // 有主的 .part 残留 → 保留
-        std::fs::write(dir.join("dead.jpg"), [0u8; 4]).unwrap();    // 无主 → 删
+        std::fs::write(dir.join("dead.jpg"), [0u8; 4]).unwrap(); // 无主 → 删
         std::fs::write(dir.join("dead.part.jpg"), [0u8; 4]).unwrap(); // 无主的 .part → 删
-        std::fs::write(dir.join("dead.png"), [0u8; 4]).unwrap();    // 非 .jpg → 不碰
+        std::fs::write(dir.join("dead.png"), [0u8; 4]).unwrap(); // 非 .jpg → 不碰
 
         let removed = remove_orphan_thumbnail_files(&dir, &alive);
         assert_eq!(removed, 2);
@@ -548,7 +634,10 @@ pub async fn capture_frame(
     tauri::async_runtime::spawn_blocking(move || {
         let src = std::path::Path::new(&path);
         let parent = src.parent().ok_or("无法确定视频所在目录")?;
-        let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "frame".into());
+        let stem = src
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "frame".into());
         // 文件名带毫秒：只到秒的话同一位置重复截图会静默覆盖上一张。
         // 用总毫秒拆分时/分/秒，避免 (position%60).round()==60 的非法秒值（如 61.9s→01m62s）。
         let stamp = if position > 0.0 {
@@ -571,17 +660,14 @@ pub async fn capture_frame(
         if position > 0.0 {
             cmd.args(["-ss", &position.to_string()]);
         }
-        cmd.args([
-            "-i",
-            &path,
-            "-frames:v",
-            "1",
-            &out.to_string_lossy(),
-        ]);
+        cmd.args(["-i", &path, "-frames:v", "1", &out.to_string_lossy()]);
         let output = crate::scanner::output_timeout(cmd, 60, "ffmpeg 截图")?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("截图失败: {}", detail.chars().take(200).collect::<String>()));
+            return Err(format!(
+                "截图失败: {}",
+                detail.chars().take(200).collect::<String>()
+            ));
         }
         Ok(out.to_string_lossy().to_string())
     })

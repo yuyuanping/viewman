@@ -68,10 +68,14 @@ pub async fn scan_directory(
                 .iter()
                 .map(|f| f.to_string_lossy().to_lowercase())
                 .collect();
-            let existing: Vec<_> = existing_videos.iter()
-                .map(|v| (v.id.clone(), v.path.clone())).collect();
-            let by_path: std::collections::HashMap<_, _> = existing_videos.iter()
-                .map(|v| (v.path.to_lowercase(), v)).collect();
+            let existing: Vec<_> = existing_videos
+                .iter()
+                .map(|v| (v.id.clone(), v.path.clone()))
+                .collect();
+            let by_path: std::collections::HashMap<_, _> = existing_videos
+                .iter()
+                .map(|v| (v.path.to_lowercase(), v))
+                .collect();
 
             // 本次扫描已找不到、但库里还挂在该目录下的文件 → 视为外部已删除
             let prefix = dir_prefix_lower(&dir_for_task);
@@ -85,18 +89,28 @@ pub async fn scan_directory(
 
             let new_files: Vec<_> = files
                 .into_iter()
-                .filter(|f| {
-                    match by_path.get(&f.to_string_lossy().to_lowercase()) {
-                        None => true,
-                        Some(old) => old.duration.is_none() || old.width.is_none() || old.height.is_none()
-                            || std::fs::metadata(f).map(|m| m.len() as i64 != old.file_size).unwrap_or(true),
+                .filter(|f| match by_path.get(&f.to_string_lossy().to_lowercase()) {
+                    None => true,
+                    Some(old) => {
+                        old.duration.is_none()
+                            || old.width.is_none()
+                            || old.height.is_none()
+                            || std::fs::metadata(f)
+                                .map(|m| m.len() as i64 != old.file_size)
+                                .unwrap_or(true)
                     }
                 })
                 .collect();
 
             let _ = task_app.emit(
                 "scan-progress",
-                ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![], summary: None },
+                ScanProgress {
+                    processed: 0,
+                    total: new_files.len(),
+                    done: false,
+                    warnings: vec![],
+                    summary: None,
+                },
             );
 
             let (mut videos, probe_warnings) = build_videos_parallel(&task_app, &new_files);
@@ -106,7 +120,8 @@ pub async fn scan_directory(
             for video in &mut videos {
                 if let Some(old) = by_path.get(&video.path.to_lowercase()) {
                     refreshed += 1;
-                    let incomplete = video.duration.is_none() || video.width.is_none() || video.height.is_none();
+                    let incomplete =
+                        video.duration.is_none() || video.width.is_none() || video.height.is_none();
                     video.id = old.id.clone();
                     video.path = old.path.clone();
                     video.created_at = old.created_at.clone();
@@ -120,9 +135,21 @@ pub async fn scan_directory(
                 }
             }
             // added = 探测成功的条目里没在旧库出现过的；refreshed = 命中旧库被刷新的
-            let added = videos.iter().filter(|v| !by_path.contains_key(&v.path.to_lowercase())).count();
-            
-            Ok((videos, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }))
+            let added = videos
+                .iter()
+                .filter(|v| !by_path.contains_key(&v.path.to_lowercase()))
+                .count();
+
+            Ok((
+                videos,
+                stale_ids,
+                warnings,
+                ScanSummary {
+                    added,
+                    removed: 0,
+                    refreshed,
+                },
+            ))
         })
         .await
         .map_err_str()??;
@@ -139,10 +166,23 @@ pub async fn scan_directory(
 
     let _ = app.emit(
         "scan-progress",
-        ScanProgress { processed: videos.len(), total: videos.len(), done: true, warnings: warnings.clone(), summary: Some(ScanSummary { added: summary.added, removed: stale_ids.len(), refreshed: summary.refreshed }) },
+        ScanProgress {
+            processed: videos.len(),
+            total: videos.len(),
+            done: true,
+            warnings: warnings.clone(),
+            summary: Some(ScanSummary {
+                added: summary.added,
+                removed: stale_ids.len(),
+                refreshed: summary.refreshed,
+            }),
+        },
     );
 
-    Ok(ScanOutcome { items: videos, removed_ids: stale_ids })
+    Ok(ScanOutcome {
+        items: videos,
+        removed_ids: stale_ids,
+    })
 }
 
 /// 目录 → 大小写不敏感的前缀比较键（统一带结尾分隔符，避免 "D:\v" 误匹配 "D:\vids2"）。
@@ -177,7 +217,10 @@ pub(crate) fn plan_stale_ids(
 ) -> Vec<String> {
     const MAX_TRACKED: usize = 20;
     if skipped.len() > MAX_TRACKED {
-        warnings.push(format!("有 {} 个目录本轮未能读取，已跳过失效清理", skipped.len()));
+        warnings.push(format!(
+            "有 {} 个目录本轮未能读取，已跳过失效清理",
+            skipped.len()
+        ));
         return Vec::new();
     }
     let skip_prefixes: Vec<String> = skipped
@@ -202,7 +245,9 @@ pub(crate) fn compute_stale_ids(
             let lp = path.to_lowercase();
             lp.starts_with(prefix)
                 && !found_lower.contains(&lp)
-                && !skipped_prefixes.iter().any(|skip| lp.starts_with(skip.as_str()))
+                && !skipped_prefixes
+                    .iter()
+                    .any(|skip| lp.starts_with(skip.as_str()))
         })
         .map(|(id, _)| id.clone())
         .collect()
@@ -258,7 +303,13 @@ fn build_videos_parallel(
         }
         let _ = app.emit(
             "scan-progress",
-            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
+            ScanProgress {
+                processed: done,
+                total,
+                done: false,
+                warnings: vec![],
+                summary: None,
+            },
         );
     };
     let thread_count = std::thread::available_parallelism()
@@ -320,7 +371,10 @@ fn build_videos_parallel(
     }
     let missed = write_failures.load(Ordering::Relaxed);
     if missed > 0 {
-        warnings.push(format!("{} 个视频记录写入数据库失败，下次扫描会重试", missed));
+        warnings.push(format!(
+            "{} 个视频记录写入数据库失败，下次扫描会重试",
+            missed
+        ));
     }
     (videos, warnings)
 }
@@ -390,7 +444,9 @@ mod tests {
     }
 
     fn library(count: usize) -> Vec<(String, String)> {
-        (0..count).map(|i| (i.to_string(), format!(r"D:\vid\{}.mp4", i))).collect()
+        (0..count)
+            .map(|i| (i.to_string(), format!(r"D:\vid\{}.mp4", i)))
+            .collect()
     }
 
     fn found_paths(count: usize) -> std::collections::HashSet<String> {
@@ -463,6 +519,9 @@ mod tests {
             &mut warnings,
         );
         assert!(stale.is_empty());
-        assert_eq!(warnings, vec!["有 25 个目录本轮未能读取，已跳过失效清理".to_string()]);
+        assert_eq!(
+            warnings,
+            vec!["有 25 个目录本轮未能读取，已跳过失效清理".to_string()]
+        );
     }
 }

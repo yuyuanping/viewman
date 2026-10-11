@@ -6,7 +6,11 @@ use crate::models::{RecentlyPlayed, VideoProgress};
 use super::{AppState, MapErrStr};
 
 #[tauri::command]
-pub fn save_progress(state: State<AppState>, video_id: String, position: f64) -> Result<(), String> {
+pub fn save_progress(
+    state: State<AppState>,
+    video_id: String,
+    position: f64,
+) -> Result<(), String> {
     if !position.is_finite() || position < 0.0 {
         return Err(format!("非法的播放位置: {}", position));
     }

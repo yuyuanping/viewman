@@ -23,7 +23,6 @@ pub fn like_escape(raw: &str) -> String {
     out
 }
 
-
 pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS videos (
@@ -135,7 +134,11 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
         "sig_modified_at",
     ] {
         if !has_video_column(col) {
-            let kind = if col == "sig_modified_at" { "TEXT" } else { "INTEGER" };
+            let kind = if col == "sig_modified_at" {
+                "TEXT"
+            } else {
+                "INTEGER"
+            };
             conn.execute(&format!("ALTER TABLE videos ADD COLUMN {col} {kind}"), [])?;
         }
     }
@@ -181,16 +184,24 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
 /// 老库 FTS 回填：触发器只管新写入，老记录需 rebuild 一次；幂等，可每次启动跑
 pub(crate) fn ensure_fts(conn: &Connection) -> Result<()> {
     // 表不存在（极老库）则 create_tables 已建；这里只回填内容
-    let videos: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0)).unwrap_or(-1);
+    let videos: i64 = conn
+        .query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0))
+        .unwrap_or(-1);
     if videos == 0 {
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM videos", [], |r| r.get(0)).unwrap_or(0);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM videos", [], |r| r.get(0))
+            .unwrap_or(0);
         if n > 0 {
             conn.execute("INSERT INTO videos_fts(videos_fts) VALUES ('rebuild')", [])?;
         }
     }
-    let images: i64 = conn.query_row("SELECT COUNT(*) FROM images_fts", [], |r| r.get(0)).unwrap_or(-1);
+    let images: i64 = conn
+        .query_row("SELECT COUNT(*) FROM images_fts", [], |r| r.get(0))
+        .unwrap_or(-1);
     if images == 0 {
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0)).unwrap_or(0);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
+            .unwrap_or(0);
         if n > 0 {
             conn.execute("INSERT INTO images_fts(images_fts) VALUES ('rebuild')", [])?;
         }
@@ -202,7 +213,9 @@ pub(crate) fn ensure_fts(conn: &Connection) -> Result<()> {
 /// 删除报 malformed 时先跑这个定性——是 FTS 索引坏（可无损重建）还是主表坏（需从备份恢复）。
 pub fn integrity_check(conn: &Connection) -> Result<String> {
     let mut stmt = conn.prepare("PRAGMA integrity_check")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows.into_iter().next().unwrap_or_else(|| "ok".into()))
 }
 
@@ -307,14 +320,21 @@ mod tests {
     use super::*;
 
     fn query_position(conn: &Connection, video_id: &str) -> Option<f64> {
-        conn.query_row("SELECT position FROM watch_progress WHERE video_id = ?1", [video_id], |r| r.get(0)).ok()
+        conn.query_row(
+            "SELECT position FROM watch_progress WHERE video_id = ?1",
+            [video_id],
+            |r| r.get(0),
+        )
+        .ok()
     }
 
     #[test]
     fn test_fts_triggers_track_video_lifecycle() {
         let conn = setup_test_db();
         insert_video(&conn, &sample_video("v1", "C:/v/alpha.mp4")).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
 
         // MATCH 能命中文件名
@@ -328,7 +348,9 @@ mod tests {
         assert_eq!(hit, 1);
 
         delete_videos_by_ids(&conn, &["v1".to_string()]).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM videos_fts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
 
         // 回填幂等：空库 rebuild 不报错不增行
@@ -346,7 +368,11 @@ mod tests {
         // 模拟 FTS 索引损坏（主表不动）：删掉索引行，MATCH 查不到
         conn.execute("DELETE FROM images_fts", []).unwrap();
         let before: i64 = conn
-            .query_row("SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH '\"b\"*'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH '\"b\"*'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(before, 0);
 
@@ -364,7 +390,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("viewman-wal-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let conn = init_db(path.to_str().unwrap()).unwrap();
-        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
         drop(conn);
         let _ = std::fs::remove_file(&path);
@@ -377,8 +405,13 @@ mod tests {
         // 老库形状：有 phash + phash_modified_at（只有单路指纹的那个版本），没有 dhash
         let conn = Connection::open_in_memory().unwrap();
         create_tables(&conn).unwrap();
-        conn.execute("ALTER TABLE images RENAME COLUMN sig_modified_at TO phash_modified_at", []).unwrap();
-        conn.execute("ALTER TABLE images DROP COLUMN dhash", []).unwrap();
+        conn.execute(
+            "ALTER TABLE images RENAME COLUMN sig_modified_at TO phash_modified_at",
+            [],
+        )
+        .unwrap();
+        conn.execute("ALTER TABLE images DROP COLUMN dhash", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO images (id, path, filename, file_size, modified_at, phash, phash_modified_at)
              VALUES ('i1', 'C:/pics/a.png', 'a.png', 10, '1700', 7, '1700')",
@@ -410,7 +443,10 @@ mod tests {
         tx.rollback().unwrap();
 
         assert_eq!(get_all_videos(&conn).unwrap().len(), 1);
-        assert_eq!(get_video_path(&conn, "keep").unwrap().as_deref(), Some("C:\\keep.mp4"));
+        assert_eq!(
+            get_video_path(&conn, "keep").unwrap().as_deref(),
+            Some("C:\\keep.mp4")
+        );
     }
 
     #[test]

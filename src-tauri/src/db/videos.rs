@@ -1,12 +1,14 @@
 use super::like_escape;
-use rusqlite::{Connection, OptionalExtension, Result, params};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 use crate::models::Video;
 
 /// 全部视频 id：孤儿缩略图清理时判断"这个缓存文件还有没有主"（视频与图片共用缓存目录）
 pub fn get_all_video_ids(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM videos")?;
-    let ids = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>>>()?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(ids)
 }
 
@@ -30,9 +32,9 @@ pub fn get_all_videos(conn: &Connection) -> Result<Vec<Video>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos ORDER BY filename"
     )?;
-    let videos = stmt.query_map([], |row| {
-        video_from_row(row, 8)
-    })?.collect::<Result<Vec<_>>>()?;
+    let videos = stmt
+        .query_map([], |row| video_from_row(row, 8))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(videos)
 }
 
@@ -44,9 +46,9 @@ pub fn get_videos_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<
     let mut stmt = conn.prepare(
         "SELECT id, path, filename, duration, width, height, file_size, created_at, thumbnail_path FROM videos WHERE path LIKE ?1 ESCAPE '\\'",
     )?;
-    let videos = stmt.query_map(params![pattern], |row| {
-        video_from_row(row, 8)
-    })?.collect::<Result<Vec<_>>>()?;
+    let videos = stmt
+        .query_map(params![pattern], |row| video_from_row(row, 8))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(videos)
 }
 
@@ -54,12 +56,12 @@ pub(crate) type ThumbnailEntry = (String, String, Option<f64>, Option<String>);
 
 /// 封面批次待办的最小行集 (id, 源路径, 时长, 封面路径)：续跑/生成前的逐条 stat
 /// 要在锁外做，锁内只留这一下查询，全表九列的大行集没必要过一遍
-pub fn get_video_thumbnail_entries(
-    conn: &Connection,
-) -> Result<Vec<ThumbnailEntry>> {
+pub fn get_video_thumbnail_entries(conn: &Connection) -> Result<Vec<ThumbnailEntry>> {
     let mut stmt = conn.prepare("SELECT id, path, duration, thumbnail_path FROM videos")?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -143,28 +145,27 @@ pub fn get_video_sigs(conn: &Connection) -> Result<Vec<VideoSig>> {
                 sig_modified_at
          FROM videos ORDER BY created_at, id",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(VideoSig {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            created_at: row.get(2)?,
-            duration: row.get(3)?,
-            thumbnail_path: row.get(4)?,
-            anchor: pair(row, 5, 6)?,
-            mid: pair(row, 7, 8)?,
-            tail: pair(row, 9, 10)?,
-            sig_modified_at: row.get(11)?,
-        })
-    })?.collect::<Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(VideoSig {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                created_at: row.get(2)?,
+                duration: row.get(3)?,
+                thumbnail_path: row.get(4)?,
+                anchor: pair(row, 5, 6)?,
+                mid: pair(row, 7, 8)?,
+                tail: pair(row, 9, 10)?,
+                sig_modified_at: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
 /// 写回锚点帧：(video_id, phash, dhash, 指纹对应的文件修改时间)。
 /// 锚点一重算就把两处复核帧清空——它们是照着旧锚点验出来的，留着会把改过的文件判成新鲜。
-pub fn save_video_anchors(
-    conn: &Connection,
-    updates: &[(String, i64, i64, String)],
-) -> Result<()> {
+pub fn save_video_anchors(conn: &Connection, updates: &[(String, i64, i64, String)]) -> Result<()> {
     if updates.is_empty() {
         return Ok(());
     }
@@ -246,7 +247,8 @@ pub fn get_video_view(
     if !term.is_empty() {
         if let Some(q) = super::fts_query(term) {
             // 预检 MATCH 语法是否合法，避免非法查询直接报错整单
-            let check = conn.prepare("SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?1 LIMIT 1");
+            let check =
+                conn.prepare("SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?1 LIMIT 1");
             if let Ok(mut stmt) = check {
                 if stmt.query_map(params![q], |_| Ok(())).is_ok() {
                     use_fts = true;
@@ -255,7 +257,8 @@ pub fn get_video_view(
             }
         }
         if use_fts {
-            filters.push("v.rowid IN (SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?)".into());
+            filters
+                .push("v.rowid IN (SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?)".into());
             values.push(fts_q.clone());
         } else {
             filters.push("v.filename LIKE ? ESCAPE '\\'".into());
@@ -276,16 +279,22 @@ pub fn get_video_view(
     all_values.push(limit.to_string());
     all_values.push(offset.to_string());
     let items = stmt
-        .query_map(rusqlite::params_from_iter(all_values.iter()), |row| video_from_row(row, 8))?
+        .query_map(rusqlite::params_from_iter(all_values.iter()), |row| {
+            video_from_row(row, 8)
+        })?
         .collect::<Result<Vec<_>>>()?;
 
-    let sql = format!("SELECT COUNT(*), COALESCE(SUM(v.file_size), 0) FROM videos v {where_clause}");
-    let (total, total_size) = conn.query_row(
-        &sql,
-        rusqlite::params_from_iter(values.iter()),
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    Ok(VideoView { items, total, total_size })
+    let sql =
+        format!("SELECT COUNT(*), COALESCE(SUM(v.file_size), 0) FROM videos v {where_clause}");
+    let (total, total_size) =
+        conn.query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+    Ok(VideoView {
+        items,
+        total,
+        total_size,
+    })
 }
 
 /// 迁移库记录指向的新路径（文件本体由调用方先行移动）
@@ -298,7 +307,12 @@ pub fn update_video_path(conn: &Connection, video_id: &str, new_path: &str) -> R
 }
 
 /// 永久转码后同步文件事实：路径（一般不变）与大小
-pub fn update_video_location(conn: &Connection, video_id: &str, path: &str, file_size: i64) -> Result<()> {
+pub fn update_video_location(
+    conn: &Connection,
+    video_id: &str,
+    path: &str,
+    file_size: i64,
+) -> Result<()> {
     conn.execute(
         "UPDATE videos SET path = ?1, file_size = ?2 WHERE id = ?3",
         params![path, file_size, video_id],
@@ -325,8 +339,11 @@ pub fn set_video_codec(conn: &Connection, video_id: &str, codec: &str) -> Result
 }
 
 pub fn hevc_video_ids(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT id FROM videos WHERE video_codec = 'hevc' ORDER BY filename")?;
-    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>>>()?;
+    let mut stmt =
+        conn.prepare("SELECT id FROM videos WHERE video_codec = 'hevc' ORDER BY filename")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(ids)
 }
 
@@ -341,11 +358,18 @@ pub fn is_path_taken(conn: &Connection, path: &str, exclude_id: &str) -> Result<
 }
 
 pub fn get_video_path(conn: &Connection, video_id: &str) -> Result<Option<String>> {
-    conn.query_row("SELECT path FROM videos WHERE id = ?1", params![video_id], |row| row.get(0))
-        .optional()
+    conn.query_row(
+        "SELECT path FROM videos WHERE id = ?1",
+        params![video_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
-pub fn get_video_path_and_duration(conn: &Connection, video_id: &str) -> Result<Option<(String, Option<f64>)>> {
+pub fn get_video_path_and_duration(
+    conn: &Connection,
+    video_id: &str,
+) -> Result<Option<(String, Option<f64>)>> {
     conn.query_row(
         "SELECT path, duration FROM videos WHERE id = ?1",
         params![video_id],
@@ -356,16 +380,24 @@ pub fn get_video_path_and_duration(conn: &Connection, video_id: &str) -> Result<
 
 /// (id, path, duration) of videos with a known duration not exceeding `max` seconds
 /// 时长缺失（可能是图片伪装）或不超过 max 秒的候选，供静图检测使用
-pub fn get_videos_with_max_duration(conn: &Connection, max: f64) -> Result<Vec<(String, String, Option<f64>)>> {
+pub fn get_videos_with_max_duration(
+    conn: &Connection,
+    max: f64,
+) -> Result<Vec<(String, String, Option<f64>)>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, duration FROM videos WHERE duration IS NULL OR duration <= ?1",
     )?;
-    let rows = stmt.query_map(params![max], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    let rows = stmt.query_map(params![max], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
     rows.collect()
 }
 
 pub fn delete_video(conn: &Connection, video_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM watch_progress WHERE video_id = ?1", params![video_id])?;
+    conn.execute(
+        "DELETE FROM watch_progress WHERE video_id = ?1",
+        params![video_id],
+    )?;
     conn.execute("DELETE FROM videos WHERE id = ?1", params![video_id])?;
     Ok(())
 }
@@ -399,7 +431,9 @@ mod tests {
         let mut ids: Vec<&str> = rows.iter().map(|v| v.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, vec!["v1", "v2"]);
-        assert!(get_videos_under_prefix(&conn, r"d:\vids\").unwrap().is_empty());
+        assert!(get_videos_under_prefix(&conn, r"d:\vids\")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -447,7 +481,10 @@ mod tests {
         let conn = setup_test_db();
         insert_video(&conn, &sample_video("v1", "C:\\v.mp4")).unwrap();
 
-        assert_eq!(get_video_path(&conn, "v1").unwrap(), Some("C:\\v.mp4".to_string()));
+        assert_eq!(
+            get_video_path(&conn, "v1").unwrap(),
+            Some("C:\\v.mp4".to_string())
+        );
         assert_eq!(get_video_path(&conn, "missing").unwrap(), None);
     }
 
@@ -477,7 +514,12 @@ mod tests {
         let p2 = get_video_view(&conn, None, "", 2, 2).unwrap();
         assert_eq!(p1.items.len(), 2);
         assert_eq!(p2.items.len(), 2);
-        let mut ids: Vec<&str> = p1.items.iter().chain(p2.items.iter()).map(|v| v.id.as_str()).collect();
+        let mut ids: Vec<&str> = p1
+            .items
+            .iter()
+            .chain(p2.items.iter())
+            .map(|v| v.id.as_str())
+            .collect();
         ids.sort();
         assert_eq!(ids, vec!["v1", "v2", "v3", "v4"]);
 
@@ -529,7 +571,14 @@ mod tests {
         assert_eq!(hevc_video_ids(&conn).unwrap(), vec!["v1".to_string()]);
         v.file_size += 1024;
         insert_video(&conn, &v).unwrap();
-        assert_eq!(videos_without_codec(&conn).unwrap().iter().filter(|(id, _)| id == "v1").count(), 1);
+        assert_eq!(
+            videos_without_codec(&conn)
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id == "v1")
+                .count(),
+            1
+        );
         assert_eq!(hevc_video_ids(&conn).unwrap().len(), 0);
     }
 
@@ -571,8 +620,9 @@ mod tests {
                 height INTEGER,
                 file_size INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );"
-        ).unwrap();
+            );",
+        )
+        .unwrap();
 
         ensure_columns(&conn).unwrap();
         ensure_columns(&conn).unwrap(); // 必须幂等，重复启动不能报错
@@ -589,7 +639,11 @@ mod tests {
     fn test_video_sig_cache_follows_the_file_mtime() {
         let conn = setup_test_db();
         insert_video(&conn, &sample_video("v1", "C:/v/a.mp4")).unwrap();
-        save_video_anchors(&conn, &[("v1".to_string(), 7_i64, 9_i64, "1700".to_string())]).unwrap();
+        save_video_anchors(
+            &conn,
+            &[("v1".to_string(), 7_i64, 9_i64, "1700".to_string())],
+        )
+        .unwrap();
 
         let row = get_video_sigs(&conn).unwrap().remove(0);
         assert_eq!(row.cached_anchor("1700"), Some((7_u64, 9_u64)));
@@ -609,7 +663,9 @@ mod tests {
         insert_video(&conn, &sample_video("v1", "C:/v/a.mp4")).unwrap();
         save_video_anchors(&conn, &[("v1".to_string(), 7, 9, "1700".to_string())]).unwrap();
         save_video_frames(&conn, &[("v1".to_string(), 1, 2, 3, 4, "1700".to_string())]).unwrap();
-        assert!(get_video_sigs(&conn).unwrap()[0].cached_frames("1700").is_some());
+        assert!(get_video_sigs(&conn).unwrap()[0]
+            .cached_frames("1700")
+            .is_some());
 
         save_video_anchors(&conn, &[("v1".to_string(), 11, 12, "1800".to_string())]).unwrap();
         let row = get_video_sigs(&conn).unwrap().remove(0);

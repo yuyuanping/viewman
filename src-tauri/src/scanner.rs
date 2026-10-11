@@ -1,7 +1,7 @@
+use serde::Deserialize;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::fs;
-use serde::Deserialize;
 
 use crate::models::{Image, Video};
 
@@ -51,13 +51,22 @@ pub(crate) fn output_timeout(
             if let Some(mut err) = child.stderr.take() {
                 let _ = err.read_to_end(&mut stderr);
             }
-            let status = child.wait().map_err(|e| format!("{} 回收失败: {}", what, e))?;
-            Ok(std::process::Output { status, stdout, stderr })
+            let status = child
+                .wait()
+                .map_err(|e| format!("{} 回收失败: {}", what, e))?;
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
         }
         None => {
             let _ = child.kill();
             let _ = child.wait();
-            Err(format!("{} 超时（{}s 未返回，疑似坏文件或网络盘 hung 住）", what, secs))
+            Err(format!(
+                "{} 超时（{}s 未返回，疑似坏文件或网络盘 hung 住）",
+                what, secs
+            ))
         }
     }
 }
@@ -158,14 +167,20 @@ pub fn get_metadata(path: &str) -> Result<VideoMeta, String> {
     let parsed: FfprobeOutput = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
 
-    let duration = parsed.format.duration
-        .and_then(|d| d.parse::<f64>().ok());
+    let duration = parsed.format.duration.and_then(|d| d.parse::<f64>().ok());
 
-    let video_stream = parsed.streams.iter().find(|s| s.codec_type.as_deref() == Some("video"));
+    let video_stream = parsed
+        .streams
+        .iter()
+        .find(|s| s.codec_type.as_deref() == Some("video"));
     let width = video_stream.and_then(|s| s.width);
     let height = video_stream.and_then(|s| s.height);
 
-    Ok(VideoMeta { duration, width, height })
+    Ok(VideoMeta {
+        duration,
+        width,
+        height,
+    })
 }
 
 /// 转码中断可能留下 `.viewman-h264-*.tmp.mp4`，不能当视频入库
@@ -270,7 +285,8 @@ fn walk_filtered(
             Err(e) => {
                 // 单个目录读不了不影响其余部分：记一条告警继续走
                 walk.skipped.push(dir.clone());
-                walk.warnings.push(format!("无法读取目录 {}: {}", dir.display(), e));
+                walk.warnings
+                    .push(format!("无法读取目录 {}: {}", dir.display(), e));
                 continue;
             }
         };
@@ -279,7 +295,8 @@ fn walk_filtered(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    walk.warnings.push(format!("{} 中有条目无法读取: {}", dir.display(), e));
+                    walk.warnings
+                        .push(format!("{} 中有条目无法读取: {}", dir.display(), e));
                     continue;
                 }
             };
@@ -437,11 +454,16 @@ fn gray_grid(path: &str, n: usize, seek: Option<f64>) -> Option<Vec<u8>> {
     let mut output = output_timeout(
         {
             cmd.args([
-                "-i", path,
-                "-vf", &format!("scale={}:{}:flags=bicubic,format=gray", n, n),
-                "-frames:v", "1",
-                "-f", "rawvideo",
-                "-pix_fmt", "gray",
+                "-i",
+                path,
+                "-vf",
+                &format!("scale={}:{}:flags=bicubic,format=gray", n, n),
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "gray",
                 "-",
             ]);
             cmd
@@ -504,8 +526,10 @@ fn phash_from_gray(pixels: &[f64; 32 * 32]) -> u64 {
             for x in 0..N {
                 for y in 0..N {
                     let px = pixels[x * N + y];
-                    let arg_x = std::f64::consts::PI * (2 * x + 1) as f64 * u as f64 / (2 * N) as f64;
-                    let arg_y = std::f64::consts::PI * (2 * y + 1) as f64 * v as f64 / (2 * N) as f64;
+                    let arg_x =
+                        std::f64::consts::PI * (2 * x + 1) as f64 * u as f64 / (2 * N) as f64;
+                    let arg_y =
+                        std::f64::consts::PI * (2 * y + 1) as f64 * v as f64 / (2 * N) as f64;
                     sum += px * arg_x.cos() * arg_y.cos();
                 }
             }
@@ -540,11 +564,17 @@ fn phash_from_gray(pixels: &[f64; 32 * 32]) -> u64 {
 fn dhash_from_gray(pixels: &[f64; 32 * 32]) -> u64 {
     const N: usize = 32;
     // 从 32×32 里等距取 8 行 × 9 列（列多取一位，用来和左邻比）
-    let sample = |row: usize, col: usize| pixels[(row * (N - 1) / 8) * N + (col * (N - 1) / 8)] as i64;
+    let sample =
+        |row: usize, col: usize| pixels[(row * (N - 1) / 8) * N + (col * (N - 1) / 8)] as i64;
     let mut hash: u64 = 0;
     for row in 0..8 {
         for col in 0..8 {
-            hash = (hash << 1) | if sample(row, col) < sample(row, col + 1) { 1 } else { 0 };
+            hash = (hash << 1)
+                | if sample(row, col) < sample(row, col + 1) {
+                    1
+                } else {
+                    0
+                };
         }
     }
     hash
@@ -823,7 +853,12 @@ mod tests {
             }
         });
 
-        assert_eq!(walked.files.len(), 1, "被跳过的子树不该混进结果，实际: {:?}", walked.files);
+        assert_eq!(
+            walked.files.len(),
+            1,
+            "被跳过的子树不该混进结果，实际: {:?}",
+            walked.files
+        );
         assert_eq!(walked.skipped, vec![blocked]);
         assert_eq!(walked.warnings.len(), 1);
 
@@ -842,7 +877,13 @@ mod tests {
 
         let link = dir.join("loop");
         let made = Command::new("cmd")
-            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &dir.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &dir.to_string_lossy(),
+            ])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
@@ -854,7 +895,12 @@ mod tests {
         }
 
         let walked = scan_directory_recursive(&dir).unwrap();
-        assert_eq!(walked.files.len(), 2, "每个真实文件只应被看到一次，实际: {:?}", walked.files);
+        assert_eq!(
+            walked.files.len(),
+            2,
+            "每个真实文件只应被看到一次，实际: {:?}",
+            walked.files
+        );
         assert_eq!(walked.skipped, vec![link.clone()]);
         assert_eq!(walked.warnings.len(), 1);
 
@@ -888,9 +934,12 @@ mod tests {
         let generated = Command::new("ffmpeg")
             .args([
                 "-y",
-                "-f", "lavfi",
-                "-i", "testsrc=size=320x240:rate=10:duration=2",
-                "-pix_fmt", "yuv420p",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10:duration=2",
+                "-pix_fmt",
+                "yuv420p",
                 &video.to_string_lossy(),
             ])
             .output()
@@ -918,9 +967,12 @@ mod tests {
         let generated = Command::new("ffmpeg")
             .args([
                 "-y",
-                "-f", "lavfi",
-                "-i", "testsrc=size=1200x800:rate=1:duration=1",
-                "-frames:v", "1",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=1200x800:rate=1:duration=1",
+                "-frames:v",
+                "1",
                 &png.to_string_lossy(),
             ])
             .output()
@@ -929,7 +981,10 @@ mod tests {
 
         let out = dir.join("thumb.jpg");
         extract_thumbnail(&png.to_string_lossy(), &out, None).unwrap();
-        assert!(fs::metadata(&out).unwrap().len() > 0, "图片封面应为非空文件");
+        assert!(
+            fs::metadata(&out).unwrap().len() > 0,
+            "图片封面应为非空文件"
+        );
 
         let probe = get_metadata(&png.to_string_lossy()).unwrap();
         assert_eq!(probe.width, Some(1200));
@@ -950,23 +1005,60 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let png = dir.join("$$%BL9DM1T{PSA~77JD@YN7.png");
-        assert!(Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=640x480:rate=1:duration=1", "-frames:v", "1", &png.to_string_lossy()])
-            .output().unwrap().status.success(), "生成测试图片失败");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=640x480:rate=1:duration=1",
+                    "-frames:v",
+                    "1",
+                    &png.to_string_lossy()
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "生成测试图片失败"
+        );
 
         let meta = get_metadata(&png.to_string_lossy()).unwrap();
-        assert_eq!((meta.width, meta.height), (Some(640), Some(480)), "带 % 的图片应读到尺寸");
+        assert_eq!(
+            (meta.width, meta.height),
+            (Some(640), Some(480)),
+            "带 % 的图片应读到尺寸"
+        );
         let thumb = dir.join("pct-thumb.jpg");
         extract_thumbnail(&png.to_string_lossy(), &thumb, None).unwrap();
-        assert!(fs::metadata(&thumb).unwrap().len() > 0, "带 % 的图片应能出封面");
+        assert!(
+            fs::metadata(&thumb).unwrap().len() > 0,
+            "带 % 的图片应能出封面"
+        );
         let (phash, dhash) = image_hashes(&png.to_string_lossy()).unwrap();
         assert_ne!((phash, dhash), (0, 0), "带 % 的图片应能算出两枚指纹");
 
         // 视频名里带 % 也照常工作（-f image2pipe 只给图片输入，视频容器必须走常规内容探测）
         let video = dir.join("sample 100%.mp4");
-        assert!(Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2", "-pix_fmt", "yuv420p", &video.to_string_lossy()])
-            .output().unwrap().status.success(), "生成测试视频失败");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x240:rate=10:duration=2",
+                    "-pix_fmt",
+                    "yuv420p",
+                    &video.to_string_lossy()
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "生成测试视频失败"
+        );
         let vmeta = get_metadata(&video.to_string_lossy()).unwrap();
         assert_eq!((vmeta.width, vmeta.height), (Some(320), Some(240)));
         assert!(vmeta.duration.unwrap_or(0.0) > 1.0, "应读到视频时长");
@@ -991,18 +1083,53 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let png_as_jpg = dir.join("png-content.jpg");
-        assert!(Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1:duration=1", "-frames:v", "1", &png_as_jpg.to_string_lossy()])
-            .output().unwrap().status.success(), "生成 PNG 测试图失败");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x240:rate=1:duration=1",
+                    "-frames:v",
+                    "1",
+                    &png_as_jpg.to_string_lossy()
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "生成 PNG 测试图失败"
+        );
 
         let jpg_as_bmp = dir.join("jpg-content.bmp");
-        assert!(Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1:duration=1", "-frames:v", "1", "-q:v", "3", &jpg_as_bmp.to_string_lossy()])
-            .output().unwrap().status.success(), "生成 JPEG 测试图失败");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x240:rate=1:duration=1",
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    &jpg_as_bmp.to_string_lossy()
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "生成 JPEG 测试图失败"
+        );
 
         for path in [&png_as_jpg, &jpg_as_bmp] {
             let hashes = image_hashes(&path.to_string_lossy());
-            assert!(hashes.is_some(), "{path:?} 内容正常，不该因扩展名不符解不开");
+            assert!(
+                hashes.is_some(),
+                "{path:?} 内容正常，不该因扩展名不符解不开"
+            );
             let (phash, dhash) = hashes.unwrap();
             assert_ne!((phash, dhash), (0, 0), "{path:?} 应算出两枚指纹");
         }
@@ -1022,7 +1149,15 @@ mod tests {
         let render = |name: &str, extra: &[&str]| {
             let out = dir.join(name);
             let ok = Command::new("ffmpeg")
-                .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=6", "-pix_fmt", "yuv420p"])
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x240:rate=25:duration=6",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
                 .args(extra)
                 .arg(&out)
                 .output()
@@ -1040,7 +1175,11 @@ mod tests {
 
         for at in [thumbnail_target_time(Some(6.0)), 3.0, 5.1] {
             let a = video_frame_hashes(&original, at).unwrap();
-            assert_eq!(a, video_frame_hashes(&original, at).unwrap(), "同一处采样点该给确定结果");
+            assert_eq!(
+                a,
+                video_frame_hashes(&original, at).unwrap(),
+                "同一处采样点该给确定结果"
+            );
             let b = video_frame_hashes(&reencoded, at).unwrap();
             let dist = hamming_distance(a.0, b.0) + hamming_distance(a.1, b.1);
             assert!(dist <= 8, "{at:.1}s 处重压制后双指纹距离 {dist} 太大");
@@ -1059,7 +1198,8 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_empty_directory() {        let dir = std::env::temp_dir().join(format!("viewman_test_{}", uuid::Uuid::new_v4()));
+    fn test_scan_empty_directory() {
+        let dir = std::env::temp_dir().join(format!("viewman_test_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
 
         let result = scan_directory_recursive(&dir);

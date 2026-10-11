@@ -1,6 +1,6 @@
-use std::collections::HashSet;
 use super::like_escape;
-use rusqlite::{Connection, OptionalExtension, Result, params};
+use rusqlite::{params, Connection, OptionalExtension, Result};
+use std::collections::HashSet;
 
 use crate::models::Image;
 
@@ -25,7 +25,9 @@ pub fn get_all_images(conn: &Connection) -> Result<Vec<Image>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, filename, width, height, file_size, created_at, thumbnail_path, modified_at FROM images ORDER BY filename"
     )?;
-    let images = stmt.query_map([], image_from_row)?.collect::<Result<Vec<_>>>()?;
+    let images = stmt
+        .query_map([], image_from_row)?
+        .collect::<Result<Vec<_>>>()?;
     Ok(images)
 }
 
@@ -37,20 +39,23 @@ pub fn get_images_under_prefix(conn: &Connection, prefix_lower: &str) -> Result<
     let mut stmt = conn.prepare(
         "SELECT id, path, filename, width, height, file_size, created_at, thumbnail_path, modified_at FROM images WHERE path LIKE ?1 ESCAPE '\\'",
     )?;
-    let images = stmt.query_map(params![pattern], image_from_row)?.collect::<Result<Vec<_>>>()?;
+    let images = stmt
+        .query_map(params![pattern], image_from_row)?
+        .collect::<Result<Vec<_>>>()?;
     Ok(images)
 }
 
 /// 封面批次待办的最小行集 (id, 源路径, 封面路径)：续跑/生成前的逐条 stat
 /// 要在锁外做，锁内只留这一下查询，全表九列的大行集没必要过一遍
-pub fn get_image_thumbnail_entries(conn: &Connection) -> Result<Vec<(String, String, Option<String>)>> {
+pub fn get_image_thumbnail_entries(
+    conn: &Connection,
+) -> Result<Vec<(String, String, Option<String>)>> {
     let mut stmt = conn.prepare("SELECT id, path, thumbnail_path FROM images")?;
     let rows = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
-
 
 /// 目录过滤与前端 filterMedia 同一规则：统一 `\` 分隔、去结尾分隔符、
 /// 按「目录\」前缀匹配（含全部子目录）。模式里所有反斜杠翻倍、结尾是裸 `%` 通配符
@@ -82,7 +87,12 @@ pub struct ImageView {
     pub total_size: i64,
 }
 
-pub fn get_image_view(conn: &Connection, dir: Option<&str>, search: &str, roots: &[String]) -> Result<ImageView> {
+pub fn get_image_view(
+    conn: &Connection,
+    dir: Option<&str>,
+    search: &str,
+    roots: &[String],
+) -> Result<ImageView> {
     let mut filters: Vec<String> = Vec::new();
     let mut values: Vec<String> = Vec::new();
     let (scope, mut scope_values) = scope_clause(roots);
@@ -113,13 +123,16 @@ pub fn get_image_view(conn: &Connection, dir: Option<&str>, search: &str, roots:
         .query_map(rusqlite::params_from_iter(values.iter()), image_from_row)?
         .collect::<Result<Vec<_>>>()?;
 
-    let sql = format!(
-        "SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM images {where_clause}"
-    );
-    let (total, total_size) = conn.query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    Ok(ImageView { items, total, total_size })
+    let sql = format!("SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM images {where_clause}");
+    let (total, total_size) =
+        conn.query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+    Ok(ImageView {
+        items,
+        total,
+        total_size,
+    })
 }
 
 /// 图片库统计：总数、缺封面数、每个文件父目录的直接文件数。
@@ -134,9 +147,7 @@ pub struct ImageStats {
 
 pub fn get_image_stats(conn: &Connection, roots: &[String]) -> Result<ImageStats> {
     let (scope, values) = scope_clause(roots);
-    let where_clause = scope
-        .map(|c| format!("WHERE {}", c))
-        .unwrap_or_default();
+    let where_clause = scope.map(|c| format!("WHERE {}", c)).unwrap_or_default();
     let sql = format!("SELECT path, thumbnail_path IS NULL FROM images {where_clause}");
     let mut stmt = conn.prepare(&sql)?;
     let mut total = 0i64;
@@ -157,20 +168,28 @@ pub fn get_image_stats(conn: &Connection, roots: &[String]) -> Result<ImageStats
     }
     let mut dirs: Vec<(String, i64)> = dirs.into_iter().collect();
     dirs.sort();
-    Ok(ImageStats { total, missing_thumbnails, dirs })
+    Ok(ImageStats {
+        total,
+        missing_thumbnails,
+        dirs,
+    })
 }
 
 /// 缺封面的图片 id：封面批任务的待办清单，前端不再需要全量清单来 filter
 pub fn get_missing_image_thumbnail_ids(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM images WHERE thumbnail_path IS NULL")?;
-    let ids = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>>>()?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(ids)
 }
 
 /// 全部图片 id：孤儿缩略图清理时判断"这个缓存文件还有没有主"
 pub fn get_all_image_ids(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM images")?;
-    let ids = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>>>()?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(ids)
 }
 
@@ -183,7 +202,11 @@ const IDS_PER_QUERY: usize = 500;
 /// 与视图同一套扫描范围口径：移动到根外的落点后记录虽在，面板也当它已退库，
 /// 否则相似列表里会一直挂着网格里已经看不见的图。
 /// id 多于一条语句装得下时分片查（id 是主键，分片不影响结果）。
-pub fn get_images_by_ids(conn: &Connection, ids: &[String], roots: &[String]) -> Result<Vec<Image>> {
+pub fn get_images_by_ids(
+    conn: &Connection,
+    ids: &[String],
+    roots: &[String],
+) -> Result<Vec<Image>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
@@ -199,7 +222,10 @@ pub fn get_images_by_ids(conn: &Connection, ids: &[String], roots: &[String]) ->
         }
         filters.push(format!("id IN ({placeholders})"));
         values.extend(chunk.iter().map(|id| (*id).clone()));
-        let sql = format!("SELECT {IMAGE_COLUMNS} FROM images WHERE {}", filters.join(" AND "));
+        let sql = format!(
+            "SELECT {IMAGE_COLUMNS} FROM images WHERE {}",
+            filters.join(" AND ")
+        );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(values.iter()), image_from_row)?
@@ -249,23 +275,29 @@ impl ImageSig {
     }
 }
 
-fn get_image_sigs_where(conn: &Connection, where_clause: &str, values: &[String]) -> Result<Vec<ImageSig>> {
+fn get_image_sigs_where(
+    conn: &Connection,
+    where_clause: &str,
+    values: &[String],
+) -> Result<Vec<ImageSig>> {
     let sql = format!(
         "SELECT id, path, created_at, modified_at, phash, dhash, sig_pixels, sig_modified_at FROM images {where_clause} ORDER BY created_at, id"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
-        Ok(ImageSig {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            created_at: row.get(2)?,
-            modified_at: row.get(3)?,
-            phash: row.get(4)?,
-            dhash: row.get(5)?,
-            sig_pixels: row.get(6)?,
-            sig_modified_at: row.get(7)?,
-        })
-    })?.collect::<Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(ImageSig {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                created_at: row.get(2)?,
+                modified_at: row.get(3)?,
+                phash: row.get(4)?,
+                dhash: row.get(5)?,
+                sig_pixels: row.get(6)?,
+                sig_modified_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -277,9 +309,7 @@ pub fn get_image_sigs(conn: &Connection) -> Result<Vec<ImageSig>> {
 /// 范围外（如被移出根的落点）的记录保留但不可见，与图片库视图同一口径
 pub fn get_image_sigs_scoped(conn: &Connection, roots: &[String]) -> Result<Vec<ImageSig>> {
     let (scope, values) = scope_clause(roots);
-    let where_clause = scope
-        .map(|c| format!("WHERE {}", c))
-        .unwrap_or_default();
+    let where_clause = scope.map(|c| format!("WHERE {}", c)).unwrap_or_default();
     get_image_sigs_where(conn, &where_clause, &values)
 }
 
@@ -335,7 +365,9 @@ pub fn get_animated_flag_todo(conn: &Connection) -> Result<Vec<(String, String)>
 /// 已判定的动图 id：命中清单直接出自库，不再重复解析
 pub fn get_animated_image_ids(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM images WHERE is_animated = 1")?;
-    let ids = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>>>()?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
     Ok(ids)
 }
 
@@ -376,8 +408,12 @@ pub fn insert_image(conn: &Connection, image: &Image) -> Result<()> {
 }
 
 pub fn get_image_path(conn: &Connection, image_id: &str) -> Result<Option<String>> {
-    conn.query_row("SELECT path FROM images WHERE id = ?1", params![image_id], |row| row.get(0))
-        .optional()
+    conn.query_row(
+        "SELECT path FROM images WHERE id = ?1",
+        params![image_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub fn update_image_path(conn: &Connection, image_id: &str, new_path: &str) -> Result<()> {
@@ -439,7 +475,11 @@ mod tests {
         let mut row = sample_image("i1", "C:/pics/a.png");
         row.modified_at = Some("1700".to_string());
         insert_image(&conn, &row).unwrap();
-        save_image_sigs(&conn, &[("i1".to_string(), -3_i64, 11_i64, Some("1700".to_string()))]).unwrap();
+        save_image_sigs(
+            &conn,
+            &[("i1".to_string(), -3_i64, 11_i64, Some("1700".to_string()))],
+        )
+        .unwrap();
         save_image_pixels(&conn, &[("i1".to_string(), vec![7u8; 32 * 32])]).unwrap();
 
         let rows = get_image_sigs(&conn).unwrap();
@@ -458,7 +498,8 @@ mod tests {
         assert_eq!(rows[0].cached_pixels(), None);
 
         // 半截像素（写坏/换了口径）不能当缓存用，否则比对拿到的两边长度都不一样
-        conn.execute("UPDATE images SET sig_pixels = x'0102' WHERE id = 'i1'", []).unwrap();
+        conn.execute("UPDATE images SET sig_pixels = x'0102' WHERE id = 'i1'", [])
+            .unwrap();
         insert_image(&conn, &row).unwrap();
         assert_eq!(get_image_sigs(&conn).unwrap()[0].cached_pixels(), None);
     }
@@ -469,11 +510,18 @@ mod tests {
         let mut row = sample_image("i1", "C:/pics/a.png");
         row.modified_at = Some("1700".to_string());
         insert_image(&conn, &row).unwrap();
-        save_image_sigs(&conn, &[("i1".to_string(), 7_i64, 9_i64, Some("1700".to_string()))]).unwrap();
+        save_image_sigs(
+            &conn,
+            &[("i1".to_string(), 7_i64, 9_i64, Some("1700".to_string()))],
+        )
+        .unwrap();
 
         // 同一份文件再扫一遍：mtime 没变，指纹仍然算数，不该又跑一次 ffmpeg
         insert_image(&conn, &row).unwrap();
-        assert_eq!(get_image_sigs(&conn).unwrap()[0].cached_sigs(), Some((7_u64, 9_u64)));
+        assert_eq!(
+            get_image_sigs(&conn).unwrap()[0].cached_sigs(),
+            Some((7_u64, 9_u64))
+        );
     }
 
     #[test]
@@ -508,12 +556,18 @@ mod tests {
 
         save_animated_flags(&conn, &[("i1".to_string(), true)]).unwrap();
         assert!(get_animated_flag_todo(&conn).unwrap().is_empty());
-        assert_eq!(get_animated_image_ids(&conn).unwrap(), vec!["i1".to_string()]);
+        assert_eq!(
+            get_animated_image_ids(&conn).unwrap(),
+            vec!["i1".to_string()]
+        );
 
         // 同一份文件再扫一遍：mtime 没变，判定结论沿用，不用再开文件
         insert_image(&conn, &row).unwrap();
         assert!(get_animated_flag_todo(&conn).unwrap().is_empty());
-        assert_eq!(get_animated_image_ids(&conn).unwrap(), vec!["i1".to_string()]);
+        assert_eq!(
+            get_animated_image_ids(&conn).unwrap(),
+            vec!["i1".to_string()]
+        );
 
         // 文件被替换（mtime 变了）：旧结论作废重新进待办，命中清单也不再算它
         let mut edited = sample_image("i1", "C:/pics/a.gif");
@@ -618,7 +672,9 @@ mod tests {
         assert_eq!(ids, vec!["i1", "i2", "i3", "i5"]);
 
         // 前缀边界：C:\pic 不能匹配 C:\pics（结尾分隔符挡着）
-        assert!(get_images_under_prefix(&conn, r"c:\pic\").unwrap().is_empty());
+        assert!(get_images_under_prefix(&conn, r"c:\pic\")
+            .unwrap()
+            .is_empty());
 
         // 路径里的 % _ 是字面量，照常命中
         let rows = get_images_under_prefix(&conn, r"c:\pics\sub\").unwrap();
@@ -635,7 +691,11 @@ mod tests {
         assert_eq!(rows.len(), 5);
         assert_eq!(
             rows.iter().find(|(id, _, _)| id == "i1").unwrap(),
-            &("i1".to_string(), r"C:\pics\a.png".to_string(), Some(r"C:\cache\i1.jpg".to_string()))
+            &(
+                "i1".to_string(),
+                r"C:\pics\a.png".to_string(),
+                Some(r"C:\cache\i1.jpg".to_string())
+            )
         );
     }
 
@@ -701,7 +761,10 @@ mod tests {
         let stats = get_image_stats(&conn, &roots).unwrap();
         assert_eq!(stats.total, 4);
         // LIKE 对 ASCII 大小写不敏感，C:\PICS 也在范围内
-        assert!(stats.dirs.iter().all(|(d, _)| d.to_lowercase().starts_with("c:\\pics")));
+        assert!(stats
+            .dirs
+            .iter()
+            .all(|(d, _)| d.to_lowercase().starts_with("c:\\pics")));
 
         // 范围外目录即使显式查询也是空：它已经不在可见库里
         let view = get_image_view(&conn, Some(r"C:\other"), "", &roots).unwrap();
@@ -717,7 +780,8 @@ mod tests {
         let conn = setup_test_db();
         insert_fixture(&conn);
 
-        let rows = get_images_by_ids(&conn, &["i1".into(), "i3".into(), "gone".into()], &[]).unwrap();
+        let rows =
+            get_images_by_ids(&conn, &["i1".into(), "i3".into(), "gone".into()], &[]).unwrap();
         let mut ids: Vec<&str> = rows.iter().map(|i| i.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, vec!["i1", "i3"]);
@@ -726,7 +790,10 @@ mod tests {
         // 扫描范围外（如移动到根外的落点）的记录按视图同一口径隐藏，面板据此裁组
         let roots = vec![r"C:\pics".to_string()];
         let rows = get_images_by_ids(&conn, &["i1".into(), "i4".into()], &roots).unwrap();
-        assert_eq!(rows.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec!["i1"]);
+        assert_eq!(
+            rows.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["i1"]
+        );
     }
 
     #[test]

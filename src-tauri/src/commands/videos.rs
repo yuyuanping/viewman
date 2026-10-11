@@ -35,7 +35,10 @@ pub(crate) fn unique_path(target: &Path) -> Result<PathBuf, String> {
     if !target.exists() {
         return Ok(target.to_path_buf());
     }
-    let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    let stem = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
     let ext = target.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
     for i in 2..1000 {
         let candidate = target.with_file_name(format!("{stem} ({i}).{ext}"));
@@ -54,7 +57,10 @@ pub(crate) fn validated_target_dir(target_dir: &str) -> Result<PathBuf, String> 
     }
     let dir = Path::new(target_dir);
     // 显式拒绝父目录跳转语义：目标目录应为明确目录，`..` 极易把文件移出扫描根且难以察觉
-    if dir.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if dir
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(format!("目标目录不合法（含 ..）：{}", target_dir));
     }
     if !dir.is_dir() {
@@ -104,7 +110,10 @@ pub async fn get_video_view(
 
 /// 打开文件并读取文件头：确认可读性，同时用魔数识别"图片伪装成视频"的假视频
 #[tauri::command]
-pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<VideoFileStatus, String> {
+pub fn check_video_file(
+    state: State<AppState>,
+    video_id: String,
+) -> Result<VideoFileStatus, String> {
     use std::io::ErrorKind;
     let path = {
         let conn = state.db.lock().map_err_str()?;
@@ -134,7 +143,10 @@ pub fn check_video_file(state: State<AppState>, video_id: String) -> Result<Vide
                     message: Some(format!("文件内容实为 {label} 图片，并非视频")),
                 });
             }
-            Ok(VideoFileStatus { status: "readable".into(), message: None })
+            Ok(VideoFileStatus {
+                status: "readable".into(),
+                message: None,
+            })
         }
         Err(e) if e.kind() == ErrorKind::PermissionDenied => Ok(VideoFileStatus {
             status: "unavailable".into(),
@@ -204,7 +216,11 @@ pub async fn delete_videos(
         }
     }
 
-    Ok(crate::models::DeletionReport { deleted, stale, locked })
+    Ok(crate::models::DeletionReport {
+        deleted,
+        stale,
+        locked,
+    })
 }
 
 /// 把"内容实为图片"的假视频转换成图片：按真实格式另存为 .jpg/.png 等新文件，
@@ -221,28 +237,38 @@ pub async fn convert_fake_images(
         for video_id in video_ids {
             let path = {
                 let conn = state.db.lock().map_err_str()?;
-                db::get_video_path(&conn, &video_id)
-                    .map_err_str()?
+                db::get_video_path(&conn, &video_id).map_err_str()?
             };
             let Some(path) = path else {
-                result.errors.push(format!("记录不存在，已跳过: {}", video_id));
+                result
+                    .errors
+                    .push(format!("记录不存在，已跳过: {}", video_id));
                 continue;
             };
 
             let p = Path::new(&path);
-            let Some((ext, _label)) = read_header(p).as_ref().and_then(|h| sniff_image_format(h)) else {
-                result.errors.push(format!("{} 当前内容不是图片，已跳过", p.display()));
+            let Some((ext, _label)) = read_header(p).as_ref().and_then(|h| sniff_image_format(h))
+            else {
+                result
+                    .errors
+                    .push(format!("{} 当前内容不是图片，已跳过", p.display()));
                 continue;
             };
 
             let target = unique_path(&p.with_extension(ext))?;
             if let Err(e) = std::fs::copy(p, &target) {
-                result.errors.push(format!("复制 {} 失败: {}", p.display(), e));
+                result
+                    .errors
+                    .push(format!("复制 {} 失败: {}", p.display(), e));
                 continue;
             }
             if let Err(e) = trash::delete(p) {
                 let _ = std::fs::remove_file(&target);
-                result.errors.push(format!("源文件移入回收站失败，已保留 {}: {}", p.display(), e));
+                result.errors.push(format!(
+                    "源文件移入回收站失败，已保留 {}: {}",
+                    p.display(),
+                    e
+                ));
                 continue;
             }
 
@@ -255,7 +281,9 @@ pub async fn convert_fake_images(
                 // 图片和回收站都已处理，仅删库失败：还原源文件，保持库记录与磁盘一致
                 let _ = std::fs::copy(&target, p);
                 let _ = std::fs::remove_file(&target);
-                result.errors.push(format!("删除库记录失败，已还原源文件: {}", e));
+                result
+                    .errors
+                    .push(format!("删除库记录失败，已还原源文件: {}", e));
                 continue;
             }
 
@@ -374,7 +402,11 @@ pub async fn convert_short_videos(
                 }
                 if let Err(e) = trash::delete(p) {
                     let _ = std::fs::remove_file(&target);
-                    errors.push(format!("源文件移入回收站失败，已保留 {}: {}", p.display(), e));
+                    errors.push(format!(
+                        "源文件移入回收站失败，已保留 {}: {}",
+                        p.display(),
+                        e
+                    ));
                     continue;
                 }
                 converted.push((id, scanner::build_image(&target)));
@@ -418,7 +450,10 @@ pub async fn convert_short_videos(
     .await
     .map_err_str()?;
 
-    let mut result = ConversionResult { converted: 0, errors };
+    let mut result = ConversionResult {
+        converted: 0,
+        errors,
+    };
     {
         let conn = state.db.lock().map_err_str()?;
         for (id, image) in &converted {
@@ -444,7 +479,9 @@ pub(crate) fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
     }
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices || e.raw_os_error() == Some(17) => {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::CrossesDevices || e.raw_os_error() == Some(17) =>
+        {
             // 跨盘：先复制到同目录唯一 tmp（create_new 防并发覆盖），再原子 rename 到最终名
             let tmp = dst.with_extension(format!(
                 "{}.viewman-part",
@@ -452,7 +489,8 @@ pub(crate) fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
             ));
             // tmp 已存在说明上次中断残留，先清掉再 create_new
             let _ = std::fs::remove_file(&tmp);
-            let mut reader = std::fs::File::open(src).map_err(|e| format!("跨盘复制失败（读源）: {}", e))?;
+            let mut reader =
+                std::fs::File::open(src).map_err(|e| format!("跨盘复制失败（读源）: {}", e))?;
             let mut writer = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -518,8 +556,7 @@ pub async fn move_video(
         let mut candidate = dir.join(filename_os);
         let mut idx = 1;
         while candidate.exists()
-            || db::is_path_taken(&conn, &candidate.to_string_lossy(), &video_id)
-                .map_err_str()?
+            || db::is_path_taken(&conn, &candidate.to_string_lossy(), &video_id).map_err_str()?
         {
             idx += 1;
             if idx > 999 {
@@ -535,11 +572,10 @@ pub async fn move_video(
     };
 
     let (src, dst) = (old_path.clone(), new_path.clone());
-    let move_result = tauri::async_runtime::spawn_blocking(move || {
-        move_file(Path::new(&src), Path::new(&dst))
-    })
-    .await
-    .map_err_str()?;
+    let move_result =
+        tauri::async_runtime::spawn_blocking(move || move_file(Path::new(&src), Path::new(&dst)))
+            .await
+            .map_err_str()?;
     move_result?;
 
     if let Err(e) = state
@@ -601,12 +637,20 @@ pub async fn find_hevc_videos(
             }
             let _ = task_app.emit(
                 "hevc-detect-progress",
-                HevcDetectProgress { processed: index + 1, total, done: false },
+                HevcDetectProgress {
+                    processed: index + 1,
+                    total,
+                    done: false,
+                },
             );
         }
         let _ = task_app.emit(
             "hevc-detect-progress",
-            HevcDetectProgress { processed: total, total, done: true },
+            HevcDetectProgress {
+                processed: total,
+                total,
+                done: true,
+            },
         );
     })
     .await
@@ -690,7 +734,11 @@ pub async fn convert_hevc_videos(
             }
             if let Err(e) = trash::delete(path) {
                 let _ = std::fs::remove_file(&tmp);
-                errors.push(format!("{} 移入回收站失败（可能被占用），已中止: {}", p.display(), e));
+                errors.push(format!(
+                    "{} 移入回收站失败（可能被占用），已中止: {}",
+                    p.display(),
+                    e
+                ));
                 emit(converted, errors.len());
                 continue;
             }
@@ -711,13 +759,16 @@ pub async fn convert_hevc_videos(
                 let _ = std::fs::remove_file(&tmp);
                 errors.push(format!(
                     "{} 已进回收站但转码文件写回失败（{}），请从回收站还原",
-                    p.display(), e
+                    p.display(),
+                    e
                 ));
                 emit(converted, errors.len());
                 continue;
             }
             let _ = std::fs::remove_file(transcoded_dir.join(format!("{}.mp4", id)));
-            let size = std::fs::metadata(&target).map(|m| m.len() as i64).unwrap_or(0);
+            let size = std::fs::metadata(&target)
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
             done.push((id.clone(), target.to_string_lossy().to_string(), size));
             converted += 1;
             emit(converted, errors.len());
@@ -736,9 +787,18 @@ pub async fn convert_hevc_videos(
     }
     let _ = app.emit(
         "hevc-progress",
-        HevcProgress { processed: total, total, done: true, converted: done.len(), failed: errors.len() },
+        HevcProgress {
+            processed: total,
+            total,
+            done: true,
+            converted: done.len(),
+            failed: errors.len(),
+        },
     );
-    Ok(ConversionResult { converted: done.len(), errors })
+    Ok(ConversionResult {
+        converted: done.len(),
+        errors,
+    })
 }
 
 /// 给内置播放器提供可播放路径：WebView2 没有 HEVC 解码器，遇到 hevc 源
@@ -756,9 +816,10 @@ pub async fn get_playable_path(
     };
 
     let probe_path = path.clone();
-    let codec = tauri::async_runtime::spawn_blocking(move || scanner::video_codec_name(&probe_path))
-        .await
-        .map_err_str()?;
+    let codec =
+        tauri::async_runtime::spawn_blocking(move || scanner::video_codec_name(&probe_path))
+            .await
+            .map_err_str()?;
     if codec.as_deref() != Some("hevc") {
         return Ok(path);
     }
@@ -804,7 +865,10 @@ mod tests {
 
     #[test]
     fn test_sniff_image_format() {
-        assert_eq!(sniff_image_format(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0]), Some(("jpg", "JPEG")));
+        assert_eq!(
+            sniff_image_format(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0]),
+            Some(("jpg", "JPEG"))
+        );
         assert_eq!(
             sniff_image_format(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
             Some(("png", "PNG"))

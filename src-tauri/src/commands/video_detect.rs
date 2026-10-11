@@ -5,7 +5,9 @@ use tauri::{Emitter, Manager, State};
 use crate::db;
 use crate::scanner;
 
-use super::{flush, flush_with_retry, read_cache, write_cache, AppState, MapErrStr, VIDEO_DUPLICATE_CACHE};
+use super::{
+    flush, flush_with_retry, read_cache, write_cache, AppState, MapErrStr, VIDEO_DUPLICATE_CACHE,
+};
 
 /// 单个采样条目：路径、待比对 id、三处采样帧的 (phash, dhash)。
 type FrameEntry = (String, String, [(u64, u64); 3]);
@@ -52,11 +54,15 @@ fn cluster_by(len: usize, same: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>
             }
         }
     }
-    let mut buckets: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    let mut buckets: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
     for i in 0..len {
         buckets.entry(find(&mut parent, i)).or_default().push(i);
     }
-    buckets.into_values().filter(|bucket| bucket.len() > 1).collect()
+    buckets
+        .into_values()
+        .filter(|bucket| bucket.len() > 1)
+        .collect()
 }
 
 /// 以"最早添加的那条"为保留原件，逐个拿三处采样点核对：过线的进组，
@@ -94,7 +100,14 @@ fn ensure_anchors(
 ) {
     const EMIT_EVERY: usize = 128;
     let total = indexes.len();
-    let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: 0, total, stage: "anchor" });
+    let _ = app.emit(
+        "video-duplicate-progress",
+        DuplicateProgress {
+            processed: 0,
+            total,
+            stage: "anchor",
+        },
+    );
     let mut fresh: Vec<(String, i64, i64, String)> = Vec::with_capacity(EMIT_EVERY);
     for (processed, &index) in indexes.iter().enumerate() {
         let (row, mtime) = &rows[index];
@@ -122,7 +135,14 @@ fn ensure_anchors(
         let done = processed + 1;
         if done % EMIT_EVERY == 0 || done == total {
             flush(app, &mut fresh, db::save_video_anchors);
-            let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: done, total, stage: "anchor" });
+            let _ = app.emit(
+                "video-duplicate-progress",
+                DuplicateProgress {
+                    processed: done,
+                    total,
+                    stage: "anchor",
+                },
+            );
         }
     }
     flush_with_retry(app, &mut fresh, db::save_video_anchors);
@@ -140,7 +160,14 @@ fn ensure_frames(
 ) {
     const EMIT_EVERY: usize = 16;
     let total = indexes.len();
-    let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: 0, total, stage: "verify" });
+    let _ = app.emit(
+        "video-duplicate-progress",
+        DuplicateProgress {
+            processed: 0,
+            total,
+            stage: "verify",
+        },
+    );
     let mut fresh: Vec<(String, i64, i64, i64, i64, String)> = Vec::with_capacity(EMIT_EVERY);
     for (processed, &index) in indexes.iter().enumerate() {
         let (row, mtime) = &rows[index];
@@ -161,7 +188,14 @@ fn ensure_frames(
         let done = processed + 1;
         if done % EMIT_EVERY == 0 || done == total {
             flush(app, &mut fresh, db::save_video_frames);
-            let _ = app.emit("video-duplicate-progress", DuplicateProgress { processed: done, total, stage: "verify" });
+            let _ = app.emit(
+                "video-duplicate-progress",
+                DuplicateProgress {
+                    processed: done,
+                    total,
+                    stage: "verify",
+                },
+            );
         }
     }
     flush_with_retry(app, &mut fresh, db::save_video_frames);
@@ -216,7 +250,13 @@ pub async fn find_duplicate_videos(
                 }
             }
         }
-        ensure_anchors(&app, &rows, &need_anchor, &thumb_dir, anchors.as_mut_slice());
+        ensure_anchors(
+            &app,
+            &rows,
+            &need_anchor,
+            &thumb_dir,
+            anchors.as_mut_slice(),
+        );
 
         let bucketed: Vec<usize> = (0..rows.len()).filter(|&i| anchors[i].is_some()).collect();
         let bucket_anchors = |slot: usize, other: usize| {
@@ -241,7 +281,11 @@ pub async fn find_duplicate_videos(
             .filter_map(|&i| {
                 let anchor = anchors[i]?;
                 let [mid, tail] = frames[i]?;
-                Some((rows[i].0.id.clone(), rows[i].0.created_at.clone(), [anchor, mid, tail]))
+                Some((
+                    rows[i].0.id.clone(),
+                    rows[i].0.created_at.clone(),
+                    [anchor, mid, tail],
+                ))
             })
             .collect();
         let groups = group_by_frames(&judged);
@@ -290,9 +334,18 @@ mod tests {
 
     #[test]
     fn test_frames_match_needs_both_hashes_close() {
-        assert!(frames_match((0, 0), (flip(0, DUP_FRAME_DIST), flip(0, DUP_FRAME_DIST))));
-        assert!(!frames_match((0, 0), (flip(0, DUP_FRAME_DIST + 1), 0)), "pHash 超线就不算同一画面");
-        assert!(!frames_match((0, 0), (0, flip(0, DUP_FRAME_DIST + 1))), "dHash 超线就不算同一画面");
+        assert!(frames_match(
+            (0, 0),
+            (flip(0, DUP_FRAME_DIST), flip(0, DUP_FRAME_DIST))
+        ));
+        assert!(
+            !frames_match((0, 0), (flip(0, DUP_FRAME_DIST + 1), 0)),
+            "pHash 超线就不算同一画面"
+        );
+        assert!(
+            !frames_match((0, 0), (0, flip(0, DUP_FRAME_DIST + 1))),
+            "dHash 超线就不算同一画面"
+        );
     }
 
     /// 锚点是从缩略图（480px JPEG）派生的，而复核帧直接取自源文件：
@@ -320,17 +373,35 @@ mod tests {
         };
         let pattern = "testsrc=size=640x480:rate=25:duration=6";
         let original = render("orig.mp4", pattern, &["-b:v", "2M"]);
-        let reencoded = render("again.mp4", pattern, &["-vf", "scale=320:240", "-b:v", "250k"]);
-        let other = render("other.mp4", "testsrc2=size=640x480:rate=25:duration=6", &["-b:v", "2M"]);
+        let reencoded = render(
+            "again.mp4",
+            pattern,
+            &["-vf", "scale=320:240", "-b:v", "250k"],
+        );
+        let other = render(
+            "other.mp4",
+            "testsrc2=size=640x480:rate=25:duration=6",
+            &["-b:v", "2M"],
+        );
 
         let anchor = |video: &str, name: &str| {
             let thumb = dir.join(name);
             scanner::extract_thumbnail(video, &thumb, Some(6.0)).unwrap();
             scanner::image_frame_hashes(&thumb.to_string_lossy()).expect("缩略图该能取出锚点指纹")
         };
-        let (a, b, c) = (anchor(&original, "a.jpg"), anchor(&reencoded, "b.jpg"), anchor(&other, "c.jpg"));
-        assert!(frames_match(a, b), "重压制过的同一部片子，锚点指纹距离超出 {DUP_FRAME_DIST} 就会漏判");
-        assert!(!frames_match(a, c), "另一部片子也对得上的话，候选桶就等于是没判据");
+        let (a, b, c) = (
+            anchor(&original, "a.jpg"),
+            anchor(&reencoded, "b.jpg"),
+            anchor(&other, "c.jpg"),
+        );
+        assert!(
+            frames_match(a, b),
+            "重压制过的同一部片子，锚点指纹距离超出 {DUP_FRAME_DIST} 就会漏判"
+        );
+        assert!(
+            !frames_match(a, c),
+            "另一部片子也对得上的话，候选桶就等于是没判据"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -341,11 +412,21 @@ mod tests {
         let mid_off = [(0, 0), (flip(0, 20), 0), (0, 0)];
         let entries: Vec<FrameEntry> = vec![
             ("v1".into(), "1".into(), same),
-            ("v2".into(), "2".into(), [(flip(0, 4), flip(0, 4)), same[1], same[2]]),
+            (
+                "v2".into(),
+                "2".into(),
+                [(flip(0, 4), flip(0, 4)), same[1], same[2]],
+            ),
             ("v3".into(), "3".into(), mid_off),
             ("v4".into(), "4".into(), mid_off),
         ];
-        assert_eq!(group_by_frames(&entries), vec![vec!["v1".to_string(), "v2".to_string()], vec!["v3".to_string(), "v4".to_string()]]);
+        assert_eq!(
+            group_by_frames(&entries),
+            vec![
+                vec!["v1".to_string(), "v2".to_string()],
+                vec!["v3".to_string(), "v4".to_string()]
+            ]
+        );
     }
 
     #[test]
@@ -355,7 +436,10 @@ mod tests {
             ("early".into(), "2020".into(), [(0, 0); 3]),
         ];
         // 第一个是删除时保留的那条，必须是最早添加的
-        assert_eq!(group_by_frames(&entries), vec![vec!["early".to_string(), "late".to_string()]]);
+        assert_eq!(
+            group_by_frames(&entries),
+            vec![vec!["early".to_string(), "late".to_string()]]
+        );
     }
 
     /// 候选桶是并查集圈出来的，允许链式相连；真正定组要逐条和保留原件比
@@ -367,11 +451,23 @@ mod tests {
             ("b".into(), "2".into(), tail(4)),
             ("c".into(), "3".into(), tail(8)),
         ];
-        assert!(frames_match(entries[0].2[2], entries[1].2[2]), "a 和 b 该对得上");
-        assert!(frames_match(entries[1].2[2], entries[2].2[2]), "b 和 c 该对得上");
-        assert!(!frames_match(entries[0].2[2], entries[2].2[2]), "但 a 和 c 对不上");
+        assert!(
+            frames_match(entries[0].2[2], entries[1].2[2]),
+            "a 和 b 该对得上"
+        );
+        assert!(
+            frames_match(entries[1].2[2], entries[2].2[2]),
+            "b 和 c 该对得上"
+        );
+        assert!(
+            !frames_match(entries[0].2[2], entries[2].2[2]),
+            "但 a 和 c 对不上"
+        );
         // c 只跟中间的 b 像，跟保留的 a 不像 → 不能靠 b 蹭进组
-        assert_eq!(group_by_frames(&entries), vec![vec!["a".to_string(), "b".to_string()]]);
+        assert_eq!(
+            group_by_frames(&entries),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
     }
 
     /// 候选桶按锚点的邻近关系并组：落单的不开桶，链式的允许并进来
@@ -381,6 +477,10 @@ mod tests {
         let clusters = cluster_by(sigs.len(), |i, j| {
             scanner::hamming_distance(sigs[i], sigs[j]) <= 3
         });
-        assert_eq!(clusters, vec![vec![0, 1, 2]], "前三条并成一桶，第四条落单不成组");
+        assert_eq!(
+            clusters,
+            vec![vec![0, 1, 2]],
+            "前三条并成一桶，第四条落单不成组"
+        );
     }
 }

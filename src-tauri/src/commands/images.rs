@@ -12,7 +12,9 @@ use super::scan::{
     capped_walk_warnings, dir_prefix_lower, plan_stale_ids, ScanProgress, ScanSummary,
 };
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
-use super::thumbnails::{cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbEntry, ThumbJob};
+use super::thumbnails::{
+    cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbEntry, ThumbJob,
+};
 use super::videos::{move_file, same_target_dir, validated_target_dir};
 use super::{clear_cancel, is_cancelled, undeleted_targets, AppState, MapErrStr};
 
@@ -78,7 +80,10 @@ pub async fn get_missing_image_thumbnail_ids(app: tauri::AppHandle) -> Result<Ve
 /// 按 id 批量取图：检测面板元数据与"id 还活着吗"的收敛判定。
 /// 按扫描根过滤口径：移出根外的落点虽然记录还在，面板也当它已退库
 #[tauri::command]
-pub async fn get_images_by_ids(app: tauri::AppHandle, ids: Vec<String>) -> Result<Vec<Image>, String> {
+pub async fn get_images_by_ids(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+) -> Result<Vec<Image>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err_str()?;
@@ -157,7 +162,13 @@ pub async fn scan_image_directory(
 
             let _ = task_app.emit(
                 "image-scan-progress",
-                ScanProgress { processed: 0, total: new_files.len(), done: false, warnings: vec![], summary: None },
+                ScanProgress {
+                    processed: 0,
+                    total: new_files.len(),
+                    done: false,
+                    warnings: vec![],
+                    summary: None,
+                },
             );
 
             let (mut images, probe_warnings) = build_images_parallel(&task_app, &new_files);
@@ -179,8 +190,20 @@ pub async fn scan_image_directory(
                     }
                 }
             }
-            let added = images.iter().filter(|i| !by_path.contains_key(&i.path.to_lowercase())).count();
-            Ok((images, stale_ids, warnings, ScanSummary { added, removed: 0, refreshed }))
+            let added = images
+                .iter()
+                .filter(|i| !by_path.contains_key(&i.path.to_lowercase()))
+                .count();
+            Ok((
+                images,
+                stale_ids,
+                warnings,
+                ScanSummary {
+                    added,
+                    removed: 0,
+                    refreshed,
+                },
+            ))
         })
         .await
         .map_err_str()??;
@@ -197,10 +220,23 @@ pub async fn scan_image_directory(
 
     let _ = app.emit(
         "image-scan-progress",
-        ScanProgress { processed: images.len(), total: images.len(), done: true, warnings: warnings.clone(), summary: Some(ScanSummary { added: summary.added, removed: stale_ids.len(), refreshed: summary.refreshed }) },
+        ScanProgress {
+            processed: images.len(),
+            total: images.len(),
+            done: true,
+            warnings: warnings.clone(),
+            summary: Some(ScanSummary {
+                added: summary.added,
+                removed: stale_ids.len(),
+                refreshed: summary.refreshed,
+            }),
+        },
     );
 
-    Ok(ScanOutcome { items: images, removed_ids: stale_ids })
+    Ok(ScanOutcome {
+        items: images,
+        removed_ids: stale_ids,
+    })
 }
 
 /// 要不要重新探测：库里没有这条、探测过但没拿到尺寸、或文件大小变了。
@@ -214,10 +250,7 @@ fn image_needs_probe(old: Option<&Image>, size: Option<i64>) -> bool {
     }
 }
 
-fn build_images_parallel(
-    app: &tauri::AppHandle,
-    files: &[PathBuf],
-) -> (Vec<Image>, Vec<String>) {
+fn build_images_parallel(app: &tauri::AppHandle, files: &[PathBuf]) -> (Vec<Image>, Vec<String>) {
     if files.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -243,7 +276,13 @@ fn build_images_parallel(
         }
         let _ = app.emit(
             "image-scan-progress",
-            ScanProgress { processed: done, total, done: false, warnings: vec![], summary: None },
+            ScanProgress {
+                processed: done,
+                total,
+                done: false,
+                warnings: vec![],
+                summary: None,
+            },
         );
     };
     let thread_count = std::thread::available_parallelism()
@@ -304,7 +343,10 @@ fn build_images_parallel(
     }
     let missed = write_failures.load(Ordering::Relaxed);
     if missed > 0 {
-        warnings.push(format!("{} 张图片记录写入数据库失败，下次扫描会重试", missed));
+        warnings.push(format!(
+            "{} 张图片记录写入数据库失败，下次扫描会重试",
+            missed
+        ));
     }
     (images, warnings)
 }
@@ -394,7 +436,12 @@ pub async fn fix_mismatched_extensions(
     };
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let mut report = ExtensionFixReport { renamed: 0, already_matched: 0, unrecognized: 0, failed: 0 };
+        let mut report = ExtensionFixReport {
+            renamed: 0,
+            already_matched: 0,
+            unrecognized: 0,
+            failed: 0,
+        };
         // 文件探测与改名全程不持数据库锁：锁只圈住最后的路径写库
         let mut renamed: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // (id, 新路径, 原路径)
         for (id, path) in rows {
@@ -478,7 +525,8 @@ pub async fn delete_images(
 ) -> Result<crate::models::DeletionReport, String> {
     let (targets, mut deleted): (Vec<(String, String)>, Vec<String>) = {
         let conn = state.db.lock().map_err_str()?;
-        split_known_targets(&conn, &image_ids).map_err(|e| format!("读取库记录失败（文件未动）：{}", e))?
+        split_known_targets(&conn, &image_ids)
+            .map_err(|e| format!("读取库记录失败（文件未动）：{}", e))?
     };
 
     // 记录在但磁盘路径已无文件：库记录要清，磁盘无事可做，单独报 stale
@@ -514,7 +562,11 @@ pub async fn delete_images(
         }
     }
 
-    Ok(crate::models::DeletionReport { deleted, stale, locked })
+    Ok(crate::models::DeletionReport {
+        deleted,
+        stale,
+        locked,
+    })
 }
 
 /// 把图片文件移动到目标文件夹并同步库记录路径；目标重名时自动加 " (2)" 后缀，
@@ -560,11 +612,10 @@ pub async fn move_image(
     };
 
     let (src, dst) = (old_path.clone(), new_path.clone());
-    let move_result = tauri::async_runtime::spawn_blocking(move || {
-        move_file(Path::new(&src), Path::new(&dst))
-    })
-    .await
-    .map_err_str()?;
+    let move_result =
+        tauri::async_runtime::spawn_blocking(move || move_file(Path::new(&src), Path::new(&dst)))
+            .await
+            .map_err_str()?;
     move_result?;
 
     if let Err(e) = state
@@ -593,25 +644,39 @@ pub async fn generate_image_thumbnails(
         db::get_image_thumbnail_entries(&conn)
             .map_err_str()?
             .into_iter()
-            .map(|(id, source, thumbnail_path)| ThumbEntry { id, source, duration: None, thumbnail_path })
+            .map(|(id, source, thumbnail_path)| ThumbEntry {
+                id,
+                source,
+                duration: None,
+                thumbnail_path,
+            })
             .collect()
     };
     let jobs: Vec<ThumbJob> = candidates
         .into_iter()
         .filter(|e| image_ids.iter().any(|id| id == &e.id))
         .filter(|e| !cached_thumbnail_usable(&e.thumbnail_path))
-        .map(|e| ThumbJob { id: e.id, source: e.source, duration: None })
+        .map(|e| ThumbJob {
+            id: e.id,
+            source: e.source,
+            duration: None,
+        })
         .collect();
 
-    run_thumbnail_jobs(&app, jobs, "image-thumbnail-progress", db::set_image_thumbnail).await
+    run_thumbnail_jobs(
+        &app,
+        jobs,
+        "image-thumbnail-progress",
+        db::set_image_thumbnail,
+    )
+    .await
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::db::{sample_image, setup_test_db};
+    use std::fs;
 
     #[test]
     fn test_deleted_image_frees_its_path() {
@@ -639,7 +704,10 @@ mod tests {
         db::insert_image(&conn, &sample_image("i1", "C:/pics/a.png")).unwrap();
         let ids = ["i1".to_string(), "stale-id".to_string()];
         let (targets, gone) = split_known_targets(&conn, &ids).unwrap();
-        assert_eq!(targets, vec![("i1".to_string(), "C:/pics/a.png".to_string())]);
+        assert_eq!(
+            targets,
+            vec![("i1".to_string(), "C:/pics/a.png".to_string())]
+        );
         assert_eq!(gone, vec!["stale-id".to_string()]);
     }
 

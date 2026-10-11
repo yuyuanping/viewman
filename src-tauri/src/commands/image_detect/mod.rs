@@ -69,12 +69,12 @@ pub async fn clear_detection_cache(app: tauri::AppHandle, which: String) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use crate::scanner;
-    use crate::db;
-    use crate::commands::workers;
     use super::detect_util::UnionFind;
+    use super::*;
+    use crate::commands::workers;
+    use crate::db;
+    use crate::scanner;
+    use std::collections::HashMap;
     use std::fs;
 
     fn grid(value: u8) -> Vec<u8> {
@@ -82,7 +82,10 @@ mod tests {
     }
 
     fn candidate(index: usize, id: &str, created_at: &str, shift: i16) -> Candidate {
-        let pixels = grid(100).iter().map(|&v| (v as i16 + shift) as u8).collect();
+        let pixels = grid(100)
+            .iter()
+            .map(|&v| (v as i16 + shift) as u8)
+            .collect();
         Candidate {
             index,
             id: id.to_string(),
@@ -171,7 +174,11 @@ mod tests {
         // 首张是入库最早的那张，其余按入库时间依次跟它核对
         assert_eq!(
             group_bucket(&rows, pool),
-            vec![vec!["early".to_string(), "middle".to_string(), "late".to_string()]]
+            vec![vec![
+                "early".to_string(),
+                "middle".to_string(),
+                "late".to_string()
+            ]]
         );
     }
 
@@ -184,7 +191,10 @@ mod tests {
             candidate(1, "b", "2026-01-02", 2),
             candidate(2, "c", "2026-01-03", 4),
         ];
-        assert_eq!(group_bucket(&rows, pool), vec![vec!["a".to_string(), "b".to_string()]]);
+        assert_eq!(
+            group_bucket(&rows, pool),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
     }
 
     #[test]
@@ -220,7 +230,15 @@ mod tests {
         let render = |name: &str, extra: &[&str]| {
             let out = dir.join(name);
             let ok = Command::new("ffmpeg")
-                .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=1", "-frames:v", "1"])
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x240:rate=10:duration=1",
+                    "-frames:v",
+                    "1",
+                ])
                 .args(extra)
                 .arg(&out)
                 .output()
@@ -238,7 +256,15 @@ mod tests {
         let other = {
             let out = dir.join("other.png");
             assert!(Command::new("ffmpeg")
-                .args(["-y", "-f", "lavfi", "-i", "rgbtestsrc=size=320x240:rate=10:duration=1", "-frames:v", "1"])
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "rgbtestsrc=size=320x240:rate=10:duration=1",
+                    "-frames:v",
+                    "1"
+                ])
                 .arg(&out)
                 .output()
                 .unwrap()
@@ -273,7 +299,15 @@ mod tests {
         let render = |name: &str, size: &str, quality: &[&str]| {
             let out = dir.join(name);
             let ok = Command::new("ffmpeg")
-                .args(["-y", "-f", "lavfi", "-i", "testsrc2=size=480x360:rate=10:duration=1", "-frames:v", "1"])
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=480x360:rate=10:duration=1",
+                    "-frames:v",
+                    "1",
+                ])
                 .args(["-vf", &format!("scale={size}:flags=bicubic")])
                 .args(quality)
                 .arg(&out)
@@ -292,7 +326,8 @@ mod tests {
         let upscaled = render("big.jpg", "3840:2700", &["-q:v", "3"]);
 
         // 门槛放宽量的是哈希抖动：极小缩略图的 dHash 差距要仍在 DUP_GATE 内
-        let (_, d_tiny) = scanner::image_hashes(&render("tiny.jpg", "30:-2", &["-q:v", "3"])).unwrap();
+        let (_, d_tiny) =
+            scanner::image_hashes(&render("tiny.jpg", "30:-2", &["-q:v", "3"])).unwrap();
         let (_, d_base) = scanner::image_hashes(&original).unwrap();
         assert!(
             (d_tiny ^ d_base).count_ones() <= DUP_GATE,
@@ -300,9 +335,36 @@ mod tests {
         );
 
         let rows = vec![
-            db::ImageSig { id: "a".into(), path: original.clone(), created_at: String::new(), modified_at: None, phash: None, dhash: None, sig_pixels: None, sig_modified_at: None },
-            db::ImageSig { id: "b".into(), path: thumbnail.clone(), created_at: String::new(), modified_at: None, phash: None, dhash: None, sig_pixels: None, sig_modified_at: None },
-            db::ImageSig { id: "c".into(), path: upscaled.clone(), created_at: String::new(), modified_at: None, phash: None, dhash: None, sig_pixels: None, sig_modified_at: None },
+            db::ImageSig {
+                id: "a".into(),
+                path: original.clone(),
+                created_at: String::new(),
+                modified_at: None,
+                phash: None,
+                dhash: None,
+                sig_pixels: None,
+                sig_modified_at: None,
+            },
+            db::ImageSig {
+                id: "b".into(),
+                path: thumbnail.clone(),
+                created_at: String::new(),
+                modified_at: None,
+                phash: None,
+                dhash: None,
+                sig_pixels: None,
+                sig_modified_at: None,
+            },
+            db::ImageSig {
+                id: "c".into(),
+                path: upscaled.clone(),
+                created_at: String::new(),
+                modified_at: None,
+                phash: None,
+                dhash: None,
+                sig_pixels: None,
+                sig_modified_at: None,
+            },
         ];
         let candidate = |index: usize, path: &str| Candidate {
             index,
@@ -346,9 +408,8 @@ mod tests {
         };
         assert!(close_against_with(&a, &b, &mut rescue));
         // 补救档也对不上（真不同的图：两边给不同网格）：还是判不同，放宽补救线不制造误判
-        let mut rescue_miss = |index: usize, n: usize| {
-            Some(vec![if index == 0 { 50u8 } else { 200u8 }; n * n])
-        };
+        let mut rescue_miss =
+            |index: usize, n: usize| Some(vec![if index == 0 { 50u8 } else { 200u8 }; n * n]);
         assert!(!close_against_with(&a, &b, &mut rescue_miss));
     }
 
@@ -374,7 +435,10 @@ mod tests {
         ];
         // 池是无序下标，出来必须按时间排、最早的当保留原件；大组排前面
         let groups = group_pools_by_time(&rows, vec![vec![0, 2, 1], vec![3, 4]]);
-        assert_eq!(groups[0], vec!["early".to_string(), "mid".to_string(), "late".to_string()]);
+        assert_eq!(
+            groups[0],
+            vec!["early".to_string(), "mid".to_string(), "late".to_string()]
+        );
         assert_eq!(groups[1], vec!["solo-a".to_string(), "solo-b".to_string()]);
     }
 
@@ -415,7 +479,9 @@ mod tests {
                     while i < total {
                         let (pi, di) = (reps[i].1, reps[i].2);
                         for j in 0..i {
-                            let dd = (pi ^ reps[j].1).count_ones().max((di ^ reps[j].2).count_ones());
+                            let dd = (pi ^ reps[j].1)
+                                .count_ones()
+                                .max((di ^ reps[j].2).count_ones());
                             if dd <= gate {
                                 local.push((i as u32, j as u32));
                             }
@@ -426,7 +492,10 @@ mod tests {
                 }));
             }
             // 子线程 panic 不带崩整单：失败分片按空计
-            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_default())
+                .collect()
         });
 
         let mut uf = UnionFind::new(total);
@@ -447,7 +516,10 @@ mod tests {
         // dHash 漂 30 位、pHash 只差 2：取大是 30（被否），求和 32（进清单）
         assert_eq!(template_distance(0b11, (1u64 << 30) - 1, 0, 0), 30 + 2);
         // 两路都远的真不同图，求和照样把它挡在外面
-        assert!(template_distance(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0, 0) > TEMPLATE_DISTANCE_MAX);
+        assert!(
+            template_distance(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0, 0)
+                > TEMPLATE_DISTANCE_MAX
+        );
     }
 
     /// 分组清单归一化（组内组间都排序），供新旧实现比对等价性

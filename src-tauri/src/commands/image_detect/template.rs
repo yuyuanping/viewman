@@ -8,8 +8,8 @@ use crate::commands::{flush, lock_ignoring_poison, workers};
 use crate::db;
 use crate::scanner;
 
-use super::{AppState, MapErrStr};
 use super::SigUpdate;
+use super::{AppState, MapErrStr};
 
 /// 模板匹配的一条命中：图片 id + 与模板的指纹距离
 /// （两枚感知哈希的距离**求和**，见 template_distance）
@@ -62,61 +62,80 @@ pub async fn find_images_like_template(
     // 与相似检测同一口径：只比扫描范围内的图，文件已不在磁盘上的不参与
     let mut rows: Vec<db::ImageSig> = {
         let conn = state.db.lock().map_err_str()?;
-        let roots = crate::commands::settings::load_roots(&conn, crate::commands::settings::IMAGE_SCAN_ROOTS_KEY);
+        let roots = crate::commands::settings::load_roots(
+            &conn,
+            crate::commands::settings::IMAGE_SCAN_ROOTS_KEY,
+        );
         db::get_image_sigs_scoped(&conn, &roots).map_err_str()?
     };
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<TemplateMatchResult, String> {
-        // 与相似检测同一口径：文件已不在磁盘上的不参与（逐文件 stat 挪进阻塞线程）
-        rows.retain(|row| Path::new(&row.path).exists());
-        let template_at = rows
-            .iter()
-            .position(|row| row.id == image_id)
-            .ok_or_else(|| "模板图已不在库里（可能刚被删除或移出扫描范围）。".to_string())?;
-        let mut pairs: Vec<Option<(u64, u64)>> = rows.iter().map(|row| row.cached_sigs()).collect();
-        // 模板没缓存指纹就先给自己算一份；缺 dhash 的旧行 cached_sigs 会整体当没有
-        if pairs[template_at].is_none() {
-            let (phash, dhash) = scanner::image_hashes(&rows[template_at].path)
-                .ok_or_else(|| "模板图解不出画面，没法当模板。".to_string())?;
-            pairs[template_at] = Some((phash, dhash));
-            let row = &rows[template_at];
-            if let Ok(conn) = app.state::<AppState>().db.lock() {
-                let _ = db::save_image_sigs(
-                    &conn,
-                    &[(row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone())],
-                );
-            }
-        }
-        let (t_phash, t_dhash) = pairs[template_at].unwrap();
-
-        // 缺指纹的现补：复用重复检测那套按线程分片的补算（进度推到 template-progress 频道），
-        // 补出来的直接拿进比对，落库留给下一趟当缓存
-        let need: Vec<usize> = (0..rows.len())
-            .filter(|&i| i != template_at && pairs[i].is_none())
-            .collect();
-        let _ = app.emit("template-progress", TemplateProgress { processed: 0, total: need.len() });
-        let (fresh, skipped) = ensure_sigs_for_template(&app, &rows, &need);
-        let mut fresh_by_id: HashMap<String, (u64, u64)> =
-            fresh.into_iter().map(|(id, p, d)| (id, (p, d))).collect();
-
-        let mut matches: Vec<TemplateMatch> = Vec::new();
-        for (index, row) in rows.iter().enumerate() {
-            if index == template_at {
-                continue;
-            }
-            let sigs = fresh_by_id.remove(&row.id).or_else(|| pairs[index]);
-            // 解不出画面的进不了比对：返回值里带上张数，别让"没匹配"被当成定论
-            if let Some((phash, dhash)) = sigs {
-                let dd = template_distance(phash, dhash, t_phash, t_dhash);
-                if dd <= TEMPLATE_DISTANCE_MAX {
-                    matches.push(TemplateMatch { id: row.id.clone(), distance: dd });
+    let result =
+        tauri::async_runtime::spawn_blocking(move || -> Result<TemplateMatchResult, String> {
+            // 与相似检测同一口径：文件已不在磁盘上的不参与（逐文件 stat 挪进阻塞线程）
+            rows.retain(|row| Path::new(&row.path).exists());
+            let template_at = rows
+                .iter()
+                .position(|row| row.id == image_id)
+                .ok_or_else(|| "模板图已不在库里（可能刚被删除或移出扫描范围）。".to_string())?;
+            let mut pairs: Vec<Option<(u64, u64)>> =
+                rows.iter().map(|row| row.cached_sigs()).collect();
+            // 模板没缓存指纹就先给自己算一份；缺 dhash 的旧行 cached_sigs 会整体当没有
+            if pairs[template_at].is_none() {
+                let (phash, dhash) = scanner::image_hashes(&rows[template_at].path)
+                    .ok_or_else(|| "模板图解不出画面，没法当模板。".to_string())?;
+                pairs[template_at] = Some((phash, dhash));
+                let row = &rows[template_at];
+                if let Ok(conn) = app.state::<AppState>().db.lock() {
+                    let _ = db::save_image_sigs(
+                        &conn,
+                        &[(
+                            row.id.clone(),
+                            phash as i64,
+                            dhash as i64,
+                            row.modified_at.clone(),
+                        )],
+                    );
                 }
             }
-        }
-        matches.sort_by(|a, b| a.distance.cmp(&b.distance).then_with(|| a.id.cmp(&b.id)));
-        Ok(TemplateMatchResult { matches, skipped })
-    })
-    .await
-    .map_err_str()??;
+            let (t_phash, t_dhash) = pairs[template_at].unwrap();
+
+            // 缺指纹的现补：复用重复检测那套按线程分片的补算（进度推到 template-progress 频道），
+            // 补出来的直接拿进比对，落库留给下一趟当缓存
+            let need: Vec<usize> = (0..rows.len())
+                .filter(|&i| i != template_at && pairs[i].is_none())
+                .collect();
+            let _ = app.emit(
+                "template-progress",
+                TemplateProgress {
+                    processed: 0,
+                    total: need.len(),
+                },
+            );
+            let (fresh, skipped) = ensure_sigs_for_template(&app, &rows, &need);
+            let mut fresh_by_id: HashMap<String, (u64, u64)> =
+                fresh.into_iter().map(|(id, p, d)| (id, (p, d))).collect();
+
+            let mut matches: Vec<TemplateMatch> = Vec::new();
+            for (index, row) in rows.iter().enumerate() {
+                if index == template_at {
+                    continue;
+                }
+                let sigs = fresh_by_id.remove(&row.id).or_else(|| pairs[index]);
+                // 解不出画面的进不了比对：返回值里带上张数，别让"没匹配"被当成定论
+                if let Some((phash, dhash)) = sigs {
+                    let dd = template_distance(phash, dhash, t_phash, t_dhash);
+                    if dd <= TEMPLATE_DISTANCE_MAX {
+                        matches.push(TemplateMatch {
+                            id: row.id.clone(),
+                            distance: dd,
+                        });
+                    }
+                }
+            }
+            matches.sort_by(|a, b| a.distance.cmp(&b.distance).then_with(|| a.id.cmp(&b.id)));
+            Ok(TemplateMatchResult { matches, skipped })
+        })
+        .await
+        .map_err_str()??;
 
     Ok(result)
 }
@@ -148,7 +167,12 @@ fn ensure_sigs_for_template(
                     let row = &rows[index];
                     if let Some((phash, dhash)) = scanner::image_hashes(&row.path) {
                         lock_ignoring_poison(fresh).push((row.id.clone(), phash, dhash));
-                        batch.push((row.id.clone(), phash as i64, dhash as i64, row.modified_at.clone()));
+                        batch.push((
+                            row.id.clone(),
+                            phash as i64,
+                            dhash as i64,
+                            row.modified_at.clone(),
+                        ));
                     } else {
                         failed.fetch_add(1, Ordering::Relaxed);
                     }
@@ -157,7 +181,8 @@ fn ensure_sigs_for_template(
                     }
                     let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if processed % EMIT_EVERY == 0 || processed == total {
-                        let _ = app.emit("template-progress", TemplateProgress { processed, total });
+                        let _ =
+                            app.emit("template-progress", TemplateProgress { processed, total });
                     }
                 }
                 if !batch.is_empty() {

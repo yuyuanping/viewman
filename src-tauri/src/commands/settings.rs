@@ -79,7 +79,11 @@ pub fn save_move_targets(
 
 /// 记下扫描根（大小写与结尾分隔符不敏感去重）。
 /// 只要目录能正常读取就立刻记，别等整轮扫描结束——扫到一半被打断，下次启动才能接着扫。
-pub(crate) fn remember_root(conn: &rusqlite::Connection, key: &str, dir: &str) -> Result<(), String> {
+pub(crate) fn remember_root(
+    conn: &rusqlite::Connection,
+    key: &str,
+    dir: &str,
+) -> Result<(), String> {
     let raw = db::get_setting(conn, key).map_err_str()?;
     let mut roots: Vec<String> = raw
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())

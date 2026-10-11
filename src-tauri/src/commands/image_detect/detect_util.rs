@@ -6,7 +6,10 @@ pub(crate) struct UnionFind {
 
 impl UnionFind {
     pub(crate) fn new(n: usize) -> Self {
-        UnionFind { parent: (0..n).collect(), size: vec![1; n] }
+        UnionFind {
+            parent: (0..n).collect(),
+            size: vec![1; n],
+        }
     }
     pub(crate) fn find(&mut self, x: usize) -> usize {
         let mut root = x;
@@ -26,7 +29,11 @@ impl UnionFind {
         if ra == rb {
             return;
         }
-        let (big, small) = if self.size[ra] >= self.size[rb] { (ra, rb) } else { (rb, ra) };
+        let (big, small) = if self.size[ra] >= self.size[rb] {
+            (ra, rb)
+        } else {
+            (rb, ra)
+        };
         self.parent[small] = big;
         self.size[big] += self.size[small];
     }

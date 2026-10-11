@@ -374,13 +374,19 @@ mod tests {
     #[test]
     fn test_avif_sequence_brand_is_animation() {
         assert!(sniff(&ftyp(b"avis", &[])), "major brand avis 该算动图");
-        assert!(sniff(&ftyp(b"avif", &[b"mif1", b"avis"])), "兼容品牌 avis 该算动图");
+        assert!(
+            sniff(&ftyp(b"avif", &[b"mif1", b"avis"])),
+            "兼容品牌 avis 该算动图"
+        );
         assert!(!sniff(&ftyp(b"avif", &[b"MIAF"])), "静态 AVIF 不算动图");
     }
 
     #[test]
     fn test_other_formats_and_truncated_files_are_not_animation() {
-        assert!(!sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]), "JPEG 不算动图");
+        assert!(
+            !sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            "JPEG 不算动图"
+        );
         assert!(!sniff(b"BM"), "BMP 不算动图（短文件也不该 panic）");
         assert!(!sniff(&gif_frames(1)[..10]), "截断文件按非动图处理");
         let mut corrupt = gif_frames(1).to_vec();
@@ -399,10 +405,18 @@ mod tests {
         // QQ 等下载器把 GIF 存成 .jpg：扩展名不参与判据，只看内容
         let mislabeled = dir.join("b.jpg");
         std::fs::write(&mislabeled, gif_frames(3)).unwrap();
-        assert_eq!(sniff_file(&mislabeled), Some(true), "扩展名错标成 .jpg 的多帧 GIF 该被判为动图");
+        assert_eq!(
+            sniff_file(&mislabeled),
+            Some(true),
+            "扩展名错标成 .jpg 的多帧 GIF 该被判为动图"
+        );
 
         let missing = dir.join("nope.gif");
-        assert_eq!(sniff_file(&missing), None, "文件不存在不写结论，留给下次重判");
+        assert_eq!(
+            sniff_file(&missing),
+            None,
+            "文件不存在不写结论，留给下次重判"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

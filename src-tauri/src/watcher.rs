@@ -177,7 +177,10 @@ fn classify(
     for (root, kind) in w.iter() {
         for path in &ev.paths {
             if path.starts_with(root) {
-                return Some(PendingScan { kind, root: root.clone() });
+                return Some(PendingScan {
+                    kind,
+                    root: root.clone(),
+                });
             }
         }
     }
@@ -206,7 +209,11 @@ fn run_scan(app: &tauri::AppHandle, kind: &'static str, root: &PathBuf) -> bool 
 }
 
 /// 一条数据都没变时不打扰前端：合并空增量也要重排整表
-fn emit_outcome<T: serde::Serialize + Clone>(app: &tauri::AppHandle, event: &str, outcome: ScanOutcome<T>) {
+fn emit_outcome<T: serde::Serialize + Clone>(
+    app: &tauri::AppHandle,
+    event: &str,
+    outcome: ScanOutcome<T>,
+) {
     if outcome.items.is_empty() && outcome.removed_ids.is_empty() {
         return;
     }
