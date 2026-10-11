@@ -73,7 +73,20 @@ export interface BotDlStats {
   dead: number;
 }
 
-/** 一次状态快照：进程 + NapCat 端口 + bot.db 只读积压计数，字段名与 Rust 端一致（snake_case） */
+/** 下载列表一行：最近 50 条有下载动作的消息（含转发归档行） */
+export interface BotDlItem {
+  id: number;
+  kind: string;
+  /** 文件原始名，没有则是文本前 80 字预览 */
+  label: string;
+  size: number | null;
+  /** 媒体 1=重复跳过（复用现有文件）；转发行=内部跳过的重复媒体数 */
+  dedup: number;
+  err: string | null;
+  dl: string;
+}
+
+/** 一次状态快照：进程 + NapCat 端口 + bot.db 只读积压计数与下载列表，字段名与 Rust 端一致（snake_case） */
 export interface BotStatus {
   settings: BotSettings;
   bot_pid: number | null;
@@ -84,6 +97,8 @@ export interface BotStatus {
   ws_up: boolean;
   api_up: boolean;
   dl: BotDlStats;
+  /** 最近 50 条下载/归档消息，按 id 倒序 */
+  recent: BotDlItem[];
   /** bot.db 不存在或打不开时给提示，不影响其余状态 */
   db_note: string | null;
 }

@@ -5,6 +5,18 @@ import type { BotStatus, NapCatStage } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useNapcatStatus } from "../hooks/useNapcatStatus";
 
+function formatBytes(bytes: number | null): string {
+  if (bytes == null || bytes <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
 /** 阶段彩色小标签：一眼看出卡在哪一步 */
 function StageBadge({ stage }: { stage: NapCatStage }) {
   const map: Record<NapCatStage, { text: string; cls: string }> = {
@@ -196,6 +208,71 @@ export function QqBotPanel({
               打开 NapCat WebUI
             </a>
           )}
+        </section>
+      )}
+
+      {status && status.recent.length > 0 && (
+        <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-2 min-h-0" style={{ flex: "1 1 260px" }}>
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium">下载列表（最近 {status.recent.length} 条）</span>
+            <span className="text-xs text-gray-400">每 10 秒自动刷新</span>
+          </div>
+          <div className="overflow-y-auto" style={{ maxHeight: "42vh" }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
+                <tr>
+                  <th className="text-left font-medium py-1.5 px-2">内容</th>
+                  <th className="text-right font-medium py-1.5 px-2">大小</th>
+                  <th className="text-left font-medium py-1.5 px-2">类型</th>
+                  <th className="text-left font-medium py-1.5 px-2">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {status.recent.map((item) => {
+                  const kindLabel =
+                    item.kind === "image" ? "图片"
+                    : item.kind === "video" ? "视频"
+                    : item.kind === "file" ? "文件"
+                    : item.kind === "forward" ? "转发"
+                    : item.kind === "reply" ? "回复"
+                    : item.kind;
+                  const stateLabel =
+                    item.dl === "busy" ? "下载中"
+                    : item.dl === "dead" ? "失败"
+                    : item.dl === "pending" ? "排队"
+                    : item.kind === "forward" ? "已归档"
+                    : item.dedup > 0 ? "重复跳过"
+                    : "已下载";
+                  const dedupSuffix =
+                    item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
+                  return (
+                    <tr
+                      key={item.id}
+                      className="border-t border-white/5 hover:bg-white/5"
+                      title={item.err ?? undefined}
+                    >
+                      <td className="py-1.5 px-2 text-gray-200 truncate max-w-[36ch]" title={item.label}>
+                        {item.label || `#${item.id}`}
+                      </td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
+                      <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
+                      <td className="py-1.5 px-2">
+                        <span className={
+                          item.dl === "busy" ? "text-blue-300"
+                          : item.dl === "dead" ? "text-red-300"
+                          : item.dl === "pending" ? "text-yellow-300"
+                          : item.dedup > 0 ? "text-gray-400"
+                          : "text-emerald-300"
+                        }>
+                          {stateLabel}{dedupSuffix}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 

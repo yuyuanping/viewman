@@ -489,9 +489,11 @@ class Bot:
                 if self._is_blocked(json.dumps(data, ensure_ascii=False)):
                     self.storage.block_media = True
                     logger.warning("[BLOCK] 合并转发命中高危词，内部媒体不下载 fid=%s", fid)
+                stats: dict = {}
                 try:
                     text = await render_node(data.get("messages", []), self.storage,
-                                             self.expand_forward, self.get_file_url, scope)
+                                             self.expand_forward, self.get_file_url,
+                                             scope, stats=stats)
                 finally:
                     self.storage.block_media = fuse
                 if not text:
@@ -499,7 +501,8 @@ class Bot:
                 if not had_text:
                     self.storage.append_text(f"[合并转发]\n{text}",
                                              ts=row.get("ts"))
-                await self.db.set_message_text(mid, text)
+                # dedup = 本条转发里复用现有文件（重复跳过）的媒体数
+                await self.db.set_message_text(mid, text, stats.get("dedup", 0))
                 self._kick_magnets(text, mid)
                 await self.db.mark_dl_ok(mid, None, None, None)
                 logger.info("[EXPAND OK] id=%d fid=%s", mid, fid)
@@ -536,7 +539,8 @@ class Bot:
                             p, kind, scope, expect_md5=md5_hint(row["ref"]))
             if r is None:
                 raise RuntimeError("download failed")
-            await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"])
+            await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
+                                     r.get("dedup", False))
             # media 表登记由 storage._register 统一负责（含转发路径）
         except Exception as e:
             status = await self.db.bump_dl(mid, str(e))

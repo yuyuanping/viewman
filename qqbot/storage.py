@@ -341,7 +341,8 @@ class Storage:
                     await self._register(expect_md5, kind, scope, path_s, size)
                     return {"placeholder": f"[{'图片' if kind == 'image' else '视频'}] "
                                            f"{Path(path_s).name}",
-                            "md5": expect_md5, "path": path_s, "bytes": size}
+                            "md5": expect_md5, "path": path_s, "bytes": size,
+                            "dedup": True}
             # 下载/读取：流式边写边算 md5，不再把整个文件读进内存
             tmp = None
             if url.startswith(("http://", "https://")):
@@ -376,7 +377,7 @@ class Storage:
         else:
             logger.info("[%s SAVED] %s", kind.upper(), path)
         return {"placeholder": f"[{'图片' if kind == 'image' else '视频'}] {path.name}",
-                "md5": digest, "path": str(path), "bytes": size}
+                "md5": digest, "path": str(path), "bytes": size, "dedup": dup}
 
     # ---- 文件 ----
     async def save_file(self, file_id_or_url: str, filename: str,
@@ -428,7 +429,8 @@ class Storage:
                 else:
                     ext = "bin"
                 path = base / f"{digest}.{ext}"
-                if not path.exists():
+                dup = path.exists()
+                if not dup:
                     if tmp is not None:
                         await asyncio.to_thread(os.replace, tmp, path)
                     else:
@@ -445,4 +447,4 @@ class Storage:
         await self._register(digest, "file", scope, str(path), size)
         logger.info("[FILE SAVED] %s", path)
         return {"placeholder": f"[文件] {filename}",
-                "md5": digest, "path": str(path), "bytes": size}
+                "md5": digest, "path": str(path), "bytes": size, "dedup": dup}

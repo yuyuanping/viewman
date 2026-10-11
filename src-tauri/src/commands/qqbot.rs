@@ -31,7 +31,21 @@ pub struct BotDlStats {
     pub dead: i64,
 }
 
-/// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数。
+/// 下载列表一行：最近 50 条有下载动作的消息（含转发归档行）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotDlItem {
+    pub id: i64,
+    pub kind: String,
+    /// 文件原始名，没有则用文本前 80 字预览
+    pub label: String,
+    pub size: Option<i64>,
+    /// 媒体 1=重复跳过（复用现有文件）；转发行=内部跳过的重复媒体数
+    pub dedup: i64,
+    pub err: Option<String>,
+    pub dl: String,
+}
+
+/// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数与最近下载列表。
 /// bot.db 不存在或打不开不影响整体返回，前端拿 db_note 提示
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotStatus {
@@ -45,6 +59,8 @@ pub struct BotStatus {
     pub ws_up: bool,
     pub api_up: bool,
     pub dl: BotDlStats,
+    /// 最近 50 条下载/归档消息，按 id 倒序
+    pub recent: Vec<BotDlItem>,
     pub db_note: Option<String>,
 }
 
@@ -257,13 +273,45 @@ fn read_stats(conn: &rusqlite::Connection) -> Result<BotDlStats, String> {
     Ok(dl)
 }
 
-/// 只读打开 bot.db（WAL 库，bot 运行中也在写）拿积压计数；读连接短轮询 5s 等锁，不自持
-fn read_bot_db(db_path: &str) -> Result<BotDlStats, String> {
+/// 最近 50 条有下载动作的消息（含转发归档行）；dl='none' 的纯文本不进列表
+fn read_recent(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, COALESCE(NULLIF(name, ''), substr(COALESCE(text, ''), 1, 80), ''),
+                    bytes, dedup, err, dl
+             FROM messages WHERE dl != 'none'
+             ORDER BY id DESC LIMIT 50",
+        )
+        .map_err_str()?;
+    let mut out = Vec::new();
+    for row in stmt
+        .query_map([], |r: &rusqlite::Row| {
+            Ok(BotDlItem {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                label: r
+                    .get::<_, Option<String>>(2)?
+                    .unwrap_or_default(),
+                size: r.get(3)?,
+                dedup: r.get(4)?,
+                err: r.get(5)?,
+                dl: r.get(6)?,
+            })
+        })
+        .map_err_str()?
+    {
+        out.push(row.map_err_str()?);
+    }
+    Ok(out)
+}
+
+/// 只读打开 bot.db（WAL 库，bot 运行中也在写）拿积压计数与最近列表；读连接短轮询 5s 等锁，不自持
+fn read_bot_db(db_path: &str) -> Result<(BotDlStats, Vec<BotDlItem>), String> {
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let conn = rusqlite::Connection::open_with_flags(db_path, flags).map_err_str()?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err_str()?;
-    read_stats(&conn)
+    Ok((read_stats(&conn)?, read_recent(&conn)?))
 }
 
 #[tauri::command]
@@ -278,12 +326,16 @@ pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> 
         let api_up = port_up(9502);
 
         let mut dl = BotDlStats::default();
+        let mut recent: Vec<BotDlItem> = Vec::new();
         let db_path = bot_db_path(&settings.root);
         let mut db_note: Option<String> = None;
         match std::fs::metadata(&db_path) {
             Err(_) => db_note = Some(format!("数据库不存在: {}", db_path.display())),
             Ok(_) => match read_bot_db(&db_path.to_string_lossy()) {
-                Ok(d) => dl = d,
+                Ok((d, list)) => {
+                    dl = d;
+                    recent = list;
+                }
                 Err(msg) => db_note = Some(msg),
             },
         }
@@ -295,6 +347,7 @@ pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> 
             ws_up,
             api_up,
             dl,
+            recent,
             db_note,
         })
     })

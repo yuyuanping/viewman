@@ -52,9 +52,10 @@ async def _save_media_segment(data: dict, kind: str, storage,
 
 async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                       get_file_url: Callable, scope: str = "private",
-                      depth: int = 0) -> str:
+                      depth: int = 0, stats: dict | None = None) -> str:
     """递归渲染转发消息。图片/视频/文件在此层下载一次，避免重复。
-    scope 决定媒体存入 private/ 还是 group/。"""
+    scope 决定媒体存入 private/ 还是 group/。
+    stats 传入 dict 时累计 {"saved": 成功落盘数, "dedup": 其中复用现有文件的数}。"""
     if depth > MAX_DEPTH or not msgs:
         return ""
     prefix = "  " * (depth + 1)
@@ -76,6 +77,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                     continue
                 r = await _save_media_segment(d, "image", storage,
                                               get_file_url, scope)
+                if r and stats is not None:
+                    stats["saved"] = stats.get("saved", 0) + 1
+                    if r.get("dedup"):
+                        stats["dedup"] = stats.get("dedup", 0) + 1
                 parts.append(r["placeholder"] if r else "[图片]")
             elif t == "video":
                 if storage.block_media:
@@ -83,6 +88,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                     continue
                 r = await _save_media_segment(d, "video", storage,
                                               get_file_url, scope)
+                if r and stats is not None:
+                    stats["saved"] = stats.get("saved", 0) + 1
+                    if r.get("dedup"):
+                        stats["dedup"] = stats.get("dedup", 0) + 1
                 parts.append(r["placeholder"] if r else "[视频]")
             elif t == "file":
                 if storage.block_media:
@@ -91,6 +100,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                 fid = d.get("file_id") or d.get("url") or ""
                 r = await storage.save_file(fid, d.get("file", "file"),
                                             get_file_url, scope)
+                if r and stats is not None:
+                    stats["saved"] = stats.get("saved", 0) + 1
+                    if r.get("dedup"):
+                        stats["dedup"] = stats.get("dedup", 0) + 1
                 parts.append(r["placeholder"] if r else "[文件]")
             elif t == "forward":
                 nested = await _expand(seg.get("data", {}), storage, expand_forward,

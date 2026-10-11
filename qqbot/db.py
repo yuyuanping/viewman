@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS messages(
   path        TEXT,
   bytes       INTEGER,
   dl          TEXT NOT NULL DEFAULT 'none',  -- none/pending/busy/ok/dead
+  dedup       INTEGER NOT NULL DEFAULT 0,   -- 媒体=复用现有文件(0/1)；转发=内部跳过的重复媒体数
   tries       INTEGER NOT NULL DEFAULT 0,
   next_try    REAL NOT NULL DEFAULT 0,
   err         TEXT
@@ -103,6 +104,9 @@ class DB:
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(messages)")}
             if "msg_id" not in cols:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN msg_id TEXT")
+            if "dedup" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN dedup INTEGER NOT NULL DEFAULT 0")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
             # 崩溃恢复：上一次进程遗留的 busy 一律回队。只有 bot 主进程
@@ -204,14 +208,14 @@ class DB:
             (mid,)).rowcount > 0)
 
     async def mark_dl_ok(self, mid: int, md5: str, path: str,
-                         size: int) -> None:
+                         size: int, dedup: bool = False) -> None:
         await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, err=NULL WHERE id=?",
-            (md5, path, size, mid)))
+            "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL WHERE id=?",
+            (md5, path, size, int(bool(dedup)), mid)))
 
-    async def set_message_text(self, mid: int, text: str) -> None:
+    async def set_message_text(self, mid: int, text: str, dedup: int = 0) -> None:
         await self._run(lambda c: c.execute(
-            "UPDATE messages SET text=? WHERE id=?", (text, mid)))
+            "UPDATE messages SET text=?, dedup=? WHERE id=?", (text, dedup, mid)))
 
     async def bump_dl(self, mid: int, err: str) -> str:
         """失败退避 30*2^tries 秒（封顶 30 分钟），跑满 MAX_DL_TRIES 后转 dead
