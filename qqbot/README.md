@@ -191,6 +191,7 @@ WS 连上/重连后，原本会调 `get_group_msg_history` / `get_friend_msg_his
   "ws_url":         "ws://127.0.0.1:9501/",
   "api_url":        "http://127.0.0.1:9502",
   "ws_token":       "在此填写WebSocket的token",
+  "napcat_root":    "NapCat OneKey 根目录（viewman 用，可省略走默认）",
   "qq_account":     "你的QQ号（可选，NapCat 快速登录用；留空则每次扫码）",
   "dl_limit":       2,
   "block_terms":    ["javdb", "onlyfans", "siterip"],

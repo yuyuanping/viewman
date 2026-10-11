@@ -8,12 +8,30 @@ use crate::db;
 
 use super::{silent_command, AppState, MapErrStr};
 
-/// bot 工作目录 / Python 解释器：首次用内置默认值（bot 源码随仓库放在 qqbot\ 下），
-/// 用户在面板里改过之后按 viewman.db settings 表里存的走
+/// bot 工作目录 / Python 解释器：首次用默认值（bot 源码随仓库放在 qqbot\ 下，
+/// 从 exe 位置向上探测；找不到再用兜底路径），用户改过之后按 settings 表存档
 const BOT_ROOT_KEY: &str = "bot_root";
 const BOT_PYTHON_KEY: &str = "bot_python";
-const DEFAULT_ROOT: &str = "D:\\opencword\\viewman\\qqbot";
 const DEFAULT_PYTHON: &str = "D:\\Python311\\python.exe";
+
+/// 从 exe 位置向上最多 4 层找含 qqbot\bot.py 的目录（开发时 exe 在
+/// target\release\ 下，往上 2 层就是仓库根）；找不到返回 None，用兜底常量
+fn default_bot_root() -> Option<String> {
+    let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    for _ in 0..4 {
+        if dir.join("qqbot").join("bot.py").is_file() {
+            return Some(dir.join("qqbot").to_string_lossy().to_string());
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+    None
+}
+
+fn default_root() -> String {
+    default_bot_root().unwrap_or_else(|| "D:\\opencword\\viewman\\qqbot".to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSettings {
@@ -55,7 +73,7 @@ pub struct BotStatus {
     /// bot 是否在跑：锁住 bot.lock 即为在跑。比命令行匹配可靠——start 启动的
     /// pythonw 常常读不到 CommandLine，那种情况 bot_pid 会是 None 但这里仍为 true
     pub bot_running: bool,
-    /// NapCat 的 WS(9501)/HTTP(9502) 端口监听 = QQ 协议层活着
+    /// NapCat 的 WS/HTTP 端口监听（端口从 bot config.json 解析）= QQ 协议层活着
     pub ws_up: bool,
     pub api_up: bool,
     pub dl: BotDlStats,
@@ -64,11 +82,11 @@ pub struct BotStatus {
     pub db_note: Option<String>,
 }
 
-fn get_settings(state: &State<AppState>) -> Result<BotSettings, String> {
+pub(crate) fn get_settings(state: &State<AppState>) -> Result<BotSettings, String> {
     let conn = state.db.lock().map_err_str()?;
     let root = db::get_setting(&conn, BOT_ROOT_KEY)
         .map_err_str()?
-        .unwrap_or_else(|| DEFAULT_ROOT.to_string());
+        .unwrap_or_else(default_root);
     let python = db::get_setting(&conn, BOT_PYTHON_KEY)
         .map_err_str()?
         .unwrap_or_else(|| DEFAULT_PYTHON.to_string());
@@ -97,17 +115,32 @@ pub fn save_bot_settings(
     db::set_setting(&conn, BOT_PYTHON_KEY, python.trim()).map_err_str()
 }
 
-/// bot.db 位置：bot 的 config.json 里 data_dir 说了算，缺省退 root\bot.db
-/// bot 的数据目录：config.json 的 data_dir 说了算，缺省退 root
-fn data_dir(root: &str) -> std::path::PathBuf {
-    if let Ok(raw) = std::fs::read_to_string(Path::new(root).join("config.json")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(dir) = v.get("data_dir").and_then(|x| x.as_str()) {
-                return Path::new(dir).to_path_buf();
-            }
-        }
+/// 读 bot 的 config.json 里一个字符串键（不存在/解析失败返回 None）。
+/// 数据目录、端口、NapCat 根目录都从这里来——config.json 是 bot 与 viewman
+/// 两边的唯一事实来源，换机器只改这一个文件
+pub(crate) fn bot_config_str(root: &str, key: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(Path::new(root).join("config.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get(key)?.as_str().map(str::to_string)
+}
+
+/// bot 的数据目录：config.json 的 data_dir 说了算，缺省退 root。
+/// napcat.rs 的日志路径也从这里派生
+pub(crate) fn data_dir(root: &str) -> std::path::PathBuf {
+    match bot_config_str(root, "data_dir") {
+        Some(dir) if !dir.trim().is_empty() => Path::new(&dir).to_path_buf(),
+        _ => Path::new(root).to_path_buf(),
     }
-    Path::new(root).to_path_buf()
+}
+
+/// 从 URL 里取端口（ws://127.0.0.1:9501/ -> 9501），解析不出用 fallback
+pub(crate) fn port_of(url: &str, fallback: u16) -> u16 {
+    url.split("//")
+        .nth(1)
+        .and_then(|host| host.split('/').next())
+        .and_then(|host| host.rsplit(':').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(fallback)
 }
 
 fn bot_db_path(root: &str) -> std::path::PathBuf {
@@ -231,20 +264,9 @@ fn find_pids() -> (Option<u32>, Option<u32>) {
     (bot, rw)
 }
 
-fn port_up(port: u16) -> bool {
-    let out = silent_command("netstat").args(["-ano", "-p", "tcp"]).output();
-    if let Ok(o) = out {
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 5
-                && fields[3] == "LISTENING"
-                && fields[1].rsplit(':').next().and_then(|p| p.parse().ok()) == Some(port)
-            {
-                return true;
-            }
-        }
-    }
-    false
+/// 一次 netstat 查两个端口是否在监听（实现在 napcat.rs，省一次进程派生）
+fn ports_up(ws: u16, api: u16) -> (bool, bool) {
+    super::napcat::ports_up(ws, api)
 }
 
 /// 从连接读下载积压计数；拆出来是为单测可直接喂内存库
@@ -323,8 +345,12 @@ pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> 
         let (bot_pid, riskwatch_pid) = find_pids();
         // 锁探针为准，命令行只用来拿 PID 展示；两者不一致时以锁为准
         let bot_running = bot_lock_held(&data_dir(&settings.root));
-        let ws_up = port_up(9501);
-        let api_up = port_up(9502);
+        // 端口从 bot 的 config.json（ws_url/api_url）解析，不再写死 9501/9502
+        let ws_port = port_of(&bot_config_str(&settings.root, "ws_url")
+            .unwrap_or_default(), 9501);
+        let api_port = port_of(&bot_config_str(&settings.root, "api_url")
+            .unwrap_or_default(), 9502);
+        let (ws_up, api_up) = ports_up(ws_port, api_port);
 
         let mut dl = BotDlStats::default();
         let mut recent: Vec<BotDlItem> = Vec::new();
@@ -459,6 +485,14 @@ mod tests {
         let conn = test_db();
         let dl = read_stats(&conn).unwrap();
         assert_eq!((dl.pending, dl.busy, dl.dead), (1, 1, 1));
+    }
+
+    #[test]
+    fn port_of_parses_urls_with_fallback() {
+        assert_eq!(port_of("ws://127.0.0.1:9501/", 1), 9501);
+        assert_eq!(port_of("http://127.0.0.1:9502", 1), 9502);
+        assert_eq!(port_of("not a url", 9501), 9501);
+        assert_eq!(port_of("", 9502), 9502);
     }
 
     #[test]

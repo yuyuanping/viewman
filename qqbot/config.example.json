@@ -3,6 +3,7 @@
   "ws_url": "ws://127.0.0.1:9501/",
   "api_url": "http://127.0.0.1:9502",
   "ws_token": "在此填写WebSocket的token",
+  "napcat_root": "NapCat OneKey 套件根目录（viewman 体检/日志读取用）",
   "qq_account": "在此填写QQ号（可选，NapCat 快速登录用；留空则每次扫码）",
   "magnet_xlsx": "D:\\QQBot_Data\\磁力链接汇总.xlsx",
   "magnet_rules": "D:\\QQBot_Data\\extract_magnets.py",

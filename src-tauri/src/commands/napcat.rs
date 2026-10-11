@@ -14,13 +14,34 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
 
-use super::{silent_command, MapErrStr};
+use super::qqbot::{bot_config_str, data_dir, get_settings, port_of};
+use super::{silent_command, AppState, MapErrStr};
 
-// start.bat 把 NapCat 的 stdout 重定向到这个文件（见 qqbot/start.bat）
-const CONSOLE_LOG: &str = "D:\\QQBot_Data\\napcat_console.log";
-// OneKey 套件根目录：里面有多套 Shell，靠扫描发现，不写死具体版本号
-const NAPCAT_ROOT: &str = "D:\\tool\\NapCat.Shell.Windows.OneKey";
+/// OneKey 套件根目录兜底值；正式值来自 bot config.json 的 napcat_root
+const FALLBACK_NAPCAT_ROOT: &str = "D:\\tool\\NapCat.Shell.Windows.OneKey";
+
+/// NapCat 相关的本地路径与端口，全部从 bot root 的 config.json 派生
+/// （data_dir / ws_url / api_url / napcat_root）——viewman 不再写死本机布局
+pub(crate) struct NapCatEnv {
+    pub console_log: PathBuf,
+    pub napcat_root: PathBuf,
+    pub ws_port: u16,
+    pub http_port: u16,
+}
+
+pub(crate) fn napcat_env(bot_root: &str) -> NapCatEnv {
+    let data = data_dir(bot_root);
+    NapCatEnv {
+        console_log: data.join("napcat_console.log"),
+        napcat_root: PathBuf::from(
+            bot_config_str(bot_root, "napcat_root").unwrap_or_else(|| FALLBACK_NAPCAT_ROOT.into()),
+        ),
+        ws_port: port_of(&bot_config_str(bot_root, "ws_url").unwrap_or_default(), 9501),
+        http_port: port_of(&bot_config_str(bot_root, "api_url").unwrap_or_default(), 9502),
+    }
+}
 const QQ_EXE_NAME: &str = "QQ.exe";
 
 /// NapCat 的登录/启动阶段。面板据此显示"现在到底卡在哪一步"。
@@ -322,12 +343,12 @@ pub fn find_napcat_pid() -> Option<u32> {
         .find_map(|l| l.trim().parse::<u32>().ok())
 }
 
-fn read_to_string(path: &str) -> Option<String> {
+pub(crate) fn read_to_string(path: &str) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
 /// 端口是否在监听（复用 qqbot 的探测思路）
-fn ports_up(ws: u16, http: u16) -> (bool, bool) {
+pub(crate) fn ports_up(ws: u16, http: u16) -> (bool, bool) {
     let out = silent_command("netstat")
         .args(["-ano", "-p", "tcp"])
         .output();
@@ -348,9 +369,9 @@ fn ports_up(ws: u16, http: u16) -> (bool, bool) {
 }
 
 /// 扫描 OneKey 根目录下所有 Shell（名字含 .Shell 的目录）
-fn discover_shells() -> Vec<PathBuf> {
+fn discover_shells(napcat_root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(NAPCAT_ROOT) {
+    if let Ok(rd) = std::fs::read_dir(napcat_root) {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -439,8 +460,9 @@ fn find_core_dir(shell: &Path) -> Option<PathBuf> {
 }
 
 /// 配置体检：找出配置漂移、空配置、版本错配等问题。
-pub fn napcat_diagnose() -> NapCatDiagnose {
-    let shells = discover_shells();
+pub fn napcat_diagnose(bot_root: &str) -> NapCatDiagnose {
+    let env = napcat_env(bot_root);
+    let shells = discover_shells(&env.napcat_root);
     let mut issues = Vec::new();
 
     // 含 napcat.mjs 的目录 = 真正的内核目录（可能深嵌在 versions\ 下）
@@ -452,7 +474,10 @@ pub fn napcat_diagnose() -> NapCatDiagnose {
         .cloned();
 
     if shells.is_empty() {
-        issues.push(format!("在 {} 下没找到任何 NapCat Shell 目录", NAPCAT_ROOT));
+        issues.push(format!(
+            "在 {} 下没找到任何 NapCat Shell 目录",
+            env.napcat_root.display()
+        ));
     }
     if core_dir.is_none() {
         issues.push("没找到含 napcat.mjs 的核心目录".to_string());
@@ -570,10 +595,12 @@ pub fn napcat_diagnose() -> NapCatDiagnose {
 
 /// Tauri 命令：取 NapCat 状态快照
 #[tauri::command]
-pub async fn get_napcat_status() -> Result<NapCatStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let text = read_to_string(CONSOLE_LOG).unwrap_or_default();
-        let (ws_up, http_up) = ports_up(9501, 9502);
+pub async fn get_napcat_status(state: State<'_, AppState>) -> Result<NapCatStatus, String> {
+    let root = get_settings(&state)?.root;
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = napcat_env(&root);
+        let text = read_to_string(&env.console_log.to_string_lossy()).unwrap_or_default();
+        let (ws_up, http_up) = ports_up(env.ws_port, env.http_port);
         let mut status = summarize_log(&text, ws_up && http_up);
         status.pid = find_napcat_pid();
         if status.pid.is_none() && status.stage != NapCatStage::NotRunning {
@@ -590,8 +617,9 @@ pub async fn get_napcat_status() -> Result<NapCatStatus, String> {
 
 /// Tauri 命令：配置体检
 #[tauri::command]
-pub async fn napcat_diagnose_cmd() -> Result<NapCatDiagnose, String> {
-    tauri::async_runtime::spawn_blocking(napcat_diagnose)
+pub async fn napcat_diagnose_cmd(state: State<'_, AppState>) -> Result<NapCatDiagnose, String> {
+    let root = get_settings(&state)?.root;
+    tauri::async_runtime::spawn_blocking(move || napcat_diagnose(&root))
         .await
         .map_err_str()
 }
@@ -599,9 +627,10 @@ pub async fn napcat_diagnose_cmd() -> Result<NapCatDiagnose, String> {
 /// Tauri 命令：把 core 目录下的 onebot11 配置同步到生效配置目录。
 /// 这就是今晚手工做的修复（NapCat 跨目录读到了空配置），做成可一键执行。
 #[tauri::command]
-pub async fn napcat_sync_config() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(|| -> Result<String, String> {
-        let diag = napcat_diagnose();
+pub async fn napcat_sync_config(state: State<'_, AppState>) -> Result<String, String> {
+    let root = get_settings(&state)?.root;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let diag = napcat_diagnose(&root);
         let core = diag
             .core_dir
             .ok_or_else(|| "找不到 NapCat 核心目录（应含 napcat.mjs）".to_string())?;
