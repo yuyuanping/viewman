@@ -31,6 +31,7 @@ _VALID_FILE = _VALID_IMG + _VALID_VID + (
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv",
     "zip", "7z", "rar", "tar", "gz", "mp3", "flac", "wav", "ogg", "m4a",
     "srt", "ass", "epub", "mobi", "azw3", "html", "xml", "json", "log",
+    "silk", "amr", "caf",
 )
 
 # 各类下载的总超时（秒）
@@ -66,18 +67,6 @@ def md5_hint(ref: str | None) -> str | None:
     """从 file 字段名里提取原件 md5，供下载前查盘免重拉。"""
     stem = Path(ref or "").stem
     return stem.lower() if _MD5_RE.fullmatch(stem) else None
-
-
-def is_sticker(d: dict) -> bool:
-    """识别表情包图片（只记占位不下载）：商城表情（emoji_id）、面板/收藏
-    表情（sub_type=1）、以及一切 GIF——群里 GIF 实际全是表情包（实测 651
-    张里 34 张 GIF 跨各种 sub_type，动图照片极罕见）。普通照片/截图不受影响。"""
-    if not d:
-        return False
-    if d.get("emoji_id") or str(d.get("sub_type")) == "1":
-        return True
-    ext = str(d.get("file") or "").rsplit(".", 1)[-1].lower()
-    return ext == "gif"
 
 
 class Storage:

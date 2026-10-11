@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable
 
-from storage import md5_hint, is_sticker
+
 
 MAX_DEPTH = 3
 
@@ -78,9 +78,6 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             t = seg.get("type")
             d = seg.get("data", {})
             if t == "image":
-                if is_sticker(d):
-                    parts.append("[表情包]")   # 表情包不下载，只记占位
-                    continue
                 r = await _save_media_segment(d, "image", storage,
                                               get_file_url, scope)
                 if r and stats is not None:
@@ -132,6 +129,39 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                                   "bytes": (r or {}).get("bytes"),
                                   "label": d.get("file") or "文件"})
                 parts.append(r["placeholder"] if r else "[文件]")
+            elif t == "record":
+                fid = d.get("file_id") or d.get("url") or ""
+                name = d.get("file") or f"voice_{fid[:8] or 'msg'}.mp3"
+                r = await storage.save_file(fid, name, get_file_url, scope)
+                if r and stats is not None:
+                    stats["saved"] = stats.get("saved", 0) + 1
+                    if r.get("dedup"):
+                        stats["dedup"] = stats.get("dedup", 0) + 1
+                if report:
+                    await report({"kind": "file", "sender": nickname, "ts": inner_ts,
+                                  "src": fid, "ref": d.get("file_id") or "",
+                                  "file": name, "ok": r is not None,
+                                  "dedup": (r or {}).get("dedup"),
+                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
+                                  "bytes": (r or {}).get("bytes"), "label": name})
+                parts.append(r["placeholder"] if r else "[语音]")
+            elif t == "mface":
+                r = await _save_media_segment(d, "image", storage,
+                                              get_file_url, scope)
+                if r and stats is not None:
+                    stats["saved"] = stats.get("saved", 0) + 1
+                    if r.get("dedup"):
+                        stats["dedup"] = stats.get("dedup", 0) + 1
+                if report:
+                    await report({"kind": "image", "sender": nickname, "ts": inner_ts,
+                                  "src": d.get("url", ""), "ref": d.get("file_id") or "",
+                                  "file": d.get("file") or "",
+                                  "ok": r is not None,
+                                  "dedup": (r or {}).get("dedup"),
+                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
+                                  "bytes": (r or {}).get("bytes"),
+                                  "label": Path(r["path"]).name if r else (d.get("emoji_id") or "表情")})
+                parts.append(r["placeholder"] if r else "[表情]")
             elif t == "forward":
                 nested = await _expand(seg.get("data", {}), storage, expand_forward,
                                        get_file_url, scope, depth, stats, report,
@@ -174,3 +204,4 @@ async def _expand(data: dict, storage, expand_forward: Callable,
         return "[合并转发](空)"
     indent = "  " * (depth + 1)
     return f"[合并转发↓]\n{nested_text}\n{indent}[合并转发↑]"
+from storage import md5_hint

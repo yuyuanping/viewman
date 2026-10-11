@@ -21,7 +21,8 @@ import aiohttp
 
 from config import load_config
 from db import DB
-from storage import Storage, md5_hint, is_sticker
+
+from storage import Storage, md5_hint
 from forward import render_node, seg_text
 from magnets import MagnetRegistry
 
@@ -281,12 +282,6 @@ class Bot:
                 mid = await self.db.add_message(**common, text=d.get("text", ""))
                 self._kick_magnets(d.get("text", ""), mid)
             elif t in ("image", "video"):
-                if t == "image" and is_sticker(d):
-                    # 表情包（面板/收藏/商城表情、GIF）不下载，只记占位
-                    md_pending.append(("[表情包]", prefix, ts))
-                    await self.db.add_message(
-                        **dict(common, kind="sticker", text="[表情包]"))
-                    continue
                 # NapCat 的图片/视频段把 file id 放在 data.file（形如 HASH.jpg），
                 # 没有 file_id 键。不存下来就没有 CDN 失败后的本地原件兜底。
                 row = dict(common, src=d.get("url", ""),
@@ -298,6 +293,21 @@ class Bot:
                 row = dict(common, src=d.get("url", ""),
                            ref=d.get("file_id", ""), name=d.get("file", "file"),
                            dl="pending")
+                mid = await self.db.add_message(**row)
+                self._spawn(self._attempt_row(dict(row, id=mid)))
+            elif t == "record":
+                # 语音：NapCat 给的常是 mp3（也可能 silk），按文件落盘
+                name = d.get("file") or f"voice_{msg_id or ts}.mp3"
+                row = dict(common, src=d.get("url", ""),
+                           ref=d.get("file_id") or d.get("file") or "",
+                           name=name, dl="pending")
+                mid = await self.db.add_message(**row)
+                self._spawn(self._attempt_row(dict(row, id=mid)))
+            elif t == "mface":
+                # 商城表情：有直链，当图片存
+                row = dict(common, kind="image", src=d.get("url", ""),
+                           ref=d.get("file_id") or d.get("emoji_id") or "",
+                           name=d.get("file") or "", dl="pending")
                 mid = await self.db.add_message(**row)
                 self._spawn(self._attempt_row(dict(row, id=mid)))
             elif t == "forward":
