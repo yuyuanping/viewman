@@ -312,10 +312,12 @@ fn build_videos_parallel(
             },
         );
     };
+    // 视频扫描大量随机读：源在机械盘时高并发反而互相拖累，settings 里
+    // video_scan_workers 可压（本机视频在 USB HDD 上，已配 4）
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .min(8)
+        .min(super::setting_usize(app, "video_scan_workers", 8))
         .min(total);
 
     let videos = std::thread::scope(|s| {

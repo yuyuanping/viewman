@@ -40,7 +40,7 @@ pub(crate) struct ThumbJob {
 
 /// 缩略图缓存目录：`<app_data>/thumbnails`
 pub(crate) fn thumbnails_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err_str()?.join("thumbnails");
+    let dir = super::cache_base(app).join("thumbnails");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建缩略图目录失败: {}", e))?;
     Ok(dir)
 }
@@ -142,11 +142,9 @@ fn register_orphans(
 /// 封面缓存文件名由条目 id 决定，条目移除后一并清理，避免留下孤儿文件。
 /// 新老扩展名都清（webp 迁移前的 jpg 不留尾巴）。
 pub(crate) fn clear_thumbnail_cache(app: &tauri::AppHandle, id: &str) {
-    if let Ok(dir) = app.path().app_data_dir() {
-        let base = dir.join("thumbnails");
-        let _ = std::fs::remove_file(base.join(format!("{}.webp", id)));
-        let _ = std::fs::remove_file(base.join(format!("{}.jpg", id)));
-    }
+    let base = super::cache_base(app).join("thumbnails");
+    let _ = std::fs::remove_file(base.join(format!("{}.webp", id)));
+    let _ = std::fs::remove_file(base.join(format!("{}.jpg", id)));
 }
 
 /// 启动时清一轮孤儿缩略图：id 在图片/视频两张表里都查无的缓存文件。
@@ -154,9 +152,7 @@ pub(crate) fn clear_thumbnail_cache(app: &tauri::AppHandle, id: &str) {
 /// 那是"抽好帧没来得及写库"的孤儿，resume_thumbnails 要靠它们登记回来。
 /// 返回删除的文件数，失败（目录不存在等）一律返回 0，不影响启动。
 pub(crate) fn cleanup_orphan_thumbnail_files(app: &tauri::AppHandle) -> usize {
-    let Ok(dir) = app.path().app_data_dir() else {
-        return 0;
-    };
+    let dir = super::cache_base(app);
     let Some(state) = app.try_state::<AppState>() else {
         return 0;
     };

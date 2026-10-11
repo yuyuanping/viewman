@@ -714,7 +714,7 @@ pub async fn convert_hevc_videos(
         }
         out
     };
-    let transcoded_dir = app.path().app_data_dir().map_err_str()?.join("transcoded");
+    let transcoded_dir = super::cache_base(&app).join("transcoded");
     let total = jobs.len();
     let task_app = app.clone();
     clear_cancel(&app, "hevc");
@@ -863,15 +863,11 @@ fn cleanup_transcoded_cache(conn: &rusqlite::Connection, dir: &Path) -> usize {
 
 /// 启动清扫转码缓存（lib.rs 启动时后台跑）。失败不影响启动。
 pub fn cleanup_transcoded_files(app: &tauri::AppHandle) -> usize {
-    use tauri::Manager;
     let state = app.state::<AppState>();
     let Ok(conn) = state.db.lock() else {
         return 0;
     };
-    let Ok(base) = app.path().app_data_dir() else {
-        return 0;
-    };
-    cleanup_transcoded_cache(&conn, &base.join("transcoded"))
+    cleanup_transcoded_cache(&conn, &super::cache_base(app).join("transcoded"))
 }
 
 /// 按需转码成 H.264 缓存到 `<app_data>/transcoded/<id>.mp4`；其他编码直接返回原路径。
@@ -896,7 +892,7 @@ pub async fn get_playable_path(
         return Ok(path);
     }
 
-    let dir = app.path().app_data_dir().map_err_str()?.join("transcoded");
+    let dir = super::cache_base(&app).join("transcoded");
     std::fs::create_dir_all(&dir).map_err_str()?;
     let out = dir.join(format!("{}.mp4", video_id));
     if out.exists() {

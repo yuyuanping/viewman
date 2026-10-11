@@ -607,11 +607,70 @@ pub fn video_codec_name(video_path: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// 本机 ffmpeg 是否带 AMF 硬件编码器（AMD 核显 680M 可用，比 x264 快数倍且不占 CPU）。
+/// 探测一次缓存结果
+fn h264_amf_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let mut cmd = hidden_command("ffmpeg");
+        cmd.args(["-hide_banner", "-encoders"]);
+        match output_timeout(cmd, 30, "ffmpeg -encoders") {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("h264_amf"),
+            Err(_) => false,
+        }
+    })
+}
+
 /// 转码为 H.264 + AAC 写入 out_path，供 WebView2 解不了 HEVC 时内置播放使用。
+/// 优先 AMF 硬件编码（AMD 显卡），没有或失败回退软件 x264。
 /// 300s 超时：长片转码慢但须有上限，超时按失败处理、残留文件清掉。
 pub fn transcode_to_h264(video_path: &str, out_path: &Path) -> Result<(), String> {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建转码目录失败: {}", e))?;
+    }
+    let finish = |cmd: Command, label: &str| -> Result<(), String> {
+        let output = output_timeout(cmd, 300, label)?;
+        if !output.status.success() {
+            let _ = fs::remove_file(out_path);
+            return Err(ffmpeg_err(&output));
+        }
+        match fs::metadata(out_path) {
+            Ok(m) if m.len() > 0 => Ok(()),
+            _ => Err("ffmpeg 未产生有效输出".to_string()),
+        }
+    };
+    if h264_amf_available() {
+        let mut cmd = hidden_command("ffmpeg");
+        cmd.args([
+            "-y",
+            "-i",
+            video_path,
+            "-c:v",
+            "h264_amf",
+            "-quality",
+            "balanced",
+            "-rc",
+            "vbr_peak",
+            "-b:v",
+            "6M",
+            "-maxrate",
+            "12M",
+            "-bufsize",
+            "12M",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+        ])
+        .arg(out_path);
+        match finish(cmd, "ffmpeg 转码(AMF)") {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!("h264_amf 转码失败，回退 x264: {}", e),
+        }
     }
     let mut cmd = hidden_command("ffmpeg");
     cmd.args([
@@ -634,15 +693,7 @@ pub fn transcode_to_h264(video_path: &str, out_path: &Path) -> Result<(), String
         "128k",
     ])
     .arg(out_path);
-    let output = output_timeout(cmd, 300, "ffmpeg 转码")?;
-    if !output.status.success() {
-        let _ = fs::remove_file(out_path);
-        return Err(ffmpeg_err(&output));
-    }
-    match fs::metadata(out_path) {
-        Ok(m) if m.len() > 0 => Ok(()),
-        _ => Err("ffmpeg 未产生有效输出".to_string()),
-    }
+    finish(cmd, "ffmpeg 转码")
 }
 
 /// 用 mpdecimate 去除重复帧后统计剩余画面数，判断是否"近似静图"。无法解码时返回 None

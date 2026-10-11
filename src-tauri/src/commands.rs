@@ -36,6 +36,45 @@ pub use thumbnails::*;
 pub use video_detect::*;
 pub use videos::*;
 
+/// 缓存根目录（thumbnails/transcoded 的父目录）：settings 表 cache_dir 说了算，
+/// 空缺退 app_data。给 C 盘紧张/想把缓存放别的盘的机器一个出口
+pub(crate) fn cache_base(app: &tauri::AppHandle) -> std::path::PathBuf {
+    let fallback = || {
+        app.path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+    };
+    let state = app.state::<AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return fallback();
+    };
+    let configured = db::get_setting(&conn, "cache_dir")
+        .ok()
+        .flatten()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    drop(conn);
+    let Some(dir) = configured else {
+        return fallback();
+    };
+    let p = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&p);
+    p
+}
+
+/// settings 表里的正整数配置（video_scan_workers / image_scan_workers 等）
+pub(crate) fn setting_usize(app: &tauri::AppHandle, key: &str, default: usize) -> usize {
+    let state = app.state::<AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return default;
+    };
+    db::get_setting(&conn, key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// GUI 进程里 spawn 控制台程序（powershell/netstat/taskkill/cmd）默认会弹黑框。
 /// qqbot/napcat 的状态轮询每 5-10 秒就要 spawn 一次，必须用这个把窗口压掉
 /// （CREATE_NO_WINDOW），否则打包出来的应用会一直闪黑窗口。

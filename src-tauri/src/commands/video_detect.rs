@@ -221,7 +221,7 @@ pub async fn find_duplicate_videos(
     };
     // 缓存的过期判断按"库里的记录数"，所以要在丢掉读不到 mtime 的那些之前数
     let library_count = all_rows.len();
-    let thumb_dir = app.path().app_data_dir().map_err_str()?.join("thumbnails");
+    let thumb_dir = super::cache_base(&app).join("thumbnails");
 
     let groups = tauri::async_runtime::spawn_blocking(move || {
         // 磁盘上已经不存在的条目不参与判定；mtime 同时当指纹缓存的钥匙用。

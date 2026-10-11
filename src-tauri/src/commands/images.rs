@@ -288,7 +288,7 @@ fn build_images_parallel(app: &tauri::AppHandle, files: &[PathBuf]) -> (Vec<Imag
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .min(8)
+        .min(super::setting_usize(app, "image_scan_workers", 8))
         .min(total);
 
     let images = std::thread::scope(|s| {
