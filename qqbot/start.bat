@@ -13,6 +13,17 @@ set PY=D:\Python311\python.exe
 set PYW=D:\Python311\pythonw.exe
 set LOG=D:\QQBot_Data\startup.log
 
+rem Quick login: read qq_account from config.json (gitignored). OneKey's launcher
+rem takes the uin as the ONLY arg (napcat.quick.bat style) and forwards it as
+rem `-q <uin>` to QQ. Passing QQ.exe/hook paths alongside makes the launcher
+rem mangle the uin (`-q <QQ.exe path>` reaches the core, which can never match).
+rem The launcher auto-detects QQ.exe + hook in its own dir (WorkingDirectory).
+rem Falls back to QR by itself when the cached session expires.
+set QQ_UIN=
+for /f "usebackq delims=" %%a in (`powershell -NoProfile -Command "try{(Get-Content -Raw '%~dp0config.json'|ConvertFrom-Json).qq_account}catch{}"`) do set QQ_UIN=%%a
+set "NAPCAT_ARGS="
+if not "%QQ_UIN%"=="" (set "NAPCAT_ARGS=%QQ_UIN%") else set "NAPCAT_ARGS='%NAPCAT_QQ%','%NAPCAT_DIR%\NapCatWinBootHook.dll'"
+
 echo [%time%] start.bat begin >> %LOG%
 
 tasklist.exe | findstr /I "%NAPCAT_EXE%" >nul
@@ -25,7 +36,7 @@ if errorlevel 1 (
     set "NAPCAT_INJECT_PATH=%NAPCAT_CORE%\NapCatWinBootHook.dll"
     set "NAPCAT_LAUNCHER_PATH=%NAPCAT_DIR%\%NAPCAT_EXE%"
     set "NAPCAT_MAIN_PATH=%NAPCAT_CORE:\=/%/napcat.mjs"
-    powershell -NoProfile -Command "$env:NAPCAT_PATCH_PACKAGE='%NAPCAT_PATCH_PACKAGE%'; $env:NAPCAT_LOAD_PATH='%NAPCAT_LOAD_PATH%'; $env:NAPCAT_INJECT_PATH='%NAPCAT_INJECT_PATH%'; $env:NAPCAT_LAUNCHER_PATH='%NAPCAT_LAUNCHER_PATH%'; $env:NAPCAT_MAIN_PATH='%NAPCAT_MAIN_PATH%'; Start-Process -WindowStyle Hidden -WorkingDirectory '%NAPCAT_DIR%' -FilePath '%NAPCAT_DIR%\%NAPCAT_EXE%' -ArgumentList '%NAPCAT_QQ%','%NAPCAT_DIR%\NapCatWinBootHook.dll' -RedirectStandardOutput 'D:\QQBot_Data\napcat_console.log' -RedirectStandardError 'D:\QQBot_Data\napcat_console_err.log'"
+    powershell -NoProfile -Command "$env:NAPCAT_PATCH_PACKAGE='%NAPCAT_PATCH_PACKAGE%'; $env:NAPCAT_LOAD_PATH='%NAPCAT_LOAD_PATH%'; $env:NAPCAT_INJECT_PATH='%NAPCAT_INJECT_PATH%'; $env:NAPCAT_LAUNCHER_PATH='%NAPCAT_LAUNCHER_PATH%'; $env:NAPCAT_MAIN_PATH='%NAPCAT_MAIN_PATH%'; Start-Process -WindowStyle Hidden -WorkingDirectory '%NAPCAT_DIR%' -FilePath '%NAPCAT_DIR%\%NAPCAT_EXE%' -ArgumentList %NAPCAT_ARGS% -RedirectStandardOutput 'D:\QQBot_Data\napcat_console.log' -RedirectStandardError 'D:\QQBot_Data\napcat_console_err.log'"
     echo [%time%] waiting for NapCat WS port 9501 to listen >> %LOG%
     rem Poll 9501 for up to 90s: proceed as soon as it is up, faster and steadier than a fixed sleep.
     for /l %%i in (1,1,45) do (
@@ -53,7 +64,7 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='py
 echo [%time%] starting bot.py (pythonw, no window) >> %LOG%
 start "" "%PYW%" "%~dp0bot.py"
 
-rem Risk watchdog: separate from bot, watches NapCat logs, pushes to Lark on risk signals.
+rem Risk watchdog: separate from bot, watches NapCat logs, records local risk alerts.
 powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" | Where-Object {$_.CommandLine -like '*riskwatch.py*'})) { Start-Process -WindowStyle Hidden -FilePath '%PYW%' -ArgumentList '%~dp0riskwatch.py' }" >> %LOG% 2>&1
 
 rem No console means no crash output; after 3s confirm bot.py is alive. Other pythonw
