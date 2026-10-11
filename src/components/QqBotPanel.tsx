@@ -1,35 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import type { BotStatus, NapCatStage } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useNapcatStatus } from "../hooks/useNapcatStatus";
-
-function formatBytes(bytes: number | null): string {
-  if (bytes == null || bytes <= 0) return "-";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let idx = 0;
-  while (value >= 1024 && idx < units.length - 1) {
-    value /= 1024;
-    idx += 1;
-  }
-  return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 1)} ${units[idx]}`;
-}
-
-/** 下次重试时间（Unix 秒）：busy 行正在下载，其余按相对时间显示 */
-function nextTryLabel(nextTryAt: number | null, state: string): string {
-  if (state === "busy") return "下载中";
-  if (nextTryAt == null || nextTryAt <= 0) return "等待排期";
-  const diff = Math.round(nextTryAt - Date.now() / 1000);
-  if (diff <= 10) return "即将复检";
-  if (diff < 90) return `${Math.ceil(diff / 10) * 10}s 后复检`;
-  // 跑满 MAX_DL_TRIES(8) 后转每日复检，会出现上小时的间隔，别显示成“分钟”
-  if (diff < 3600) return `约 ${Math.ceil(diff / 600)} 分钟后`;
-  if (diff < 86400) return `约 ${Math.ceil(diff / 3600)} 小时后`;
-  return `约 ${Math.ceil(diff / 86400)} 天后`;
-}
 
 /** 阶段彩色小标签：一眼看出卡在哪一步 */
 function StageBadge({ stage }: { stage: NapCatStage }) {
@@ -54,7 +28,7 @@ function StatusDot({ up, label, title }: { up: boolean; label: string; title: st
   );
 }
 
-/** QQ 存档 Bot 面板：运行状态、启停控制、下载队列进度与 bot 目录/Python 设置 */
+/** QQ 存档 Bot 面板：运行状态、启停控制与 NapCat 登录状态 */
 export function QqBotPanel({
   notify,
   status,
@@ -68,20 +42,7 @@ export function QqBotPanel({
   refresh: () => Promise<void>;
 }) {
   const [actionBusy, setActionBusy] = useState<string | null>(null);
-  const [root, setRoot] = useState("");
-  const [python, setPython] = useState("");
-  // ref 做轮询回填的同步守卫，state 驱动按钮禁用（改 ref 不会触发重渲染）
-  const [saving, setSaving] = useState(false);
-  const savingRef = useRef(false);
-  // 用户手改过输入框后不再被轮询回填覆盖，否则每 10 秒就会跳回磁盘上的旧值
-  const dirty = useRef(false);
   const napcat = useNapcatStatus();
-
-  useEffect(() => {
-    if (savingRef.current || dirty.current) return;
-    setRoot(status?.settings.root ?? "");
-    setPython(status?.settings.python ?? "");
-  }, [status]);
 
   const runAction = async (name: string, action: () => Promise<string | void>) => {
     setActionBusy(name);
@@ -113,42 +74,7 @@ export function QqBotPanel({
     });
   };
 
-  const handleSaveSettings = async () => {
-    if (!root.trim() || !python.trim()) {
-      notify("bot 目录与 Python 路径都不能为空", "error");
-      return;
-    }
-    savingRef.current = true;
-    setSaving(true);
-    try {
-      await api.saveBotSettings(root.trim(), python.trim());
-      notify("Bot 设置已保存");
-      dirty.current = false;
-      await refresh();
-    } catch (e) {
-      notify(`保存失败：${String(e)}`, "error");
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
-  };
-
-  const handlePickRoot = async () => {
-    try {
-      const dir = await open({ directory: true, multiple: false, title: "选择 QQ Bot 目录（需包含 bot.py）" });
-      if (typeof dir === "string") { dirty.current = true; setRoot(dir); }
-    } catch (e) {
-      notify(`选择目录失败：${String(e)}`, "error");
-    }
-  };
-
-  // 以锁判定为准：pythonw 空命令行时 PID 读不到，但 bot 确实在跑
   const running = status != null && (status.bot_running || status.bot_pid != null);
-  const dl = status?.dl;
-  const dlTotal = dl ? dl.ok + dl.pending + dl.busy + dl.dead : 0;
-  const dlPercent = dlTotal > 0 && dl ? Math.round((dl.ok / dlTotal) * 100) : 0;
-  const events = status?.events;
-  const queued = events ? events.new + events.busy : 0;
 
   // 端口不通且 bot 也没在跑时提示冷启动等待；NapCat 侧的扫码引导由下方
   // NapCat 状态卡的二维码+summary 负责，这里不再重复说
@@ -273,119 +199,6 @@ export function QqBotPanel({
         </section>
       )}
 
-      {status && dl && events && (
-        <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-3 shrink-0">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">下载进度</span>
-            <span className="text-xs text-gray-400 tabular-nums">
-              成功 {dl.ok} / 下载中 {dl.busy} / 排队 {dl.pending} / 待复检 {dl.dead}
-            </span>
-          </div>
-          <div className="h-2 rounded-full bg-white/10 overflow-hidden" role="progressbar" aria-valuenow={dlPercent} aria-valuemin={0} aria-valuemax={100}>
-            <div className="h-full bg-emerald-500 transition-all" style={{ width: `${dlPercent}%` }} />
-          </div>
-          <div className="flex items-center justify-between text-xs text-gray-400 flex-wrap gap-1">
-            <span>完成率 {dlPercent}%（纯文本消息 {dl.none} 条不计入）</span>
-            <span>
-              事件积压 {queued}（新 {events.new} / 处理中 {events.busy} / 完成 {events.done} / 出错 {events.error} / 弃 {events.dead}）
-            </span>
-          </div>
-        </section>
-      )}
-
-      {status && status.queue.length > 0 && (
-        <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-2 min-h-0" style={{ flex: "1 1 260px" }}>
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">下载队列（{status.queue.length}）</span>
-            <span className="text-xs text-gray-400">每 10 秒自动刷新</span>
-          </div>
-          <div className="overflow-y-auto" style={{ maxHeight: "42vh" }}>
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
-                <tr>
-                  <th className="text-left font-medium py-1.5 px-2">文件名</th>
-                  <th className="text-right font-medium py-1.5 px-2">大小</th>
-                  <th className="text-left font-medium py-1.5 px-2">类型</th>
-                  <th className="text-left font-medium py-1.5 px-2">状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.queue.map((item) => {
-                  const kindLabel =
-                    item.kind === "image" ? "图片"
-                    : item.kind === "video" ? "视频"
-                    : item.kind === "file" ? "文件"
-                    : item.kind === "text" ? "文本"
-                    : item.kind;
-                  const stateLabel =
-                    item.dl === "busy" ? "下载中" : item.dl === "dead" ? "待复检" : "排队";
-                  return (
-                    <tr
-                      key={item.id}
-                      className="border-t border-white/5 hover:bg-white/5"
-                      title={item.err ?? undefined}
-                    >
-                      <td className="py-1.5 px-2 text-gray-200 truncate max-w-[36ch]" title={item.label ?? `#${item.id}`}>
-                        {item.label ?? `#${item.id}`}
-                      </td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
-                      <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
-                      <td className="py-1.5 px-2">
-                        <span className={item.dl === "busy" ? "text-blue-300" : item.dl === "dead" ? "text-amber-300" : "text-yellow-300"}>
-                          {stateLabel}
-                          <span className="text-gray-500"> · {nextTryLabel(item.next_try_at, item.dl)}</span>
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {status && status.queue.length === 0 && !loadError && (
-        <div className="text-xs text-gray-500 text-center py-6 bg-white/5 rounded-xl">
-          {running ? "当前没有待下载或失败的消息" : "Bot 未运行，先点「启动 Bot」"}
-        </div>
-      )}
-
-      <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-3 shrink-0">
-        <span className="text-sm font-medium">设置（保存后立即生效于下次启动）</span>
-        <label className="flex flex-col gap-1 text-xs text-gray-400">
-          Bot 目录（含 bot.py 与 start.bat）
-          <div className="flex gap-2">
-            <input
-              value={root}
-              onChange={(e) => { dirty.current = true; setRoot(e.target.value); }}
-              className="flex-1 bg-black/30 rounded-lg px-3 py-1.5 text-sm text-gray-200 outline-none focus:ring-1 focus:ring-blue-500"
-              spellCheck={false}
-            />
-            <button onClick={handlePickRoot} className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-xs">
-              浏览…
-            </button>
-          </div>
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-gray-400">
-          Python 解释器（python.exe）
-          <input
-            value={python}
-            onChange={(e) => { dirty.current = true; setPython(e.target.value); }}
-            className="bg-black/30 rounded-lg px-3 py-1.5 text-sm text-gray-200 outline-none focus:ring-1 focus:ring-blue-500"
-            spellCheck={false}
-          />
-        </label>
-        <div>
-          <button
-            onClick={() => void handleSaveSettings()}
-            disabled={saving}
-            className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs font-medium"
-          >
-            保存设置
-          </button>
-        </div>
-      </section>
     </div>
   );
 }
