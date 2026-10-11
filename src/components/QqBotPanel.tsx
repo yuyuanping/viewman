@@ -150,16 +150,13 @@ export function QqBotPanel({
   const events = status?.events;
   const queued = events ? events.new + events.busy : 0;
 
-  // 端口不通时给出可执行的原因：NapCat 在等扫码登录时进程在但端口不开，
-  // 这正是“点了启动没反应”的真实原因，不写出来就只能对着四个灰灯猜。
+  // 端口不通且 bot 也没在跑时提示冷启动等待；NapCat 侧的扫码引导由下方
+  // NapCat 状态卡的二维码+summary 负责，这里不再重复说
   const hint = !status
     ? null
-    : status.bot_running && !status.ws_up
-      ? "bot.py 在跑但连不上 NapCat：NapCat 进程已起、端口未开，通常是卡在“等待扫码登录”。"
-      + "需要扫码后 9501 才会监听。二维码在 NapCat 目录下 resources\\app\\napcat\\cache\\qrcode.png。"
-      : !status.bot_running && !status.ws_up
-        ? "bot 未运行、NapCat 端口也未开。若刚点过启动，NapCat 冷启动约需 1-2 分钟；期间多为等待扫码。"
-        : null;
+    : !status.bot_running && !status.ws_up
+      ? "bot 未运行、NapCat 端口也未开。若刚点过启动，NapCat 冷启动约需 1-2 分钟；期间多为等待扫码。"
+      : null;
 
   return (
     <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
@@ -266,17 +263,6 @@ export function QqBotPanel({
                 </button>
               </div>
             </div>
-          )}
-
-          {napcat.status.recent_errors.length > 0 && (
-            <details className="text-xs text-gray-400">
-              <summary className="cursor-pointer select-none">最近错误（{napcat.status.recent_errors.length}）</summary>
-              <ul className="mt-2 flex flex-col gap-1 max-h-32 overflow-y-auto">
-                {napcat.status.recent_errors.map((e, i) => (
-                  <li key={i} className="text-red-300/90 break-all">{e}</li>
-                ))}
-              </ul>
-            </details>
           )}
 
           {napcat.status.webui_url && (

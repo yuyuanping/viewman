@@ -36,6 +36,21 @@ pub use thumbnails::*;
 pub use video_detect::*;
 pub use videos::*;
 
+/// GUI 进程里 spawn 控制台程序（powershell/netstat/taskkill/cmd）默认会弹黑框。
+/// qqbot/napcat 的状态轮询每 5-10 秒就要 spawn 一次，必须用这个把窗口压掉
+/// （CREATE_NO_WINDOW），否则打包出来的应用会一直闪黑窗口。
+pub(crate) fn silent_command(program: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new(program);
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
+    }
+    #[cfg(not(windows))]
+    std::process::Command::new(program)
+}
+
 /// 把 (id, 路径) 一批送进回收站，返回没能删掉的那些。视频库与图片库共用。
 /// 整批只开一次 shell 事务（`trash::delete_all` 内部就是一个 IFileOperation），
 /// 逐张送的话每张都要一次回收站注册 + 一次刷新。

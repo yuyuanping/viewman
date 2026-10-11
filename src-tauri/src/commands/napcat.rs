@@ -15,11 +15,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::MapErrStr;
+use super::{silent_command, MapErrStr};
 
-// start.bat 把 NapCat 的 stdout/stderr 重定向到这两个文件（见 qqbot/start.bat）
+// start.bat 把 NapCat 的 stdout 重定向到这个文件（见 qqbot/start.bat）
 const CONSOLE_LOG: &str = "D:\\QQBot_Data\\napcat_console.log";
-const CONSOLE_ERR_LOG: &str = "D:\\QQBot_Data\\napcat_console_err.log";
 // OneKey 套件根目录：里面有多套 Shell，靠扫描发现，不写死具体版本号
 const NAPCAT_ROOT: &str = "D:\\tool\\NapCat.Shell.Windows.OneKey";
 const QQ_EXE_NAME: &str = "QQ.exe";
@@ -54,8 +53,6 @@ pub struct NapCatStatus {
     pub qr_image: Option<String>,
     /// 面向用户的结论，一句话说清现在是什么情况
     pub summary: String,
-    /// 最近若干条错误/警告，按时间倒序
-    pub recent_errors: Vec<String>,
     /// 内核版本（"NapCat.Core Version: x.y.z"）
     pub core_version: Option<String>,
     /// WebUI 地址，方便用户直接点开改配置
@@ -211,7 +208,6 @@ pub fn summarize_log(text: &str, ports_up: bool) -> NapCatStatus {
     let mut adapter_ready = false;
     let mut login_error: Option<String> = None;
     let mut login_error_at = String::new();
-    let mut errors: Vec<String> = Vec::new();
     let mut last_ts = String::new();
 
     for line in text.lines() {
@@ -236,7 +232,8 @@ pub fn summarize_log(text: &str, ports_up: bool) -> NapCatStatus {
                     webui_url = Some(rest.trim().to_string());
                 }
             }
-            Some(LogEvent::Diagnostic(d)) => errors.push(d),
+            // 诊断性 warn/error 行不进状态快照（最近错误功能已移除）
+            Some(LogEvent::Diagnostic(_)) => {}
             None => {}
         }
     }
@@ -271,7 +268,6 @@ pub fn summarize_log(text: &str, ports_up: bool) -> NapCatStatus {
         account,
         qr_image,
         summary,
-        recent_errors: errors.into_iter().rev().take(8).collect(),
         core_version,
         webui_url,
     }
@@ -317,7 +313,7 @@ fn timestamp_of(line: &str) -> Option<String> {
 /// 找 NapCatWinBootMain.exe 的 PID
 pub fn find_napcat_pid() -> Option<u32> {
     let script = "Get-CimInstance Win32_Process -Filter \"Name='NapCatWinBootMain.exe'\" | ForEach-Object { $_.ProcessId }";
-    let out = std::process::Command::new("powershell")
+    let out = silent_command("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()
         .ok()?;
@@ -332,7 +328,7 @@ fn read_to_string(path: &str) -> Option<String> {
 
 /// 端口是否在监听（复用 qqbot 的探测思路）
 fn ports_up(ws: u16, http: u16) -> (bool, bool) {
-    let out = std::process::Command::new("netstat")
+    let out = silent_command("netstat")
         .args(["-ano", "-p", "tcp"])
         .output();
     let listening = match out {
@@ -586,16 +582,6 @@ pub async fn get_napcat_status() -> Result<NapCatStatus, String> {
             status.summary = "NapCat 未运行（检测到历史日志，但进程已退出）".to_string();
             status.qr_image = None;
         }
-        if let Some(err) = read_to_string(CONSOLE_ERR_LOG) {
-            let tail: Vec<String> = err
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .rev()
-                .take(3)
-                .map(strip_ansi)
-                .collect();
-            status.recent_errors.extend(tail);
-        }
         Ok(status)
     })
     .await
@@ -718,8 +704,6 @@ mod tests {
         );
         assert_eq!(s.core_version.as_deref(), Some("4.18.28"));
         assert!(s.webui_url.is_some());
-        // 提示文案不该把二维码噪音当成错误
-        assert!(s.recent_errors.is_empty(), "got {:?}", s.recent_errors);
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -7,7 +6,7 @@ use tauri::State;
 
 use crate::db;
 
-use super::{AppState, MapErrStr};
+use super::{silent_command, AppState, MapErrStr};
 
 /// bot 工作目录 / Python 解释器：首次用内置默认值（bot 源码随仓库放在 qqbot\ 下），
 /// 用户在面板里改过之后按 viewman.db settings 表里存的走
@@ -225,7 +224,7 @@ fn bot_lock_held(data_dir: &Path) -> bool {
 /// 别的 Python 程序不受影响；powershell 冷启动约一秒，配 10s 轮询无压力
 fn find_pids() -> (Option<u32>, Option<u32>) {
     let script = "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" | Where-Object { $_.CommandLine -like '*bot.py*' -or $_.CommandLine -like '*riskwatch.py*' } | ForEach-Object { if ($_.CommandLine -like '*riskwatch.py*') { \"rw $($_.ProcessId)\" } else { \"bot $($_.ProcessId)\" } }";
-    let out = Command::new("powershell")
+    let out = silent_command("powershell")
         .args(["-NoProfile", "-Command", script])
         .output();
     let (mut bot, mut rw) = (None, None);
@@ -244,7 +243,7 @@ fn find_pids() -> (Option<u32>, Option<u32>) {
 }
 
 fn port_up(port: u16) -> bool {
-    let out = Command::new("netstat").args(["-ano", "-p", "tcp"]).output();
+    let out = silent_command("netstat").args(["-ano", "-p", "tcp"]).output();
     if let Ok(o) = out {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -442,7 +441,7 @@ pub fn start_bot(state: State<AppState>) -> Result<(), String> {
             bat.display()
         ));
     }
-    Command::new("wscript")
+    silent_command("wscript")
         .arg(&vbs)
         .arg(&bat)
         .spawn()
@@ -459,7 +458,7 @@ pub async fn stop_bot() -> Result<String, String> {
         let mut msg = String::new();
         for (name, pid) in [("bot.py", bot), ("riskwatch.py", rw)] {
             match pid {
-                Some(pid) => match Command::new("taskkill")
+                Some(pid) => match silent_command("taskkill")
                     .args(["/F", "/PID", &pid.to_string()])
                     .output()
                 {
@@ -491,7 +490,7 @@ pub async fn stop_all_bot(state: State<'_, AppState>) -> Result<String, String> 
         if !bat.is_file() {
             return Err(format!("找不到 stop.bat: {}", bat.display()));
         }
-        let out = Command::new("cmd")
+        let out = silent_command("cmd")
             .args(["/c", &bat.to_string_lossy()])
             .output()
             .map_err(|e| format!("执行 stop.bat 失败: {}", e))?;

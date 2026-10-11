@@ -134,7 +134,6 @@ export interface NapCatStatus {
   qr_image: string | null;
   /** 一句话说清现在的情况 */
   summary: string;
-  recent_errors: string[];
   core_version: string | null;
   webui_url: string | null;
 }
