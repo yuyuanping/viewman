@@ -39,6 +39,35 @@ pub fn run() {
                 cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
                 thumb_running: std::sync::Mutex::new(std::collections::HashSet::new()),
             });
+            // 缓存目录迁移自愈：thumbnail_path 存的是绝对路径，cache_dir 改变后
+            // 旧前缀全部失效。把仍指向旧 app_data 缩略图目录的记录改指当前缓存
+            // 目录（纯前缀替换；前缀相同即零行更新，常开无害）
+            {
+                use tauri::Manager;
+                let mig_handle = app.handle().clone();
+                if let Ok(new_base) = commands::thumbnails_dir(&mig_handle) {
+                    if let Ok(old_base) = app.path().app_data_dir() {
+                        let old_prefix = old_base.join("thumbnails").to_string_lossy().to_string();
+                        let new_prefix = new_base.to_string_lossy().to_string();
+                        if old_prefix != new_prefix {
+                            if let Ok(conn) = app.state::<AppState>().db.lock() {
+                                for table in ["images", "videos"] {
+                                    let _ = conn.execute(
+                                        &format!(
+                                            "UPDATE {table} SET thumbnail_path = ?1 || substr(thumbnail_path, ?2)                                              WHERE thumbnail_path LIKE ?3"
+                                        ),
+                                        rusqlite::params![
+                                            format!("{}\\", new_prefix),
+                                            old_prefix.chars().count() as i64 + 1,
+                                            format!(r"{}\%", old_prefix),
+                                        ],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // 扫描根目录监视：文件变化防抖后自动增量扫描（失败不影响手动扫描）
             watcher::spawn(app.handle().clone());
             // 后台清一轮孤儿缩略图：两张表都查无此 id 的缓存文件（失败不影响启动）
