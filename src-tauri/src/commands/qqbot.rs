@@ -21,42 +21,17 @@ pub struct BotSettings {
     pub python: String,
 }
 
-/// messages 表按 dl 状态计数，即下载队列进度口径（dl=none 的文本行不占用下载槽）
+/// messages 表按 dl 状态计数，即下载队列进度口径。侧栏徽标取 pending+busy+dead
+/// 作为积压数；none 是纯文本消息不占下载槽，ok 是已完成（面板已不展示明细，
+/// 只留徽标用的三项）
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct BotDlStats {
-    pub none: i64,
     pub pending: i64,
     pub busy: i64,
-    pub ok: i64,
     pub dead: i64,
 }
 
-/// events 表按处理状态计数：消息先入这张表才消费，堆积即积压
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct BotEventStats {
-    pub new: i64,
-    pub busy: i64,
-    pub done: i64,
-    pub error: i64,
-    pub dead: i64,
-}
-
-/// 下载队列一行：待下载 / 下载中 / 失败待重试的消息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BotQueueItem {
-    pub id: i64,
-    pub kind: String,
-    pub label: Option<String>,
-    pub size: Option<i64>,
-    pub tries: i64,
-    /// Unix 秒：下次重试时间（busy 行正在下载，此值是上次排定的）
-    pub next_try_at: Option<f64>,
-    /// 最近一次失败原因，截断到 120 字
-    pub err: Option<String>,
-    pub dl: String,
-}
-
-/// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）统计与下载队列。
+/// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数。
 /// bot.db 不存在或打不开不影响整体返回，前端拿 db_note 提示
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotStatus {
@@ -70,8 +45,6 @@ pub struct BotStatus {
     pub ws_up: bool,
     pub api_up: bool,
     pub dl: BotDlStats,
-    pub events: BotEventStats,
-    pub queue: Vec<BotQueueItem>,
     pub db_note: Option<String>,
 }
 
@@ -258,124 +231,34 @@ fn port_up(port: u16) -> bool {
     false
 }
 
-/// 从连接读统计与下载队列；拆出来是为单测可直接喂内存库
-/// 下载队列一行的原始列：id, kind, name, text 前 80 字, bytes, tries, next_try, err, dl
-type QueueRow = (
-    i64,
-    String,
-    Option<String>,
-    String,
-    Option<i64>,
-    i64,
-    f64,
-    Option<String>,
-    String,
-);
-
-fn read_stats(
-    conn: &rusqlite::Connection,
-) -> Result<(BotDlStats, BotEventStats, Vec<BotQueueItem>), String> {
+/// 从连接读下载积压计数；拆出来是为单测可直接喂内存库
+fn read_stats(conn: &rusqlite::Connection) -> Result<BotDlStats, String> {
     let mut dl = BotDlStats::default();
-    {
-        let mut stmt = conn
-            .prepare("SELECT dl, COUNT(*) FROM messages GROUP BY dl")
-            .map_err_str()?;
-        for row in stmt
-            .query_map([], |r: &rusqlite::Row| -> rusqlite::Result<(String, i64)> {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .map_err_str()?
-        {
-            let (k, n) = row.map_err_str()?;
-            match k.as_str() {
-                "pending" => dl.pending = n,
-                "busy" => dl.busy = n,
-                "ok" => dl.ok = n,
-                "dead" => dl.dead = n,
-                _ => dl.none += n,
-            }
-        }
-    }
-
-    let mut events = BotEventStats::default();
-    {
-        let mut stmt = conn
-            .prepare("SELECT status, COUNT(*) FROM events GROUP BY status")
-            .map_err_str()?;
-        for row in stmt
-            .query_map([], |r: &rusqlite::Row| -> rusqlite::Result<(String, i64)> {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .map_err_str()?
-        {
-            let (k, n) = row.map_err_str()?;
-            match k.as_str() {
-                "new" => events.new = n,
-                "busy" => events.busy = n,
-                "done" => events.done = n,
-                "error" => events.error = n,
-                "dead" => events.dead = n,
-                _ => {}
-            }
-        }
-    }
-
-    // 下载队列：busy 排最前，其余按下次重试时间；上限 100 行足够面板看
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, name, substr(COALESCE(text, ''), 1, 80), bytes, tries,
-                    next_try, err, dl
-             FROM messages WHERE dl IN ('pending','busy','dead')
-             ORDER BY CASE WHEN dl = 'busy' THEN 0 ELSE 1 END, next_try
-             LIMIT 100",
+            "SELECT dl, COUNT(*) FROM messages
+             WHERE dl IN ('pending','busy','dead') GROUP BY dl",
         )
         .map_err_str()?;
-    let mut queue: Vec<BotQueueItem> = Vec::new();
     for row in stmt
-        .query_map([], |r: &rusqlite::Row| -> rusqlite::Result<QueueRow> {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-            ))
+        .query_map([], |r: &rusqlite::Row| -> rusqlite::Result<(String, i64)> {
+            Ok((r.get(0)?, r.get(1)?))
         })
         .map_err_str()?
     {
-        let (id, kind, name, text, bytes, tries, next_try, err, state) = row.map_err_str()?;
-        let trimmed_text = text.trim();
-        let label = name
-            .filter(|n| !n.trim().is_empty())
-            .or_else(|| {
-                if trimmed_text.is_empty() {
-                    None
-                } else {
-                    Some(text.clone())
-                }
-            })
-            .or_else(|| Some(kind.clone()))
-            .unwrap_or_else(|| format!("#{}", id));
-        queue.push(BotQueueItem {
-            id,
-            kind,
-            label: Some(label),
-            size: bytes,
-            tries,
-            next_try_at: Some(next_try),
-            err: err.map(|e| e.chars().take(120).collect()),
-            dl: state,
-        });
+        let (k, n) = row.map_err_str()?;
+        match k.as_str() {
+            "pending" => dl.pending = n,
+            "busy" => dl.busy = n,
+            "dead" => dl.dead = n,
+            _ => {}
+        }
     }
-    Ok((dl, events, queue))
+    Ok(dl)
 }
 
-/// 只读打开 bot.db（WAL 库，bot 运行中也在写）拿统计；读连接短轮询 5s 等锁，不自持
-fn read_bot_db(db_path: &str) -> Result<(BotDlStats, BotEventStats, Vec<BotQueueItem>), String> {
+/// 只读打开 bot.db（WAL 库，bot 运行中也在写）拿积压计数；读连接短轮询 5s 等锁，不自持
+fn read_bot_db(db_path: &str) -> Result<BotDlStats, String> {
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let conn = rusqlite::Connection::open_with_flags(db_path, flags).map_err_str()?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
@@ -395,18 +278,12 @@ pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> 
         let api_up = port_up(9502);
 
         let mut dl = BotDlStats::default();
-        let mut events = BotEventStats::default();
-        let mut queue: Vec<BotQueueItem> = Vec::new();
         let db_path = bot_db_path(&settings.root);
         let mut db_note: Option<String> = None;
         match std::fs::metadata(&db_path) {
             Err(_) => db_note = Some(format!("数据库不存在: {}", db_path.display())),
             Ok(_) => match read_bot_db(&db_path.to_string_lossy()) {
-                Ok((d, e, q)) => {
-                    dl = d;
-                    events = e;
-                    queue = q;
-                }
+                Ok(d) => dl = d,
                 Err(msg) => db_note = Some(msg),
             },
         }
@@ -418,8 +295,6 @@ pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> 
             ws_up,
             api_up,
             dl,
-            events,
-            queue,
             db_note,
         })
     })
@@ -513,26 +388,12 @@ mod tests {
     fn test_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE events(id INTEGER PRIMARY KEY, received_at REAL, status TEXT, payload TEXT);
-             CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, text TEXT,
-                bytes INTEGER, tries INTEGER, next_try REAL, err TEXT, dl TEXT);",
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT);",
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages(id, kind, name, bytes, tries, next_try, err, dl)
-             VALUES (1,'image','a.jpg',4096,2,99999.0,'timeout','pending'),
-                    (2,'video',NULL,0,0,0,NULL,'busy'),
-                    (3,'text',NULL,0,8,9999999.0,'api 500','dead')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO events(received_at, status, payload) VALUES (0,'new','{}')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO events(received_at, status, payload) VALUES (0,'done','{}')",
+            "INSERT INTO messages(id, dl)
+             VALUES (1,'pending'), (2,'busy'), (3,'dead'), (4,'ok'), (5,'none')",
             [],
         )
         .unwrap();
@@ -540,20 +401,10 @@ mod tests {
     }
 
     #[test]
-    fn stats_and_queue_shape() {
+    fn stats_count_only_backlog_states() {
         let conn = test_db();
-        let (dl, events, queue) = read_stats(&conn).unwrap();
-        assert_eq!(
-            (dl.pending, dl.busy, dl.dead, dl.ok, dl.none),
-            (1, 1, 1, 0, 0)
-        );
-        assert_eq!((events.new, events.done), (1, 1));
-        assert_eq!(queue.len(), 3);
-        assert_eq!(queue[0].dl, "busy");
-        assert_eq!(queue[1].label.as_deref(), Some("a.jpg"));
-        assert_eq!(queue[1].tries, 2);
-        assert_eq!(queue[2].label.as_deref(), Some("text"));
-        assert_eq!(queue[2].err.as_deref(), Some("api 500"));
+        let dl = read_stats(&conn).unwrap();
+        assert_eq!((dl.pending, dl.busy, dl.dead), (1, 1, 1));
     }
 
     #[test]

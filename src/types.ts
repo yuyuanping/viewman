@@ -66,39 +66,14 @@ export interface BotSettings {
   python: string;
 }
 
-/** 下载进度口径：messages 表按 dl 状态计数（dl=none 的纯文本行不占下载槽） */
+/** 下载积压口径：messages 表按 dl 状态计数，侧栏徽标取 pending+busy+dead */
 export interface BotDlStats {
-  none: number;
   pending: number;
   busy: number;
-  ok: number;
   dead: number;
 }
 
-/** events 表按处理状态计数：消息先入这张表才被消费，堆积即积压 */
-export interface BotEventStats {
-  new: number;
-  busy: number;
-  done: number;
-  error: number;
-  dead: number;
-}
-
-/** 下载队列一行：待下载 / 下载中 / 失败待重试的消息 */
-export interface BotQueueItem {
-  id: number;
-  kind: string;
-  label: string | null;
-  size: number | null;
-  tries: number;
-  /** Unix 秒：下次重试时间（busy 行正在下载，此值是上次排定的） */
-  next_try_at: number | null;
-  /** 最近一次失败原因（截断 120 字） */
-  err: string | null;
-  dl: string;
-}
-
-/** 一次状态快照：进程 + NapCat 端口 + bot.db 只读统计与下载队列，字段名与 Rust 端一致（snake_case） */
+/** 一次状态快照：进程 + NapCat 端口 + bot.db 只读积压计数，字段名与 Rust 端一致（snake_case） */
 export interface BotStatus {
   settings: BotSettings;
   bot_pid: number | null;
@@ -109,8 +84,6 @@ export interface BotStatus {
   ws_up: boolean;
   api_up: boolean;
   dl: BotDlStats;
-  events: BotEventStats;
-  queue: BotQueueItem[];
   /** bot.db 不存在或打不开时给提示，不影响其余状态 */
   db_note: string | null;
 }
