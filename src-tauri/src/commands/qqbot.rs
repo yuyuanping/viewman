@@ -273,13 +273,14 @@ fn read_stats(conn: &rusqlite::Connection) -> Result<BotDlStats, String> {
     Ok(dl)
 }
 
-/// 最近 50 条有下载动作的消息（含转发归档行）；dl='none' 的纯文本不进列表
+/// 最近 50 条有下载动作的消息（含转发归档行与转发明细行）；
+/// 纯文本直发消息（dl=none 且无 parent）不进列表
 fn read_recent(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, kind, COALESCE(NULLIF(name, ''), substr(COALESCE(text, ''), 1, 80), ''),
                     bytes, dedup, err, dl
-             FROM messages WHERE dl != 'none'
+             FROM messages WHERE dl != 'none' OR parent IS NOT NULL
              ORDER BY id DESC LIMIT 50",
         )
         .map_err_str()?;

@@ -490,10 +490,44 @@ class Bot:
                     self.storage.block_media = True
                     logger.warning("[BLOCK] 合并转发命中高危词，内部媒体不下载 fid=%s", fid)
                 stats: dict = {}
+
+                async def report(item: dict) -> None:
+                    """转发明细逐段落库：文本/嵌套转发记 dl=none，成功媒体记 ok，
+                    失败媒体进 pending 由既有重试管线按 src/ref 重下"""
+                    try:
+                        kind = item.get("kind", "")
+                        base = dict(event_id=row.get("id"), msg_id="", scope=scope,
+                                    peer_id=row.get("peer_id"), sender_id=None,
+                                    sender_nick=str(item.get("sender") or "[转发]"),
+                                    ts=int(item.get("ts") or 0) or None,
+                                    seg_index=None, parent=mid)
+                        if kind in ("text", "forward"):
+                            await self.db.add_message(**base, kind=kind,
+                                                      text=item.get("text", ""))
+                            return
+                        if item.get("ok") is None:
+                            # 拦截/表情包：只记占位，不进下载管线
+                            await self.db.add_message(**base, kind=kind,
+                                                      text=str(item.get("label") or ""))
+                        elif item.get("ok"):
+                            await self.db.add_message(
+                                **base, kind=kind, name=item.get("file"),
+                                src=item.get("src"), ref=item.get("ref"),
+                                md5=item.get("md5"), path=item.get("path"),
+                                bytes=item.get("bytes"), dl="ok",
+                                dedup=int(bool(item.get("dedup"))))
+                        else:
+                            await self.db.add_message(
+                                **base, kind=kind, name=item.get("file"),
+                                src=item.get("src"), ref=item.get("ref"),
+                                dl="pending")
+                    except Exception as e:
+                        logger.error("[FWD ITEM] 明细落库失败 id=%d: %s", mid, e)
+
                 try:
                     text = await render_node(data.get("messages", []), self.storage,
                                              self.expand_forward, self.get_file_url,
-                                             scope, stats=stats)
+                                             scope, stats=stats, report=report)
                 finally:
                     self.storage.block_media = fuse
                 if not text:

@@ -240,6 +240,7 @@ export function QqBotPanel({
                     item.dl === "busy" ? "下载中"
                     : item.dl === "dead" ? "失败"
                     : item.dl === "pending" ? "排队"
+                    : item.dl === "none" ? (item.kind === "text" ? "已存档" : "已归档")
                     : item.kind === "forward" ? "已归档"
                     : item.dedup > 0 ? "重复跳过"
                     : "已下载";
@@ -261,6 +262,7 @@ export function QqBotPanel({
                           item.dl === "busy" ? "text-blue-300"
                           : item.dl === "dead" ? "text-red-300"
                           : item.dl === "pending" ? "text-yellow-300"
+                          : item.dl === "none" ? "text-gray-500"
                           : item.dedup > 0 ? "text-gray-400"
                           : "text-emerald-300"
                         }>

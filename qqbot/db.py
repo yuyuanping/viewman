@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS messages(
   bytes       INTEGER,
   dl          TEXT NOT NULL DEFAULT 'none',  -- none/pending/busy/ok/dead
   dedup       INTEGER NOT NULL DEFAULT 0,   -- 媒体=复用现有文件(0/1)；转发=内部跳过的重复媒体数
+  parent      INTEGER REFERENCES messages(id),  -- 转发明细行指向所属转发行
   tries       INTEGER NOT NULL DEFAULT 0,
   next_try    REAL NOT NULL DEFAULT 0,
   err         TEXT
@@ -107,6 +108,8 @@ class DB:
             if "dedup" not in cols:
                 self._conn.execute(
                     "ALTER TABLE messages ADD COLUMN dedup INTEGER NOT NULL DEFAULT 0")
+            if "parent" not in cols:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN parent INTEGER")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
             # 崩溃恢复：上一次进程遗留的 busy 一律回队。只有 bot 主进程
