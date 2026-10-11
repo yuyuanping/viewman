@@ -303,34 +303,42 @@ export function QqBotPanel({
             <table className="w-full text-xs">
               <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
                 <tr>
-                  <th className="text-left font-medium py-1.5 px-2">类型</th>
-                  <th className="text-left font-medium py-1.5 px-2">名称</th>
+                  <th className="text-left font-medium py-1.5 px-2">文件名</th>
                   <th className="text-right font-medium py-1.5 px-2">大小</th>
-                  <th className="text-right font-medium py-1.5 px-2">重试</th>
+                  <th className="text-left font-medium py-1.5 px-2">类型</th>
                   <th className="text-left font-medium py-1.5 px-2">状态</th>
-                  <th className="text-left font-medium py-1.5 px-2">失败原因</th>
                 </tr>
               </thead>
               <tbody>
-                {status.queue.map((item) => (
-                  <tr key={item.id} className="border-t border-white/5 hover:bg-white/5">
-                    <td className="py-1.5 px-2 text-gray-300">{item.kind}</td>
-                    <td className="py-1.5 px-2 text-gray-200 truncate max-w-[32ch]" title={item.label ?? `#${item.id}`}>
-                      {item.label ?? `#${item.id}`}
-                    </td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{item.tries}</td>
-                    <td className="py-1.5 px-2">
-                      <span className={item.dl === "busy" ? "text-blue-300" : item.dl === "dead" ? "text-amber-300" : "text-yellow-300"}>
-                        {item.dl === "busy" ? "下载中" : item.dl === "dead" ? "待复检" : "排队"}
-                        <span className="text-gray-500"> · {nextTryLabel(item.next_try_at, item.dl)}</span>
-                      </span>
-                    </td>
-                    <td className="py-1.5 px-2 text-gray-400 truncate max-w-[30ch]" title={item.err ?? undefined}>
-                      {item.err ?? ""}
-                    </td>
-                  </tr>
-                ))}
+                {status.queue.map((item) => {
+                  const kindLabel =
+                    item.kind === "image" ? "图片"
+                    : item.kind === "video" ? "视频"
+                    : item.kind === "file" ? "文件"
+                    : item.kind === "text" ? "文本"
+                    : item.kind;
+                  const stateLabel =
+                    item.dl === "busy" ? "下载中" : item.dl === "dead" ? "待复检" : "排队";
+                  return (
+                    <tr
+                      key={item.id}
+                      className="border-t border-white/5 hover:bg-white/5"
+                      title={item.err ?? undefined}
+                    >
+                      <td className="py-1.5 px-2 text-gray-200 truncate max-w-[36ch]" title={item.label ?? `#${item.id}`}>
+                        {item.label ?? `#${item.id}`}
+                      </td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
+                      <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
+                      <td className="py-1.5 px-2">
+                        <span className={item.dl === "busy" ? "text-blue-300" : item.dl === "dead" ? "text-amber-300" : "text-yellow-300"}>
+                          {stateLabel}
+                          <span className="text-gray-500"> · {nextTryLabel(item.next_try_at, item.dl)}</span>
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
