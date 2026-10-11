@@ -240,7 +240,7 @@ export function QqBotPanel({
                     item.dl === "busy" ? "下载中"
                     : item.dl === "dead" ? "失败"
                     : item.dl === "pending" ? "排队"
-                    : item.dl === "none" ? (item.kind === "text" ? "已存档" : "已归档")
+                    : item.dl === "none" ? (item.kind === "text" ? "已存档" : item.kind === "forward" ? "已归档" : "已拦截")
                     : item.kind === "forward" ? "已归档"
                     : item.dedup > 0 ? "重复跳过"
                     : "已下载";

@@ -1,5 +1,6 @@
 """合并转发（asyncio）：递归展开（最多 3 层），媒体单次下载，返回格式化文本。"""
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from storage import md5_hint, is_sticker
@@ -82,6 +83,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                     continue
                 if storage.block_media:
                     parts.append("[图片·拦截]")
+                    if report:
+                        await report({"kind": "image", "sender": nickname,
+                                      "ts": inner_ts, "ok": None,
+                                      "label": "[拦截] " + (d.get("file") or "图片")})
                     continue
                 r = await _save_media_segment(d, "image", storage,
                                               get_file_url, scope)
@@ -93,7 +98,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                     await report({"kind": "image", "sender": nickname, "ts": inner_ts,
                                   "src": d.get("url", ""), "ref": d.get("file_id") or d.get("file") or "",
                                   "file": d.get("file"),
-                                  "ok": None if r is None and storage.block_media else (r is not None),
+                                  "ok": r is not None,
                                   "dedup": (r or {}).get("dedup"),
                                   "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
                                   "bytes": (r or {}).get("bytes"),
@@ -102,6 +107,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             elif t == "video":
                 if storage.block_media:
                     parts.append("[视频·拦截]")
+                    if report:
+                        await report({"kind": "video", "sender": nickname,
+                                      "ts": inner_ts, "ok": None,
+                                      "label": "[拦截] " + (d.get("file") or "视频")})
                     continue
                 r = await _save_media_segment(d, "video", storage,
                                               get_file_url, scope)
@@ -113,7 +122,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                     await report({"kind": "video", "sender": nickname, "ts": inner_ts,
                                   "src": d.get("url", ""), "ref": d.get("file_id") or d.get("file") or "",
                                   "file": d.get("file"),
-                                  "ok": None if r is None and storage.block_media else (r is not None),
+                                  "ok": r is not None,
                                   "dedup": (r or {}).get("dedup"),
                                   "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
                                   "bytes": (r or {}).get("bytes"),
@@ -122,6 +131,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             elif t == "file":
                 if storage.block_media:
                     parts.append("[文件·拦截]")
+                    if report:
+                        await report({"kind": "file", "sender": nickname,
+                                      "ts": inner_ts, "ok": None,
+                                      "label": "[拦截] " + (d.get("file") or "文件")})
                     continue
                 fid = d.get("file_id") or d.get("url") or ""
                 r = await storage.save_file(fid, d.get("file", "file"),
@@ -134,7 +147,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                     await report({"kind": "file", "sender": nickname, "ts": inner_ts,
                                   "src": fid, "ref": d.get("file_id") or "",
                                   "file": d.get("file"),
-                                  "ok": None if r is None and storage.block_media else (r is not None),
+                                  "ok": r is not None,
                                   "dedup": (r or {}).get("dedup"),
                                   "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
                                   "bytes": (r or {}).get("bytes"),
