@@ -194,6 +194,7 @@ WS 连上/重连后，原本会调 `get_group_msg_history` / `get_friend_msg_his
   "qq_account":     "你的QQ号（可选，NapCat 快速登录用；留空则每次扫码）",
   "dl_limit":       2,
   "block_terms":    ["javdb", "onlyfans", "siterip"],
+  "save_group":     false（只存私聊；true 恢复群聊存档）,
   "backfill_enabled": false
 }
 ```

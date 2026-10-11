@@ -258,6 +258,10 @@ class Bot:
         msg_type = data.get("message_type")
         if msg_type not in ("private", "group"):
             return
+        # 只存私聊（2026-10-11 用户要求）：群聊消息直接跳过，不入库不落盘。
+        # 想恢复群聊存档，config.json 里 save_group=true 重启即可
+        if msg_type == "group" and not self.config.get("save_group", False):
+            return
         # 高危内容整条跳过下载：合并转发正文要等展开才可见，本层先挡明文；
         # 转发里的媒体由 _attempt_row 的 expand 后二次过滤
         blocked = self._is_blocked(json.dumps(data, ensure_ascii=False))
