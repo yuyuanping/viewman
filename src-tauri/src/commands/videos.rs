@@ -863,11 +863,14 @@ fn cleanup_transcoded_cache(conn: &rusqlite::Connection, dir: &Path) -> usize {
 
 /// 启动清扫转码缓存（lib.rs 启动时后台跑）。失败不影响启动。
 pub fn cleanup_transcoded_files(app: &tauri::AppHandle) -> usize {
+    // 先取缓存目录再抢 DB 锁：cache_base 内部也要锁同一把 Mutex，
+    // 持锁调用它会自我死锁（锁被本线程攥着，全应用跟着卡死）
+    let dir = super::cache_base(app).join("transcoded");
     let state = app.state::<AppState>();
     let Ok(conn) = state.db.lock() else {
         return 0;
     };
-    cleanup_transcoded_cache(&conn, &super::cache_base(app).join("transcoded"))
+    cleanup_transcoded_cache(&conn, &dir)
 }
 
 /// 按需转码成 H.264 缓存到 `<app_data>/transcoded/<id>.mp4`；其他编码直接返回原路径。
