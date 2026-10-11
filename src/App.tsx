@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect, lazy, Suspense } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
+import { QqBotPanel } from "./components/QqBotPanel";
+import { useBotStatus } from "./hooks/useBotStatus";
 import { VideoGrid } from "./components/VideoGrid";
 import { SearchBar } from "./components/SearchBar";
 // 重面板懒加载：首屏只下视频库，图片库/播放器/历史按需拆包（JS 335KB 单包→多 chunk）
@@ -64,12 +66,18 @@ function App() {
   const { currentVideo, initialPosition, openPlayer, closePlayer } = usePlayer();
   const { launch: launchInPotPlayer, error: potPlayerError, clearError: clearPotPlayerError } = usePotPlayer(saveProgress);
 
-  const [tab, setTab] = useState<MediaKind>(() => (localStorage.getItem(TAB_PREF_KEY) === "image" ? "image" : "video"));
+  const [tab, setTab] = useState<MediaKind>(() => {
+    const saved = localStorage.getItem(TAB_PREF_KEY);
+    return saved === "image" || saved === "qq" ? saved : "video";
+  });
   const changeTab = useCallback((next: MediaKind) => {
     setTab(next);
     localStorage.setItem(TAB_PREF_KEY, next);
   }, []);
   const [selectedImageDir, setSelectedImageDir] = useState<string | null>(null);
+  // QQ Bot 状态常驻轮询：侧栏 tab 徽标在任何标签页下都实时，不等面板打开
+  const { status: botStatus, error: botError, refresh: refreshBot } = useBotStatus();
+  const qqQueueCount = botStatus ? botStatus.dl.pending + botStatus.dl.busy + botStatus.dl.dead : 0;
 
   useEffect(() => {
     void loadImageLibrary();
@@ -215,6 +223,11 @@ function App() {
   const [scanRoots, setScanRoots] = useState<string[]>([]);
   const [removingRoot, setRemovingRoot] = useState(false);
   const refreshScanRoots = useCallback(async () => {
+    // QQ tab 不走扫描目录：后端 roots_key 只认 video/image，这里直接置空避免无谓报错
+    if (tab === "qq") {
+      setScanRoots([]);
+      return;
+    }
     setScanRoots(await loadScanRoots(tab));
   }, [tab]);
 
@@ -461,7 +474,7 @@ function App() {
     });
   }, [currentVideo, closePlayer, openPlayer, progressMap, retargetVideosLocally, notify]);
 
-  const activeError = tab === "image" ? imagesError : libraryError;
+  const activeError = tab === "image" ? imagesError : tab === "qq" ? null : libraryError;
   const clearActiveError = tab === "image" ? clearImagesError : clearLibraryError;
 
   // 左侧目录栏显隐开关，记住用户上次的选择
@@ -503,6 +516,7 @@ function App() {
         onCancelScan={(task) => {
           api.cancelTask(task).catch((e) => notify(`取消失败：${String(e)}`, "error"));
         }}
+        qqQueueCount={qqQueueCount}
       />
       )}
       <button
@@ -538,7 +552,9 @@ function App() {
             </button>
           </div>
         )}
-        {tab === "image" ? (
+        {tab === "qq" ? (
+          <QqBotPanel notify={notify} status={botStatus} loadError={botError} refresh={refreshBot} />
+        ) : tab === "image" ? (
           <Suspense fallback={<PanelFallback label="图片库" />}>
             <ImageLibrary
               libraryVersion={libraryVersion}

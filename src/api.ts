@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BotSettings,
+  BotStatus,
   ConversionResult,
   Image,
   MediaKind,
+  NapCatDiagnose,
+  NapCatStatus,
   PotPlayerStatus,
   RecentlyPlayed,
   ScanOutcome,
@@ -104,6 +108,20 @@ export const api = {
   getVideoDuplicateCache: () => invoke<VideoDuplicateCache | null>("get_video_duplicate_cache"),
   /** 面板按 ✕ 清结果：缓存一起删，不然下次打开又被恢复回来 */
   clearDetectionCache: (which: DetectionKind) => invoke<void>("clear_detection_cache", { which }),
+  /** QQ Bot：设置读写、状态快照与启停。bot.py 与 riskwatch.py 以子进程运行，状态靠进程/端口/数据库三合一检测 */
+  loadBotSettings: () => invoke<BotSettings>("load_bot_settings"),
+  saveBotSettings: (root: string, python: string) =>
+    invoke<void>("save_bot_settings", { root, python }),
+  getBotStatus: () => invoke<BotStatus>("get_bot_status"),
+  startBot: () => invoke<void>("start_bot"),
+  /** 只停 bot.py 与 riskwatch，QQ/NapCat 不动；返回逐条结果说明 */
+  stopBot: () => invoke<string>("stop_bot"),
+  /** 全停 = stop.bat：bot + riskwatch + NapCat + QQ，杀 QQ 可能需要管理员权限 */
+  stopAllBot: () => invoke<string>("stop_all_bot"),
+  /** NapCat 管理层：状态快照（日志解析）、配置体检、一键修复配置漂移 */
+  getNapcatStatus: () => invoke<NapCatStatus>("get_napcat_status"),
+  napcatDiagnose: () => invoke<NapCatDiagnose>("napcat_diagnose_cmd"),
+  napcatSyncConfig: () => invoke<string>("napcat_sync_config"),
 };
 
 export type DetectionKind = "duplicate" | "videoDuplicate";

@@ -34,6 +34,8 @@ interface SidebarProps {
   onRemoveRoot: (dir: string) => Promise<void>;
   /** 取消当前扫描：后端 cancel_task(scan-video/scan-image)，已扫部分保留 */
   onCancelScan?: (task: string) => void;
+  /** QQ 存档 tab 徽标：下载队列里未完成的条数（pending + busy + dead） */
+  qqQueueCount: number;
 }
 
 export function Sidebar({
@@ -42,7 +44,7 @@ export function Sidebar({
   loading, scanProgress, rescanStatus, usePotPlayer, onTogglePotPlayer,
   images, selectedImageDir, onSelectImageDir, onScanImageDirectory,
   imageLoading, imageScanProgress, imageRescanStatus,
-  roots, removingRoot, onRemoveRoot, onCancelScan,
+  roots, removingRoot, onRemoveRoot, onCancelScan, qqQueueCount,
 }: SidebarProps) {
   const [potplayerOk, setPotplayerOk] = useState<boolean | null>(null);
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
@@ -55,6 +57,7 @@ export function Sidebar({
 
   const [operationError, setOperationError] = useState<string | null>(null);
   const isImageTab = tab === "image";
+  const isQqTab = tab === "qq";
   const activeLoading = isImageTab ? imageLoading : loading;
   const activeScanProgress = isImageTab ? imageScanProgress : scanProgress;
   const activeRescanStatus = isImageTab ? imageRescanStatus : rescanStatus;
@@ -105,13 +108,17 @@ export function Sidebar({
     <aside className="library-sidebar h-full text-white flex flex-col p-5 gap-3">
       <div className="flex items-center gap-3 mb-5 mt-1"><span className="w-9 h-9 rounded-xl bg-blue-600 grid place-items-center shadow-lg shadow-blue-600/20"><svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l14-8z"/></svg></span><div><h1 className="text-lg font-semibold tracking-tight">ViewMan</h1><p className="text-[10px] text-gray-400 tracking-wider">本地媒体管理</p></div></div>
       <div className="media-tabs" role="tablist" aria-label="媒体库切换">
-        <button role="tab" type="button" aria-selected={!isImageTab} className={`media-tab${!isImageTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("video")}>
+        <button role="tab" type="button" aria-selected={!isImageTab && !isQqTab} className={`media-tab${!isImageTab && !isQqTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("video")}>
           视频 <span className="media-tab-count">{videos.length}</span>
         </button>
         <button role="tab" type="button" aria-selected={isImageTab} className={`media-tab${isImageTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("image")}>
           图片 <span className="media-tab-count">{images?.total ?? 0}</span>
         </button>
+        <button role="tab" type="button" aria-selected={isQqTab} className={`media-tab${isQqTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("qq")}>
+          QQ <span className="media-tab-count">{qqQueueCount}</span>
+        </button>
       </div>
+      {!isQqTab && <>
       <button
         onClick={handleScan}
         disabled={activeLoading}
@@ -207,6 +214,7 @@ export function Sidebar({
           <RecentlyPlayedList items={recentlyPlayed} onPlay={onPlayVideo} />
         </>
       )}
+      </>}
     </aside>
   );
 }

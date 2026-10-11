@@ -9,8 +9,10 @@ mod image_anim;
 mod image_detect;
 mod images;
 mod maintenance;
+mod napcat;
 mod players;
 mod progress;
+mod qqbot;
 mod removal;
 mod scan;
 mod settings;
@@ -23,8 +25,10 @@ pub use image_anim::*;
 pub use image_detect::*;
 pub use images::*;
 pub use maintenance::*;
+pub use napcat::*;
 pub use players::*;
 pub use progress::*;
+pub use qqbot::*;
 pub use removal::*;
 pub use scan::*;
 pub use settings::*;
@@ -170,9 +174,7 @@ pub(crate) fn clear_cancel(app: &tauri::AppHandle, task: &str) {
 }
 
 /// 只读查询连接：失败时调用方回退全局锁（open 失败几乎只发生在库文件被删的极端情况）
-pub(crate) fn read_conn_or_lock(
-    app: &tauri::AppHandle,
-) -> Result<rusqlite::Connection, String> {
+pub(crate) fn read_conn_or_lock(app: &tauri::AppHandle) -> Result<rusqlite::Connection, String> {
     use tauri::Manager;
     let path = app.state::<AppState>().db_path.clone();
     crate::db::open_read_conn(&path).map_err(|e| e.to_string())
@@ -212,14 +214,14 @@ pub(crate) fn cache_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, 
 /// 收路径而不是 AppHandle，单测就能拿临时目录直接验这套读写。
 /// Windows 上 rename 目标存在即失败：先删目标再改名，失败清掉 tmp 不留过期缓存。
 pub(crate) fn write_cache_file<T: serde::Serialize>(path: &Path, value: &T) {
-    let Ok(json) = serde_json::to_string(value) else { return };
+    let Ok(json) = serde_json::to_string(value) else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok()
-        && std::fs::rename(&tmp, path).is_err()
-    {
+    if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, path).is_err() {
         // Windows：目标已存在时 rename 失败，先删再试一次
         let _ = std::fs::remove_file(path);
         if std::fs::rename(&tmp, path).is_err() {
@@ -236,7 +238,9 @@ pub(crate) fn read_cache_file<T: serde::de::DeserializeOwned>(path: &Path) -> Op
 
 /// 写一份检测结果。调用点都在 spawn_blocking 里（本来就是阻塞上下文），直接写盘即可
 pub(crate) fn write_cache<T: serde::Serialize>(app: &tauri::AppHandle, name: &str, value: &T) {
-    let Ok(path) = cache_path(app, name) else { return };
+    let Ok(path) = cache_path(app, name) else {
+        return;
+    };
     write_cache_file(&path, value);
 }
 
@@ -335,14 +339,20 @@ mod tests {
     #[test]
     fn test_is_corruption_error_matches_sqlite_wording() {
         assert!(is_corruption_error("database disk image is malformed"));
-        assert!(is_corruption_error("SQLITE_CORRUPT: database disk image malformed"));
+        assert!(is_corruption_error(
+            "SQLITE_CORRUPT: database disk image malformed"
+        ));
         assert!(!is_corruption_error("database is locked"));
         assert!(!is_corruption_error("目标文件已存在，拒绝覆盖"));
     }
 
     #[test]
-    fn test_cache_file_round_trips_and_leaves_no_temp_behind() {        let path = scratch("round-trip");
-        let payload = Payload { library_count: 7, groups: vec![vec!["a".to_string(), "b".to_string()]] };
+    fn test_cache_file_round_trips_and_leaves_no_temp_behind() {
+        let path = scratch("round-trip");
+        let payload = Payload {
+            library_count: 7,
+            groups: vec![vec!["a".to_string(), "b".to_string()]],
+        };
 
         write_cache_file(&path, &payload);
 
@@ -355,9 +365,21 @@ mod tests {
     #[test]
     fn test_cache_file_replaces_the_previous_result() {
         let path = scratch("replace");
-        write_cache_file(&path, &Payload { library_count: 1, groups: Vec::new() });
+        write_cache_file(
+            &path,
+            &Payload {
+                library_count: 1,
+                groups: Vec::new(),
+            },
+        );
 
-        write_cache_file(&path, &Payload { library_count: 9, groups: vec![vec!["z".to_string()]] });
+        write_cache_file(
+            &path,
+            &Payload {
+                library_count: 9,
+                groups: vec![vec!["z".to_string()]],
+            },
+        );
 
         let back = read_cache_file::<Payload>(&path).expect("第二次写的结果该读得回来");
         assert_eq!(back.library_count, 9);

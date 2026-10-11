@@ -14,7 +14,8 @@ fn get_db_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("无法获取应用数据目录：{}", e))?;
-    std::fs::create_dir_all(&app_dir).map_err(|e| format!("无法创建应用数据目录 {}：{}", app_dir.display(), e))?;
+    std::fs::create_dir_all(&app_dir)
+        .map_err(|e| format!("无法创建应用数据目录 {}：{}", app_dir.display(), e))?;
     Ok(app_dir.join("viewman.db"))
 }
 
@@ -100,6 +101,15 @@ pub fn run() {
             commands::check_db_integrity,
             commands::rebuild_fts_indexes,
             commands::db_file_path,
+            commands::load_bot_settings,
+            commands::save_bot_settings,
+            commands::get_bot_status,
+            commands::start_bot,
+            commands::stop_bot,
+            commands::stop_all_bot,
+            commands::get_napcat_status,
+            commands::napcat_diagnose_cmd,
+            commands::napcat_sync_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

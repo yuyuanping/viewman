@@ -8,3 +8,8 @@ src-tauri/target/
 
 *.tmp
 *.tsv
+
+# QQ bot：真实配置含 ws token，绝不入库
+qqbot/config.json
+qqbot/__pycache__/
+*.pyc

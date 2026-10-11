@@ -1,0 +1,12 @@
+{
+  "data_dir": "D:\\QQBot_Data",
+  "ws_url": "ws://127.0.0.1:9501/",
+  "api_url": "http://127.0.0.1:9502",
+  "ws_token": "在此填写WebSocket的token",
+  "magnet_xlsx": "D:\\QQBot_Data\\磁力链接汇总.xlsx",
+  "magnet_rules": "D:\\QQBot_Data\\extract_magnets.py",
+
+  "dl_limit": 2,
+  "block_terms": ["javdb", "onlyfans", "siterip"],
+  "backfill_enabled": false
+}
