@@ -255,11 +255,30 @@ pub async fn convert_fake_images(
                 continue;
             };
 
-            let target = unique_path(&p.with_extension(ext))?;
-            if let Err(e) = std::fs::copy(p, &target) {
+            let target = match unique_path(&p.with_extension(ext)) {
+                Ok(t) => t,
+                Err(e) => {
+                    result.errors.push(format!("{}: {}", p.display(), e));
+                    continue;
+                }
+            };
+            // 先写 .viewman-tmp- 临时名再 rename：中断不留半文件（会被图片扫描收进库）
+            let tmp = target.with_file_name(format!(
+                ".viewman-tmp-{}",
+                target.file_name().and_then(|n| n.to_str()).unwrap_or("img")
+            ));
+            if let Err(e) = std::fs::copy(p, &tmp) {
+                let _ = std::fs::remove_file(&tmp);
                 result
                     .errors
                     .push(format!("复制 {} 失败: {}", p.display(), e));
+                continue;
+            }
+            if let Err(e) = std::fs::rename(&tmp, &target) {
+                let _ = std::fs::remove_file(&tmp);
+                result
+                    .errors
+                    .push(format!("落盘 {} 失败: {}", target.display(), e));
                 continue;
             }
             if let Err(e) = trash::delete(p) {
@@ -272,11 +291,14 @@ pub async fn convert_fake_images(
                 continue;
             }
 
-            let removal = state
-                .db
-                .lock()
-                .map_err_str()
-                .and_then(|conn| db::delete_video(&conn, &video_id).map_err_str());
+            // 删视频记录与登记图片包在同一事务：中断不会出现“视频已删、图片没登记”
+            let image = scanner::build_image(&target);
+            let removal = state.db.lock().map_err_str().and_then(|conn| {
+                let tx = conn.unchecked_transaction().map_err_str()?;
+                db::delete_video(&tx, &video_id).map_err_str()?;
+                let _ = db::insert_image(&tx, &image);
+                tx.commit().map_err_str()
+            });
             if let Err(e) = removal {
                 // 图片和回收站都已处理，仅删库失败：还原源文件，保持库记录与磁盘一致
                 let _ = std::fs::copy(&target, p);
@@ -288,11 +310,6 @@ pub async fn convert_fake_images(
             }
 
             clear_thumbnail_cache(&app, &video_id);
-            // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
-            let image = scanner::build_image(&target);
-            if let Ok(conn) = state.db.lock() {
-                let _ = db::insert_image(&conn, &image);
-            }
             result.converted += 1;
         }
         Ok(result)
@@ -396,8 +413,18 @@ pub async fn convert_short_videos(
                         continue;
                     }
                 };
-                if let Err(e) = std::fs::copy(p, &target) {
+                let tmp = target.with_file_name(format!(
+                    ".viewman-tmp-{}",
+                    target.file_name().and_then(|n| n.to_str()).unwrap_or("img")
+                ));
+                if let Err(e) = std::fs::copy(p, &tmp) {
+                    let _ = std::fs::remove_file(&tmp);
                     errors.push(format!("复制 {} 失败: {}", p.display(), e));
+                    continue;
+                }
+                if let Err(e) = std::fs::rename(&tmp, &target) {
+                    let _ = std::fs::remove_file(&tmp);
+                    errors.push(format!("落盘 {} 失败: {}", target.display(), e));
                     continue;
                 }
                 if let Err(e) = trash::delete(p) {
@@ -455,13 +482,16 @@ pub async fn convert_short_videos(
         errors,
     };
     {
+        // 删视频记录与登记图片整批一个事务：中断要么全登记要么全不登记
         let conn = state.db.lock().map_err_str()?;
+        let tx = conn.unchecked_transaction().map_err_str()?;
         for (id, image) in &converted {
-            db::delete_video(&conn, id).map_err_str()?;
+            db::delete_video(&tx, id).map_err_str()?;
             // 转换结果顺手登记进图片库，否则它只是一张磁盘上无人索引的孤儿图
-            let _ = db::insert_image(&conn, image);
+            let _ = db::insert_image(&tx, image);
             result.converted += 1;
         }
+        tx.commit().map_err_str()?;
     }
     for (id, _) in &converted {
         clear_thumbnail_cache(&app, id);
@@ -802,6 +832,48 @@ pub async fn convert_hevc_videos(
 }
 
 /// 给内置播放器提供可播放路径：WebView2 没有 HEVC 解码器，遇到 hevc 源
+/// 启动清扫转码缓存目录：残留临时件（含 .tmp）一律删；`<id>.mp4` 在视频表
+/// 已无此 id 的孤儿（视频被删除/转换后遗留）也删。返回删除数。
+fn cleanup_transcoded_cache(conn: &rusqlite::Connection, dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let orphan = match name.strip_suffix(".mp4") {
+            Some(id) if !id.contains('.') => conn
+                .execute("SELECT 1 FROM videos WHERE id = ?1", rusqlite::params![id])
+                .map(|n| n == 0)
+                .unwrap_or(false),
+            _ => false,
+        };
+        if (name.contains(".tmp") || orphan) && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// 启动清扫转码缓存（lib.rs 启动时后台跑）。失败不影响启动。
+pub fn cleanup_transcoded_files(app: &tauri::AppHandle) -> usize {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return 0;
+    };
+    let Ok(base) = app.path().app_data_dir() else {
+        return 0;
+    };
+    cleanup_transcoded_cache(&conn, &base.join("transcoded"))
+}
+
 /// 按需转码成 H.264 缓存到 `<app_data>/transcoded/<id>.mp4`；其他编码直接返回原路径。
 /// 转码失败也返回原路径，让播放器走既有的错误提示流程。
 #[tauri::command]

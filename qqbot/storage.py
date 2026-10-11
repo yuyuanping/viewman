@@ -366,8 +366,16 @@ class Storage:
                 if tmp is not None:
                     await asyncio.to_thread(os.replace, tmp, path)
                 else:
-                    # 本地原件（NapCat 缓存）：复制进统一目录，不动原件
-                    await asyncio.to_thread(shutil.copyfile, url, path)
+                    # 本地原件（NapCat 缓存）：复制进统一目录，不动原件。
+                    # 先写 .part 再 replace：中断不会留下顶着 md5 名的半文件
+                    # （会被 dup 检查复用、被 backfill_media 洗白成有效登记）
+                    part = base / f"~dl{uuid4().hex}.part"
+                    try:
+                        await asyncio.to_thread(shutil.copyfile, url, part)
+                    except Exception:
+                        part.unlink(missing_ok=True)
+                        raise
+                    await asyncio.to_thread(os.replace, part, path)
             elif tmp is not None:    # 下载完才发现内容重复：丢临时件复用现有文件
                 await asyncio.to_thread(tmp.unlink)
             self.seen[digest] = (str(path), size)
@@ -434,8 +442,15 @@ class Storage:
                     if tmp is not None:
                         await asyncio.to_thread(os.replace, tmp, path)
                     else:
-                        # 本地原件：复制进来，不动 NapCat 缓存
-                        await asyncio.to_thread(shutil.copyfile, src, path)
+                        # 本地原件：复制进来，不动 NapCat 缓存。
+                        # 先写 .part 再 replace，理由同 save_media：中断不留半文件
+                        part = base / f"~dl{uuid4().hex}.part"
+                        try:
+                            await asyncio.to_thread(shutil.copyfile, src, part)
+                        except Exception:
+                            part.unlink(missing_ok=True)
+                            raise
+                        await asyncio.to_thread(os.replace, part, path)
                 elif tmp is not None:   # 内容重复：丢临时件复用现有文件
                     await asyncio.to_thread(tmp.unlink)
             except Exception as e:

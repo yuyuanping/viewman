@@ -394,12 +394,24 @@ pub fn get_videos_with_max_duration(
 }
 
 pub fn delete_video(conn: &Connection, video_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM watch_progress WHERE video_id = ?1",
-        params![video_id],
-    )?;
-    conn.execute("DELETE FROM videos WHERE id = ?1", params![video_id])?;
-    Ok(())
+    // SAVEPOINT 把两条 DELETE 绑成原子，且嵌在外层事务里（批量删除/转换的
+    // unchecked_transaction）也能安全工作——BEGIN 会报嵌套错误，SAVEPOINT 不会
+    conn.execute_batch("SAVEPOINT delete_video")?;
+    let inner = (|| -> Result<()> {
+        conn.execute(
+            "DELETE FROM watch_progress WHERE video_id = ?1",
+            params![video_id],
+        )?;
+        conn.execute("DELETE FROM videos WHERE id = ?1", params![video_id])?;
+        Ok(())
+    })();
+    match inner {
+        Ok(()) => conn.execute_batch("RELEASE delete_video"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO delete_video; RELEASE delete_video");
+            Err(e)
+        }
+    }
 }
 
 pub fn delete_videos_by_ids(conn: &Connection, ids: &[String]) -> Result<()> {

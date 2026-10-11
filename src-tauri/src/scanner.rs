@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::models::{Image, Video};
@@ -677,29 +677,50 @@ pub fn unique_frame_count(video_path: &str) -> Option<usize> {
     count
 }
 
-/// 抽取原视频的首帧（保持原始分辨率）写入 out_path，用于把 ≤1 秒的"静图视频"转成图片
+/// 临时名：同目录 `.viewman-tmp-<原名>`——保留扩展名（ffmpeg 按扩展名推断输出
+/// 格式），且 is_temp_artifact 会把它挡在扫描外。成功后 rename 成最终名。
+fn temp_sibling(out_path: &Path) -> PathBuf {
+    let name = out_path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    out_path.with_file_name(format!(".viewman-tmp-{}", name))
+}
+
+/// 抽取原视频的首帧（保持原始分辨率）写入 out_path，用于把 ≤1 秒的"静图视频"转成图片。
+/// 先写同目录临时名再 rename：中断不会留下顶着最终名的半帧（会被图片扫描收进库）
 pub fn extract_full_frame(video_path: &str, out_path: &Path) -> Result<(), String> {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
     }
-    let mut cmd = hidden_command("ffmpeg");
-    cmd.args([
-        "-y",
-        "-i",
-        video_path,
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        &out_path.to_string_lossy(),
-    ]);
-    let output = output_timeout(cmd, 120, "ffmpeg 抽帧")?;
-    if !output.status.success() {
-        return Err(ffmpeg_err(&output));
-    }
-    match fs::metadata(out_path) {
-        Ok(m) if m.len() > 0 => Ok(()),
-        _ => Err("ffmpeg 未产生有效帧".to_string()),
+    let tmp = temp_sibling(out_path);
+    let run = |tmp: &Path| -> Result<(), String> {
+        let mut cmd = hidden_command("ffmpeg");
+        cmd.args([
+            "-y",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            &tmp.to_string_lossy(),
+        ]);
+        let output = output_timeout(cmd, 120, "ffmpeg 抽帧")?;
+        if !output.status.success() {
+            return Err(ffmpeg_err(&output));
+        }
+        match fs::metadata(tmp) {
+            Ok(m) if m.len() > 0 => Ok(()),
+            _ => Err("ffmpeg 未产生有效帧".to_string()),
+        }
+    };
+    match run(&tmp) {
+        Ok(()) => {
+            let _ = fs::remove_file(out_path);
+            fs::rename(&tmp, out_path).map_err(|e| format!("落盘失败: {}", e))
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 
@@ -714,7 +735,8 @@ pub fn extract_thumbnail(
         fs::create_dir_all(parent).map_err(|e| format!("创建缩略图目录失败: {}", e))?;
     }
 
-    let attempt = |seconds: f64| -> Result<(), String> {
+    let tmp = temp_sibling(out_path);
+    let attempt = |tmp: &Path, seconds: f64| -> Result<(), String> {
         // -ss 只在真的要 seek 时才传。ffmpeg 62（2025-08 git 构建）对 image2 输入做
         // 0 偏移输入 seek 会把唯一一帧直接跳过去：exit 0、零帧输出，mjpeg 全军覆没
         // （实测 PNG/WebP 不受影响）。0 偏移本来就是无操作，省掉最稳。
@@ -725,7 +747,7 @@ pub fn extract_thumbnail(
         }
         // WebP 封面（.webp）：libwebp 体积比 mjpeg 小约 40%，网格加载更快；
         // jpg 保持原参数，老缓存与无 libwebp 的机器不受影响
-        let out_str = out_path.to_string_lossy().to_string();
+        let out_str = tmp.to_string_lossy().to_string();
         if out_str.to_lowercase().ends_with(".webp") {
             cmd.args([
                 "-i",
@@ -761,17 +783,27 @@ pub fn extract_thumbnail(
         }
 
         // seek 点无帧时 ffmpeg 仍可能以 0 退出，但不会写出有效文件
-        match fs::metadata(out_path) {
+        match fs::metadata(tmp) {
             Ok(m) if m.len() > 0 => Ok(()),
             _ => Err("ffmpeg 未产生有效帧".to_string()),
         }
     };
 
     let seek = thumbnail_target_time(duration);
-    if seek > 0.0 {
-        attempt(seek).or_else(|_| attempt(0.0))
+    let result = if seek > 0.0 {
+        attempt(&tmp, seek).or_else(|_| attempt(&tmp, 0.0))
     } else {
-        attempt(0.0)
+        attempt(&tmp, 0.0)
+    };
+    match result {
+        Ok(()) => {
+            let _ = fs::remove_file(out_path);
+            fs::rename(&tmp, out_path).map_err(|e| format!("落盘失败: {}", e))
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 

@@ -220,6 +220,12 @@ class DB:
         await self._run(lambda c: c.execute(
             "UPDATE messages SET text=?, dedup=? WHERE id=?", (text, dedup, mid)))
 
+    async def clear_event_messages(self, eid: int) -> None:
+        """事件重放前清掉上次尝试已写的 messages 行（含转发明细行），
+        防止重放把同一段内容重复入库。单条 DELETE，天然原子。"""
+        await self._run(lambda c: c.execute(
+            "DELETE FROM messages WHERE event_id=?", (eid,)))
+
     async def bump_dl(self, mid: int, err: str) -> str:
         """失败退避 30*2^tries 秒（封顶 30 分钟），跑满 MAX_DL_TRIES 后转 dead
         并改成每天复检一次；复检满 DL_LATE_TRIES-MAX_DL_TRIES 轮才真正不再碰。"""

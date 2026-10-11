@@ -52,6 +52,8 @@ pub async fn remove_media_directory(
 
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        // 删记录与忘掉 roots 在同一事务：中断不会出现“记录已删、root 还在，
+        // 重扫把整个目录原样收回”的移除回退
         let removed_ids: Vec<String> = {
             let conn = state.db.lock().map_err_str()?;
             let ids: Vec<String> = if video {
@@ -77,17 +79,7 @@ pub async fn remove_media_directory(
                 db::delete_images_by_ids(&tx, &ids)
             }
             .map_err_str()?;
-            tx.commit().map_err_str()?;
-            ids
-        };
-
-        for id in &removed_ids {
-            clear_thumbnail_cache(&app, id);
-        }
-
-        {
-            let conn = state.db.lock().map_err_str()?;
-            let raw = db::get_setting(&conn, key).map_err_str()?;
+            let raw = db::get_setting(&tx, key).map_err_str()?;
             let roots: Vec<String> = raw
                 .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                 .unwrap_or_default();
@@ -98,8 +90,14 @@ pub async fn remove_media_directory(
                     .filter(|r| !forgotten.contains(r))
                     .collect();
                 let value = serde_json::to_string(&kept).map_err_str()?;
-                db::set_setting(&conn, key, &value).map_err_str()?;
+                db::set_setting(&tx, key, &value).map_err_str()?;
             }
+            tx.commit().map_err_str()?;
+            ids
+        };
+
+        for id in &removed_ids {
+            clear_thumbnail_cache(&app, id);
         }
 
         Ok(removed_ids.len())

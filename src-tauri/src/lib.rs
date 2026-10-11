@@ -48,6 +48,10 @@ pub fn run() {
                 if removed > 0 {
                     println!("cleaned {} orphan thumbnail files", removed);
                 }
+                let removed = commands::cleanup_transcoded_files(&cleanup_app);
+                if removed > 0 {
+                    println!("cleaned {} orphan transcoded cache files", removed);
+                }
             });
             Ok(())
         })

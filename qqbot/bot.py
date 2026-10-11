@@ -258,6 +258,9 @@ class Bot:
         msg_type = data.get("message_type")
         if msg_type not in ("private", "group"):
             return
+        # 事件重放幂等：清掉上次尝试已写的 messages 行（md 由下方缓冲天然幂等）
+        if eid:
+            await self.db.clear_event_messages(eid)
         # 只存私聊（2026-10-11 用户要求）：群聊消息直接跳过，不入库不落盘。
         # 想恢复群聊存档，config.json 里 save_group=true 重启即可
         if msg_type == "group" and not self.config.get("save_group", False):
@@ -281,6 +284,9 @@ class Bot:
                     msg_type, peer_id, nickname, len(data.get("message", [])))
         kinds = ("text", "image", "video", "file", "forward", "reply")
         msg_id = str(data.get("message_id") or "")
+        # md 写入统一缓冲：事件全部段处理成功才落盘。逐段直写的历史行为在
+        # 事件重放时会把已写过的段再写一遍（媒体有 md5 去重，纯文本会重复成行）
+        md_pending: list[tuple[str, str, int | None]] = []
         for i, seg in enumerate(data.get("message", [])):
             t = seg.get("type")
             d = seg.get("data", {})
@@ -289,13 +295,13 @@ class Bot:
                           sender_nick=nickname, ts=ts,
                           seg_index=i, kind=t if t in kinds else "other")
             if t == "text":
-                self.storage.append_text(d.get("text", ""), prefix, ts=ts)
+                md_pending.append((d.get("text", ""), prefix, ts))
                 mid = await self.db.add_message(**common, text=d.get("text", ""))
                 self._kick_magnets(d.get("text", ""), mid)
             elif t in ("image", "video"):
                 if t == "image" and is_sticker(d):
                     # 表情包（面板/收藏/商城表情、GIF）不下载，只记占位
-                    self.storage.append_text("[表情包]", prefix, ts=ts)
+                    md_pending.append(("[表情包]", prefix, ts))
                     await self.db.add_message(
                         **dict(common, kind="sticker", text="[表情包]"))
                     continue
@@ -304,7 +310,7 @@ class Bot:
                 if blocked:
                     # 高风险内容：图片/视频只留占位，不进下载队列
                     label = "[图片·拦截]" if t == "image" else "[视频·拦截]"
-                    self.storage.append_text(label, prefix, ts=ts)
+                    md_pending.append((label, prefix, ts))
                     await self.db.add_message(**common, text=label)
                     continue
                 row = dict(common, src=d.get("url", ""),
@@ -314,7 +320,7 @@ class Bot:
                 self._spawn(self._attempt_row(dict(row, id=mid)))
             elif t == "file":
                 if blocked:
-                    self.storage.append_text("[文件·拦截]", prefix, ts=ts)
+                    md_pending.append(("[文件·拦截]", prefix, ts))
                     await self.db.add_message(**common, text="[文件·拦截]")
                     continue
                 row = dict(common, src=d.get("url", ""),
@@ -323,7 +329,7 @@ class Bot:
                 mid = await self.db.add_message(**row)
                 self._spawn(self._attempt_row(dict(row, id=mid)))
             elif t == "forward":
-                self.storage.append_text("[合并转发] 正在展开...", ts=ts)
+                md_pending.append(("[合并转发] 正在展开...", "", ts))
                 mid = await self.db.add_message(**common, ref=d.get("id", ""),
                                                 dl="pending")
                 self._spawn(self._attempt_row(dict(common, id=mid,
@@ -333,7 +339,7 @@ class Bot:
                 # 取回后补写一行，失败由 sweeper 退避重试，穷尽才退回裸标签。
                 rid = str(d.get("id", "") or "")
                 if not rid:
-                    self.storage.append_text("[回复]", prefix, ts=ts)
+                    md_pending.append(("[回复]", prefix, ts))
                     await self.db.add_message(**common, text="[回复]")
                 else:
                     row = dict(common, ref=rid, dl="pending")
@@ -341,8 +347,13 @@ class Bot:
                     self._spawn(self._attempt_row(dict(row, id=mid)))
             else:
                 label = {"face": "[表情]", "at": "[@]"} .get(t, f"[{t}]")
-                self.storage.append_text(label, prefix, ts=ts)
+                md_pending.append((label, prefix, ts))
                 await self.db.add_message(**common, text=label)
+
+        # 事件全部段处理成功，md 才一次性落盘；中途失败走 fail_event 重放，
+        # 缓冲直接丢弃，不会把半条事件写进日记
+        for text, pfx, t in md_pending:
+            self.storage.append_text(text, pfx, ts=t)
 
     # ---- dl 重试队列 ----
     async def sweeper(self) -> None:
@@ -496,7 +507,7 @@ class Bot:
                     失败媒体进 pending 由既有重试管线按 src/ref 重下"""
                     try:
                         kind = item.get("kind", "")
-                        base = dict(event_id=row.get("id"), msg_id="", scope=scope,
+                        base = dict(event_id=row.get("event_id"), msg_id="", scope=scope,
                                     peer_id=row.get("peer_id"), sender_id=None,
                                     sender_nick=str(item.get("sender") or "[转发]"),
                                     ts=int(item.get("ts") or 0) or None,
@@ -532,13 +543,15 @@ class Bot:
                     self.storage.block_media = fuse
                 if not text:
                     raise RuntimeError("forward rendered empty")
-                if not had_text:
-                    self.storage.append_text(f"[合并转发]\n{text}",
-                                             ts=row.get("ts"))
+                # 先记账（text/ok）后写 md：崩溃落在中间时重放会因 had_text
+                # 跳过 md，宁可日记缺一块也不要同一块写两遍
                 # dedup = 本条转发里复用现有文件（重复跳过）的媒体数
                 await self.db.set_message_text(mid, text, stats.get("dedup", 0))
                 self._kick_magnets(text, mid)
                 await self.db.mark_dl_ok(mid, None, None, None)
+                if not had_text:
+                    self.storage.append_text(f"[合并转发]\n{text}",
+                                             ts=row.get("ts"))
                 logger.info("[EXPAND OK] id=%d fid=%s", mid, fid)
                 return
             if kind == "reply":
@@ -549,10 +562,10 @@ class Bot:
                 if not src:
                     raise RuntimeError("get_msg returned nothing")
                 line = reply_line(src)
-                self.storage.append_text(line, row_prefix(row), ts=row.get("ts"))
                 await self.db.set_message_text(mid, line)
                 self._kick_magnets(line, mid)
                 await self.db.mark_dl_ok(mid, None, None, None)
+                self.storage.append_text(line, row_prefix(row), ts=row.get("ts"))
                 logger.info("[REPLY OK] id=%d quoted=%s", mid, rid)
                 return
             if kind == "file":

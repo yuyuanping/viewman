@@ -638,6 +638,9 @@ pub async fn capture_frame(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "frame".into());
+        if !position.is_finite() || position < 0.0 {
+            return Err("截图位置无效".into());
+        }
         // 文件名带毫秒：只到秒的话同一位置重复截图会静默覆盖上一张。
         // 用总毫秒拆分时/分/秒，避免 (position%60).round()==60 的非法秒值（如 61.9s→01m62s）。
         let stamp = if position > 0.0 {
@@ -653,6 +656,12 @@ pub async fn capture_frame(
         };
         // 同一位置重复截图不再 -y 静默覆盖：自动加 " (2)" 后缀
         let out = unique_path(&parent.join(format!("{}_{}.png", stem, stamp)))?;
+        // 先写 .viewman-tmp- 临时名再 rename：中断/失败不留半个 png 在用户媒体
+        // 目录里（半个 png 会被下一轮图片扫描收进库）
+        let tmp = out.with_file_name(format!(
+            ".viewman-tmp-{}",
+            out.file_name().and_then(|n| n.to_str()).unwrap_or("frame.png")
+        ));
 
         // -ss 0 不传：ffmpeg 62 对 image2/mjpeg 的 0 偏移 seek 会跳过唯一一帧（同 extract_thumbnail）
         // 不传 -y：输出路径已由 unique_path 保证不重名，-y 会掩盖并发竞态的覆盖
@@ -660,15 +669,25 @@ pub async fn capture_frame(
         if position > 0.0 {
             cmd.args(["-ss", &position.to_string()]);
         }
-        cmd.args(["-i", &path, "-frames:v", "1", &out.to_string_lossy()]);
+        cmd.args(["-i", &path, "-frames:v", "1", &tmp.to_string_lossy()]);
         let output = crate::scanner::output_timeout(cmd, 60, "ffmpeg 截图")?;
+        let cleanup = |e: String| -> String {
+            let _ = std::fs::remove_file(&tmp);
+            e
+        };
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
+            return Err(cleanup(format!(
                 "截图失败: {}",
                 detail.chars().take(200).collect::<String>()
-            ));
+            )));
         }
+        match std::fs::metadata(&tmp) {
+            Ok(m) if m.len() > 0 => {}
+            _ => return Err(cleanup("ffmpeg 未产生有效截图".into())),
+        }
+        std::fs::rename(&tmp, &out)
+            .map_err(|e| cleanup(format!("落盘失败: {}", e)))?;
         Ok(out.to_string_lossy().to_string())
     })
     .await

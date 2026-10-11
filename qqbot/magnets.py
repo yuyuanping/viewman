@@ -14,6 +14,7 @@
 """
 import asyncio
 import importlib.util
+import os
 import logging
 import re
 import time
@@ -227,7 +228,11 @@ class MagnetRegistry:
                     if field in rec:
                         row[idx] = rec[field]
                 ws.append(row)
-            wb.save(self.xlsx)
+            # 整本直写目标会在中断时把 xlsx 撕成坏 zip（登记从此永久停摆），
+            # 先存临时名再 replace
+            tmp = self.xlsx.with_suffix(".xlsx.tmp")
+            wb.save(tmp)
+            os.replace(tmp, self.xlsx)
         finally:
             wb.close()
         self.seen |= state["hashes"] | {r["hash"] for r in keep}
