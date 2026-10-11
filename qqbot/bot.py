@@ -113,9 +113,6 @@ class Bot:
         self.storage = Storage(config["data_dir"], session, MAX_CONCURRENT_DL, db)
         # 全局下载限速（每秒下载数）：None/<=0 不限。配进 storage 的令牌桶
         self.storage.dl_limit = config.get("dl_limit")
-        # 高危关键词黑名单：命中则不下载媒体、不入库磁力，只留占位文本。
-        # 避免涉黄/盗版内容反复经本号流转，降低风控画像风险
-        self.block_terms: list[str] = config.get("block_terms") or []
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._seq = 0
@@ -130,15 +127,6 @@ class Bot:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
-
-    def _is_blocked(self, text: str) -> bool:
-        """高危关键词黑名单判定：命中返回 True（不下载媒体、不入磁力登记）。
-        不阻断文本存档本身——记录仍是档案的一部分，只是不把媒体/磁力带进
-        下载与登记管道，降低账号被风控画像的风险。"""
-        if not self.block_terms or not text:
-            return False
-        low = text.lower()
-        return any(t.lower() in low for t in self.block_terms if t)
 
     def _kick_magnets(self, text: str, mid: int | None = None) -> None:
         # 磁力链接落库即唤醒 sweeper 去登记，不等 20 秒班车：remove_magnets.py
@@ -265,12 +253,6 @@ class Bot:
         # 想恢复群聊存档，config.json 里 save_group=true 重启即可
         if msg_type == "group" and not self.config.get("save_group", False):
             return
-        # 高危内容整条跳过下载：合并转发正文要等展开才可见，本层先挡明文；
-        # 转发里的媒体由 _attempt_row 的 expand 后二次过滤
-        blocked = self._is_blocked(json.dumps(data, ensure_ascii=False))
-        if blocked:
-            logger.warning("[BLOCK] 命中高危关键词，本消息只存档不下载媒体: %s",
-                           str(data.get("group_id") or data.get("user_id")))
         is_group = msg_type == "group"
         scope = "group" if is_group else "private"
         sender = data.get("sender", {})
@@ -307,22 +289,12 @@ class Bot:
                     continue
                 # NapCat 的图片/视频段把 file id 放在 data.file（形如 HASH.jpg），
                 # 没有 file_id 键。不存下来就没有 CDN 失败后的本地原件兜底。
-                if blocked:
-                    # 高风险内容：图片/视频只留占位，不进下载队列
-                    label = "[图片·拦截]" if t == "image" else "[视频·拦截]"
-                    md_pending.append((label, prefix, ts))
-                    await self.db.add_message(**common, text=label)
-                    continue
                 row = dict(common, src=d.get("url", ""),
                            ref=d.get("file_id") or d.get("file") or "",
                            dl="pending")
                 mid = await self.db.add_message(**row)
                 self._spawn(self._attempt_row(dict(row, id=mid)))
             elif t == "file":
-                if blocked:
-                    md_pending.append(("[文件·拦截]", prefix, ts))
-                    await self.db.add_message(**common, text="[文件·拦截]")
-                    continue
                 row = dict(common, src=d.get("url", ""),
                            ref=d.get("file_id", ""), name=d.get("file", "file"),
                            dl="pending")
@@ -496,10 +468,6 @@ class Bot:
                     raise RuntimeError("get_forward_msg returned nothing")
                 # 媒体熔断：转发送来后先检查原文是否命中高危词，命中则
                 # 展开时只产文本占位，不下载内部媒体（涉黄资源常见于合并转发）
-                fuse = self.storage.block_media
-                if self._is_blocked(json.dumps(data, ensure_ascii=False)):
-                    self.storage.block_media = True
-                    logger.warning("[BLOCK] 合并转发命中高危词，内部媒体不下载 fid=%s", fid)
                 stats: dict = {}
 
                 async def report(item: dict) -> None:
@@ -516,11 +484,7 @@ class Bot:
                             await self.db.add_message(**base, kind=kind,
                                                       text=item.get("text", ""))
                             return
-                        if item.get("ok") is None:
-                            # 拦截/表情包：只记占位，不进下载管线
-                            await self.db.add_message(**base, kind=kind,
-                                                      text=str(item.get("label") or ""))
-                        elif item.get("ok"):
+                        if item.get("ok"):
                             await self.db.add_message(
                                 **base, kind=kind, name=item.get("file"),
                                 src=item.get("src"), ref=item.get("ref"),
@@ -528,6 +492,7 @@ class Bot:
                                 bytes=item.get("bytes"), dl="ok",
                                 dedup=int(bool(item.get("dedup"))))
                         else:
+                            # 展开时下载失败：进正常重试队列按 src/ref 重下
                             await self.db.add_message(
                                 **base, kind=kind, name=item.get("file"),
                                 src=item.get("src"), ref=item.get("ref"),
@@ -535,12 +500,9 @@ class Bot:
                     except Exception as e:
                         logger.error("[FWD ITEM] 明细落库失败 id=%d: %s", mid, e)
 
-                try:
-                    text = await render_node(data.get("messages", []), self.storage,
-                                             self.expand_forward, self.get_file_url,
-                                             scope, stats=stats, report=report)
-                finally:
-                    self.storage.block_media = fuse
+                text = await render_node(data.get("messages", []), self.storage,
+                                         self.expand_forward, self.get_file_url,
+                                         scope, stats=stats, report=report)
                 if not text:
                     raise RuntimeError("forward rendered empty")
                 # 先记账（text/ok）后写 md：崩溃落在中间时重放会因 had_text

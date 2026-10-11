@@ -62,7 +62,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
       kind: text/image/video/file/forward
       sender/ts: 该段所在内层消息的发送者与时间
       text: text/forward 的正文；label: 媒体文件名或占位
-      ok: True 已保存 / False 下载失败 / None 未尝试（拦截、表情包）
+
       dedup/md5/path/bytes: ok=True 时媒体结果；src/ref/file: 供失败重试用"""
     if depth > MAX_DEPTH or not msgs:
         return ""
@@ -81,13 +81,6 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                 if is_sticker(d):
                     parts.append("[表情包]")   # 表情包不下载，只记占位
                     continue
-                if storage.block_media:
-                    parts.append("[图片·拦截]")
-                    if report:
-                        await report({"kind": "image", "sender": nickname,
-                                      "ts": inner_ts, "ok": None,
-                                      "label": "[拦截] " + (d.get("file") or "图片")})
-                    continue
                 r = await _save_media_segment(d, "image", storage,
                                               get_file_url, scope)
                 if r and stats is not None:
@@ -105,13 +98,6 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                                   "label": Path(r["path"]).name if r else (d.get("file") or "图片")})
                 parts.append(r["placeholder"] if r else "[图片]")
             elif t == "video":
-                if storage.block_media:
-                    parts.append("[视频·拦截]")
-                    if report:
-                        await report({"kind": "video", "sender": nickname,
-                                      "ts": inner_ts, "ok": None,
-                                      "label": "[拦截] " + (d.get("file") or "视频")})
-                    continue
                 r = await _save_media_segment(d, "video", storage,
                                               get_file_url, scope)
                 if r and stats is not None:
@@ -129,13 +115,6 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                                   "label": Path(r["path"]).name if r else (d.get("file") or "视频")})
                 parts.append(r["placeholder"] if r else "[视频]")
             elif t == "file":
-                if storage.block_media:
-                    parts.append("[文件·拦截]")
-                    if report:
-                        await report({"kind": "file", "sender": nickname,
-                                      "ts": inner_ts, "ok": None,
-                                      "label": "[拦截] " + (d.get("file") or "文件")})
-                    continue
                 fid = d.get("file_id") or d.get("url") or ""
                 r = await storage.save_file(fid, d.get("file", "file"),
                                             get_file_url, scope)

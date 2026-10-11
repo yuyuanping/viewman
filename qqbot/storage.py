@@ -118,7 +118,6 @@ class Storage:
         self._dl_limit_lock = asyncio.Lock()
         # 媒体下载熔断开关：被 bot.py 在展开高危合并转发前置 True，
         # render_node 读它决定是否只产占位文本不下媒体
-        self.block_media = False
         # 已保存过的 md5 -> (path, bytes)：load_seen() 启动时从 media 表灌入，
         # 之后每存一个媒体同步记一份。文件被手工删除也仍算「已保存」，
         # 同内容再出现时免下载——这是删后不重拉的持久记忆。

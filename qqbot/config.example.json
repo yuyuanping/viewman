@@ -9,7 +9,6 @@
   "magnet_rules": "D:\\QQBot_Data\\extract_magnets.py",
 
   "dl_limit": 2,
-  "block_terms": ["javdb", "onlyfans", "siterip"],
   "save_group": false,
   "backfill_enabled": false
 }

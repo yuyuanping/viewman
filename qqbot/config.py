@@ -3,7 +3,6 @@
 支持的环境变量（前缀 QQBOT_）：
   QQBOT_DATA_DIR, QQBOT_WS_URL, QQBOT_WS_TOKEN, QQBOT_API_URL,
   QQBOT_MAGNET_XLSX, QQBOT_MAGNET_RULES, QQBOT_DL_LIMIT,
-  QQBOT_BLOCK_TERMS
 """
 import json
 import os
@@ -22,7 +21,6 @@ _ENV_MAP = {
     "QQBOT_MAGNET_XLSX": "magnet_xlsx",
     "QQBOT_MAGNET_RULES": "magnet_rules",
     "QQBOT_DL_LIMIT": "dl_limit",
-    "QQBOT_BLOCK_TERMS": "block_terms",
 }
 
 
@@ -34,15 +32,12 @@ def load_config() -> dict:
         val = os.environ.get(env_key)
         if val:
             cfg[cfg_key] = val
-    # 数值/列表字段规范化：dl_limit 转 int，block_terms 按 | 或 , 拆分
+    # 数值字段规范化：dl_limit 转 int
     if cfg.get("dl_limit") is not None:
         try:
             cfg["dl_limit"] = int(cfg["dl_limit"])
         except (TypeError, ValueError):
             cfg["dl_limit"] = None
-    if isinstance(cfg.get("block_terms"), str):
-        import re
-        cfg["block_terms"] = [t for t in re.split(r"[|,，]", cfg["block_terms"]) if t]
     # 校验必填
     missing = [k for k in _REQUIRED if not cfg.get(k)]
     if missing:
