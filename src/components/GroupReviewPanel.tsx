@@ -63,6 +63,9 @@ interface GroupReviewPanelProps {
   onDeleteImage?: (image: Image) => void;
   /** 非阻塞错误回报（父层转 toast） */
   onError?: (message: string) => void;
+  /** 大图查看器是否盖在本面板上（父层知道 viewerIndex）：为真时 Esc 只关大图，不关本面板。
+   *  两者都在 window 上挂 Esc 监听，一次按键两个都会响应 */
+  viewerOpen?: boolean;
   onClose: () => void;
 }
 
@@ -73,7 +76,7 @@ interface GroupReviewPanelProps {
  * 比对像素开关只有重复检测给。
  */
 export function GroupReviewPanel({
-  noun, progressLabel, groups, imageById, selectedIds, onToggle, onKeep, onAutoSelect, onSelectAll, onClearAll, onSelectGroup, selectedTotal, onDeleteSelected, deleting, onMoveSelected, moving, onFixExtensions, fixingExtensions, detecting, progress, caveat, pixelVerify, onPixelVerify, onOpenImage, onMoveImage, onDeleteImage, onError, onClose,
+  noun, progressLabel, groups, imageById, selectedIds, onToggle, onKeep, onAutoSelect, onSelectAll, onClearAll, onSelectGroup, selectedTotal, onDeleteSelected, deleting, onMoveSelected, moving, onFixExtensions, fixingExtensions, detecting, progress, caveat, pixelVerify, onPixelVerify, onOpenImage, onMoveImage, onDeleteImage, onError, viewerOpen, onClose,
 }: GroupReviewPanelProps) {
   /** 展开过的组（按当前的保留张记着）：组员太多的组默认只铺前若干张 */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -85,10 +88,11 @@ export function GroupReviewPanel({
   const [contentWidth, setContentWidth] = useState(0);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    // 大图在最上层：Esc 归它（它自己会关掉大图），本面板这一层别跟着收
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !viewerOpen) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, viewerOpen]);
 
   useEffect(() => {
     const el = contentRef.current;
@@ -196,7 +200,7 @@ export function GroupReviewPanel({
             {fixingExtensions ? "修正中…" : "修正扩展名"}
           </button>
         )}
-        <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc）" aria-label={`关闭${noun}分组面板`}>
+        <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc；大图开着时 Esc 先关大图）" aria-label={`关闭${noun}分组面板`}>
           关闭 (Esc)
         </button>
       </div>

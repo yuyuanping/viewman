@@ -344,7 +344,11 @@ pub fn find_napcat_pid() -> Option<u32> {
 }
 
 pub(crate) fn read_to_string(path: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    // 按字节读再有损解码：read_to_string 是一段都容不下的，日志里混进一段非 UTF-8
+    // （QQ/NapCat 的 GBK 兜底输出、被截断的多字节字符）就会整体失败，调用方
+    // unwrap_or_default() 之后等于「日志为空」→ 面板直接报 NapCat 未运行
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// 端口是否在监听（复用 qqbot 的探测思路）
@@ -388,7 +392,8 @@ fn discover_shells(napcat_root: &Path) -> Vec<PathBuf> {
 
 /// 解析一份 onebot11_*.json，取出 WS/HTTP 端口与启用状态
 fn parse_onebot11(path: &Path) -> Option<NapCatConfigEntry> {
-    let raw = std::fs::read_to_string(path).ok()?;
+    // 同 read_to_string：配置里的路径可能是中文（GBK 写入），严格 UTF-8 会整份读不出来
+    let raw = read_to_string(&path.to_string_lossy())?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let net = v.get("network")?;
     let collect = |key: &str| -> (Vec<u16>, bool) {

@@ -296,6 +296,26 @@ class Storage:
         tmp.unlink(missing_ok=True)
         return None
 
+    async def _seen_hit(self, expect_md5: str, kind: str) -> tuple[str, int] | None:
+        """该 md5 是否已落过盘：先查内存登记表（零 IO），未命中再扫目录。"""
+        hit = self.seen.get(expect_md5)
+        if hit is not None:
+            return hit
+        hit_path = await asyncio.to_thread(self._existing, expect_md5, kind)
+        if hit_path is None:
+            return None
+        return str(hit_path), (await asyncio.to_thread(hit_path.stat)).st_size
+
+    async def _dedup_result(self, digest: str, kind: str, scope: str,
+                            path_s: str, size: int) -> dict:
+        self.seen[digest] = (path_s, size)
+        label = "图片" if kind == "image" else "视频"
+        logger.info("[%s DEDUP] %s (md5 已登记，免下载)", kind.upper(),
+                    Path(path_s).name)
+        await self._register(digest, kind, scope, path_s, size)
+        return {"placeholder": f"[{label}] {Path(path_s).name}",
+                "md5": digest, "path": path_s, "bytes": size, "dedup": True}
+
     # ---- 图片/视频 ----
     async def save_media(self, url: str, kind: str, scope: str = "private",
                          expect_md5: str | None = None) -> dict | None:
@@ -312,25 +332,15 @@ class Storage:
             return None
         ext = "jpg" if kind == "image" else "mp4"
         valid = _VALID_IMG if kind == "image" else _VALID_VID
+        # 去重判定必须赶在限速令牌之前：实测 51% 的媒体判定是「已存过、免下载」，
+        # 让它们排队等令牌等于把下载额度花在根本不需要的下载上
+        # （2026-10-13 两小时内 2029 次命中，每次白等 ~0.5s ≈ 17 分钟纯阻塞）
+        if expect_md5:
+            hit = await self._seen_hit(expect_md5, kind)
+            if hit is not None:
+                return await self._dedup_result(expect_md5, kind, scope, *hit)
         await self._wait_token()
         async with self._dl_sem:
-            if expect_md5:
-                hit = self.seen.get(expect_md5)
-                if hit is None:
-                    hit_path = await asyncio.to_thread(self._existing, expect_md5, kind)
-                    if hit_path is not None:
-                        hit = (str(hit_path),
-                               (await asyncio.to_thread(hit_path.stat)).st_size)
-                if hit is not None:
-                    self.seen[expect_md5] = hit
-                    path_s, size = hit
-                    logger.info("[%s DEDUP] %s (md5 已登记，免下载)",
-                                kind.upper(), Path(path_s).name)
-                    await self._register(expect_md5, kind, scope, path_s, size)
-                    return {"placeholder": f"[{'图片' if kind == 'image' else '视频'}] "
-                                           f"{Path(path_s).name}",
-                            "md5": expect_md5, "path": path_s, "bytes": size,
-                            "dedup": True}
             # 下载/读取：流式边写边算 md5，不再把整个文件读进内存
             tmp = None
             if url.startswith(("http://", "https://")):

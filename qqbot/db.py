@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS messages(
   parent      INTEGER REFERENCES messages(id),  -- 转发明细行指向所属转发行
   tries       INTEGER NOT NULL DEFAULT 0,
   next_try    REAL NOT NULL DEFAULT 0,
+  dead_at     INTEGER,       -- 本轮转死时刻（Unix 秒），面板「今日失败」按它归日
   err         TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_due ON messages(dl, next_try);
@@ -109,8 +110,21 @@ class DB:
                     "ALTER TABLE messages ADD COLUMN dedup INTEGER NOT NULL DEFAULT 0")
             if "parent" not in cols:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN parent INTEGER")
+            if "dead_at" not in cols:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN dead_at INTEGER")
+                # 存量死信没有「转死时刻」，按复检节奏反推：next_try = 最近一次失败 + 一天，
+                # 转死之后每失败一次就往后推一天，所以往前数 (tries-MAX+1) 天就是转死那天
+                self._conn.execute(
+                    "UPDATE messages SET dead_at=CAST(next_try - "
+                    f"(tries - {MAX_DL_TRIES} + 1) * {DL_LATE_INTERVAL} AS INTEGER) "
+                    "WHERE dl='dead' AND next_try>0")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
+            # 转发明细行按 parent 查（viewman 面板「当日列表」靠它把今天收到的转发
+            # 和它带来的明细取出来）。没这个索引那条 join 会退化成全表扫：
+            # 6 万行实测 27ms vs 1.3ms，2 秒一轮的快照扛不住
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS messages_parent ON messages(parent)")
             # 崩溃恢复：上一次进程遗留的 busy 一律回队。只有 bot 主进程
             # （recover=True，已先抢到单实例锁）能做——search/replay 等命令行
             # 工具若也做恢复，会把运行中 bot 正在处理的事件打回队列造成重复处理
@@ -168,6 +182,13 @@ class DB:
             "SELECT status, COUNT(*) n FROM events GROUP BY status").fetchall())
         return {r["status"]: r["n"] for r in rows}
 
+    async def last_seen_ts(self) -> int:
+        """最后一次收到事件的时刻——进程停机期间的缺口起点（gap_task 用）。
+        空库返回 0（调用方据此判断「没有欠账」）。"""
+        row = await self._run(lambda c: c.execute(
+            "SELECT MAX(received_at) t FROM events").fetchone())
+        return int(row["t"]) if row and row["t"] else 0
+
     # ---- messages ----
     async def add_message(self, **kw) -> int:
         cols = ",".join(kw)
@@ -219,6 +240,12 @@ class DB:
         await self._run(lambda c: c.execute(
             "UPDATE messages SET text=?, dedup=? WHERE id=?", (text, dedup, mid)))
 
+    async def set_message_src(self, mid: int, src: str) -> None:
+        """改写下载源地址：CDN url 上的 rkey 会过期，复检前从 get_msg 取新的换进来，
+        下一轮重试就不必再问一次 get_msg。"""
+        await self._run(lambda c: c.execute(
+            "UPDATE messages SET src=? WHERE id=?", (src, mid)))
+
     async def clear_event_messages(self, eid: int) -> None:
         """事件重放前清掉上次尝试已写的 messages 行（含转发明细行），
         防止重放把同一段内容重复入库。单条 DELETE，天然原子。"""
@@ -235,8 +262,12 @@ class DB:
             dl = "dead" if late else "pending"
             nxt = time.time() + (DL_LATE_INTERVAL if late
                                  else min(30 * 2 ** tries, 1800))
-            c.execute("UPDATE messages SET dl=?, tries=?, next_try=?, err=? WHERE id=?",
-                      (dl, tries, nxt, err[:500], mid))
+            # dead_at = 本轮转死时刻：tries 刚跑满（含 replay --retry 重置后再跑满）时刷新，
+            # 之后的每日复检失败不动它。面板的「今日失败」按它归日，才不会把旧积压天天重计
+            c.execute("UPDATE messages SET dl=?, tries=?, next_try=?, err=?, "
+                      "dead_at=COALESCE(?, dead_at) WHERE id=?",
+                      (dl, tries, nxt, err[:500],
+                       int(time.time()) if tries == MAX_DL_TRIES else None, mid))
             return dl
         return await self._run(_do)
 

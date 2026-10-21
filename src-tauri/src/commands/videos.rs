@@ -7,7 +7,7 @@ use crate::db;
 use crate::models::{ConversionResult, Image, Video, VideoFileStatus};
 use crate::scanner;
 
-use super::thumbnails::clear_thumbnail_cache;
+use super::thumbnails::{clear_thumbnail_cache, clear_thumbnail_cache_in};
 use super::{clear_cancel, is_cancelled, undeleted_targets, video_path_or, AppState, MapErrStr};
 
 /// 按文件头魔数识别真实图片类型，返回 (图片扩展名, 格式名)
@@ -209,10 +209,13 @@ pub async fn delete_videos(
     to_clear.extend(stale.clone());
 
     if !to_clear.is_empty() {
+        // 缓存目录必须在拿库锁之前定下来：锁内调 cache_base 会二次上同一把 std Mutex
+        // （不可重入）→ 永久死锁，那正是「图删掉了、按钮卡在删除中」的成因
+        let cache_root = super::cache_base(&app);
         let conn = state.db.lock().map_err_str()?;
         super::delete_records_with_heal(&conn, &to_clear, "视频", db::delete_videos_by_ids)?;
         for id in &to_clear {
-            clear_thumbnail_cache(&app, id);
+            clear_thumbnail_cache_in(&cache_root, id);
         }
     }
 

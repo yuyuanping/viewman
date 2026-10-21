@@ -2,7 +2,7 @@
 
 支持的环境变量（前缀 QQBOT_）：
   QQBOT_DATA_DIR, QQBOT_WS_URL, QQBOT_WS_TOKEN, QQBOT_API_URL,
-  QQBOT_MAGNET_XLSX, QQBOT_MAGNET_RULES, QQBOT_DL_LIMIT,
+  QQBOT_MAGNET_XLSX, QQBOT_MAGNET_RULES, QQBOT_LINK_XLSX, QQBOT_DL_LIMIT,
 """
 import json
 import os
@@ -20,6 +20,7 @@ _ENV_MAP = {
     "QQBOT_API_URL": "api_url",
     "QQBOT_MAGNET_XLSX": "magnet_xlsx",
     "QQBOT_MAGNET_RULES": "magnet_rules",
+    "QQBOT_LINK_XLSX": "link_xlsx",
     "QQBOT_DL_LIMIT": "dl_limit",
 }
 

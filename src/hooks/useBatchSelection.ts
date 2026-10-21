@@ -56,11 +56,8 @@ export function useBatchSelection<T extends { id: string }>({ view, selectedIds,
     setSelectedIds(new Set());
   }, [setSelectMode, setSelectedIds]);
 
-  const handleDeleteSelected = useCallback(async () => {
-    const ids = [...selectedIds];
-    if (ids.length === 0) return;
-    setDeletingSelected(true);
-    let report: DeletionReport | null = null;
+  const runDelete = useCallback(async (ids: string[]) => {
+    let report: DeletionReport;
     try {
       report = await trash(ids);
     } catch (e) {
@@ -68,7 +65,6 @@ export function useBatchSelection<T extends { id: string }>({ view, selectedIds,
       // 不再往下发第二条"被占用"误导——失败原因根本不是占用
       setSelectedIds(new Set());
       notify(`删除失败：${String(e)}`, "error");
-      setDeletingSelected(false);
       return;
     }
     // 库记录已清的（删掉 + 路径失效）都脱勾；被锁的留在勾选里，关占用程序后可直接再按 Del
@@ -92,8 +88,20 @@ export function useBatchSelection<T extends { id: string }>({ view, selectedIds,
       parts.push(`${report.locked.length} ${measure}删不掉（被占用）：${shown}${more}。关闭占用它的程序（资源管理器预览窗格/照片应用）后重试`);
     }
     notify(parts.join("；") + "。", report.locked.length > 0 ? "error" : "info");
-    setDeletingSelected(false);
   }, [selectedIds, trash, describe, notify, measure, noun, setSelectedIds]);
+
+  const handleDeleteSelected = useCallback(async () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    setDeletingSelected(true);
+    try {
+      await runDelete(ids);
+    } finally {
+      // 「删除中」必须由这条动作自己收尾：任何一步（刷新、点名被锁文件、提示文案）
+      // 出问题都不许把按钮留在删除中——图已经进回收站了，按钮还转就是死界面
+      setDeletingSelected(false);
+    }
+  }, [selectedIds, runDelete]);
 
   // 多选批量移动：弹出目标目录列表，选定后并发 move，失败只计数不中断（被占用的文件跳过）。
   // 8 并发 + 200ms 进度节流 + 可取消（关对话框即取消本轮剩余）。

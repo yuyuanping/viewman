@@ -7,8 +7,10 @@
   "qq_account": "在此填写QQ号（可选，NapCat 快速登录用；留空则每次扫码）",
   "magnet_xlsx": "D:\\QQBot_Data\\磁力链接汇总.xlsx",
   "magnet_rules": "D:\\QQBot_Data\\extract_magnets.py",
+  "link_xlsx": "D:\\QQBot_Data\\网址链接汇总.xlsx",
 
   "dl_limit": 2,
   "save_group": false,
+  "gap_backfill_enabled": true,
   "backfill_enabled": false
 }

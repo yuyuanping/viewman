@@ -27,6 +27,11 @@ _CFG = load_config()
 DATA_DIR = _CFG["data_dir"].replace("\\", "/").rstrip("/") + "/"
 os.makedirs(DATA_DIR, exist_ok=True)   # 日志目录不存在会让 RotatingFileHandler 首条日志即崩
 
+# PID 落盘：面板的停止/状态探测优先读这个文件，PowerShell 按命令行匹配只是兜底
+# （GUI 拉起的进程命令行可能读不到，见 qqbot.rs resolve_pids 的注释）
+with open(DATA_DIR + "riskwatch.pid", "w") as _f:
+    _f.write(str(os.getpid()))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -125,8 +130,20 @@ async def main() -> None:
         await asyncio.sleep(SCAN_INTERVAL)
 
 
+_PID_FILE = DATA_DIR + "riskwatch.pid"
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("[EXIT] interrupted")
+    finally:
+        # 正常退出自己删；被 taskkill / 崩溃时删不了，留给 viewman 的状态探测
+        # 按「进程身份对不上」清掉（见 qqbot.rs probe_pids）。只删自己的
+        try:
+            with open(_PID_FILE, encoding="utf-8") as f:
+                mine = f.read().strip() == str(os.getpid())
+            if mine:
+                os.remove(_PID_FILE)
+        except OSError:
+            pass

@@ -43,6 +43,10 @@ interface TemplateMatchPanelProps {
   onDeleteImage?: (image: Image) => void;
   /** 非阻塞错误回报（父层转 toast） */
   onError?: (message: string) => void;
+  /** 大图查看器是否盖在本面板上（父层知道 viewerIndex）：为真时 Esc 只关大图，不关本面板。
+   *  两者都在 window 上挂 Esc 监听，一次按键两个都会响应；不给这个开关，
+   *  在大图里按 Esc 会连「以模版找相似」的结果面板一起收掉 */
+  viewerOpen?: boolean;
   onClose: () => void;
 }
 
@@ -54,13 +58,14 @@ interface TemplateMatchPanelProps {
 export function TemplateMatchPanel({
   template, matches, imageById, skipped, threshold, onThreshold, searching, progress,
   selectedIds, onToggle, onSelectIds, onClearAll, selectedTotal, onDeleteSelected, deleting,
-  onMoveSelected, moving, onOpenImage, onMoveImage, onDeleteImage, onError, onClose,
+  onMoveSelected, moving, onOpenImage, onMoveImage, onDeleteImage, onError, viewerOpen, onClose,
 }: TemplateMatchPanelProps) {
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    // 大图在最上层：Esc 归它（它自己会关掉大图），本面板这一层别跟着收
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !viewerOpen) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, viewerOpen]);
 
   const visible = useMemo(
     () => matches
@@ -173,7 +178,7 @@ export function TemplateMatchPanel({
         >
           {deleting ? "删除中…" : `删除所选 (${selectedTotal})`}
         </button>
-        <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc）" aria-label="关闭模板匹配面板">
+        <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc；大图开着时 Esc 先关大图）" aria-label="关闭模板匹配面板">
           关闭 (Esc)
         </button>
       </div>

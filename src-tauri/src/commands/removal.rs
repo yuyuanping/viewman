@@ -3,7 +3,7 @@ use tauri::Manager;
 use crate::db;
 
 use super::settings::roots_key;
-use super::thumbnails::clear_thumbnail_cache;
+use super::thumbnails::clear_thumbnail_cache_in;
 use super::{AppState, MapErrStr};
 
 /// 统一比较形式：小写 + 分隔符一律按 '\' 处理（Windows 路径大小写不敏感）
@@ -52,6 +52,9 @@ pub async fn remove_media_directory(
 
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        // 缓存目录在拿库锁之前定下来：锁内调 cache_base 会二次上同一把 std Mutex，
+        // 死锁（见 clear_thumbnail_cache_in 的注释）
+        let cache_root = super::cache_base(&app);
         // 删记录与忘掉 roots 在同一事务：中断不会出现“记录已删、root 还在，
         // 重扫把整个目录原样收回”的移除回退
         let removed_ids: Vec<String> = {
@@ -97,7 +100,7 @@ pub async fn remove_media_directory(
         };
 
         for id in &removed_ids {
-            clear_thumbnail_cache(&app, id);
+            clear_thumbnail_cache_in(&cache_root, id);
         }
 
         Ok(removed_ids.len())

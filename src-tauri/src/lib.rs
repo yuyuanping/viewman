@@ -137,6 +137,7 @@ pub fn run() {
             commands::load_bot_settings,
             commands::save_bot_settings,
             commands::get_bot_status,
+            commands::get_bot_dl_snapshot,
             commands::start_bot,
             commands::stop_bot,
             commands::stop_all_bot,

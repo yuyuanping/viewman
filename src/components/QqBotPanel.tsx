@@ -1,9 +1,18 @@
 import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
-import type { BotStatus, NapCatStage } from "../types";
+import type { BotDlItem, BotStatus, NapCatStage } from "../types";
 import type { Notify } from "../hooks/useToasts";
 import { useNapcatStatus } from "../hooks/useNapcatStatus";
+import {
+  countByDlStatus,
+  filterByDlStatus,
+  dlItemLabel,
+  dlStatusOf,
+  DL_STATUS_LABEL,
+  DL_STATUS_ORDER,
+  type DlStatus,
+} from "../botDlFilter";
 
 function formatBytes(bytes: number | null): string {
   if (bytes == null || bytes <= 0) return "-";
@@ -15,6 +24,58 @@ function formatBytes(bytes: number | null): string {
     idx += 1;
   }
   return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+/** 状态文字的配色：行内标签与筛选条共用一套，深浅不同但语义一致 */
+const STATUS_CLASS: Record<DlStatus, string> = {
+  busy: "text-blue-300",
+  pending: "text-yellow-300",
+  dead: "text-red-300",
+  dedup: "text-gray-400",
+  ok: "text-emerald-300",
+  archived: "text-gray-500",
+};
+
+const KIND_LABEL: Record<string, string> = {
+  image: "图片",
+  video: "视频",
+  file: "文件",
+  forward: "转发",
+  reply: "回复",
+  text: "文本",
+};
+
+/** 「已归档」要区分纯文本直发与转发壳，细分一下文案 */
+function statusLabel(item: BotDlItem): string {
+  const status = dlStatusOf(item);
+  return status === "archived" && item.kind === "text" ? "已存档" : DL_STATUS_LABEL[status];
+}
+
+/** 状态筛选条上的胶囊按钮；选中态高亮，角标是该状态的当日条数 */
+function FilterChip({
+  active,
+  label,
+  count,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  count: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors ${
+        active
+          ? "bg-blue-600/70 border-blue-500 text-white"
+          : "bg-white/5 border-transparent text-gray-400 hover:bg-white/10"
+      } ${count === 0 && !active ? "opacity-50" : ""}`}
+    >
+      {label} {count}
+    </button>
+  );
 }
 
 /** 阶段彩色小标签：一眼看出卡在哪一步 */
@@ -54,6 +115,7 @@ export function QqBotPanel({
   refresh: () => Promise<void>;
 }) {
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [dlFilter, setDlFilter] = useState<DlStatus | "all">("all");
   const napcat = useNapcatStatus();
 
   const runAction = async (name: string, action: () => Promise<string | void>) => {
@@ -87,6 +149,11 @@ export function QqBotPanel({
   };
 
   const running = status != null && (status.bot_running || status.bot_pid != null);
+
+  // 当日列表：后端已按自然日取全量，这里只做前端筛选，切换状态不用回后端
+  const todayItems = status?.today_items ?? [];
+  const statusCounts = countByDlStatus(todayItems);
+  const visibleItems = filterByDlStatus(todayItems, dlFilter);
 
   // 端口不通且 bot 也没在跑时提示冷启动等待；NapCat 侧的扫码引导由下方
   // NapCat 状态卡的二维码+summary 负责，这里不再重复说
@@ -211,69 +278,110 @@ export function QqBotPanel({
         </section>
       )}
 
-      {status && status.recent.length > 0 && (
+      {status && (todayItems.length > 0 || status.summary.ok > 0) && (
         <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-2 min-h-0" style={{ flex: "1 1 260px" }}>
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">下载列表（最近 {status.recent.length} 条）</span>
-            <span className="text-xs text-gray-400">每 10 秒自动刷新</span>
+            <span className="text-sm font-medium">下载列表（今日 {todayItems.length} 条）</span>
+            <span className="text-xs text-gray-400">
+              {status.dl.busy + status.dl.pending > 0 ? "实时刷新中（约 2 秒）" : "每 10 秒自动刷新"}
+            </span>
+          </div>
+          {/* 累计只有「已下载」一个；今日/今日重复跳过/今日失败都按本地自然日归零，
+              午夜过后自动从 0 开始。排队与下载中是队列积压长度，不是日计数 */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
+            <span>
+              累计已下载 <span className="text-gray-200 font-medium">{status.summary.ok}</span> 个
+              （{formatBytes(status.summary.ok_bytes)}）
+            </span>
+            <span>
+              今日 <span className="text-gray-200 font-medium">{status.summary.today}</span> 个
+              （{formatBytes(status.summary.today_bytes)}）
+            </span>
+            {status.summary.dedup_today > 0 && (
+              <span>今日重复跳过 {status.summary.dedup_today}</span>
+            )}
+            {status.dl.pending > 0 && <span className="text-yellow-300">排队 {status.dl.pending}</span>}
+            {status.dl.busy > 0 && <span className="text-blue-300">下载中 {status.dl.busy}</span>}
+            {status.dl.dead_today > 0 && (
+              <span className="text-red-300">今日失败 {status.dl.dead_today}</span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <FilterChip
+              active={dlFilter === "all"}
+              label="全部"
+              count={todayItems.length}
+              onClick={() => setDlFilter("all")}
+            />
+            {DL_STATUS_ORDER.map((s) => (
+              <FilterChip
+                key={s}
+                active={dlFilter === s}
+                label={DL_STATUS_LABEL[s]}
+                count={statusCounts[s]}
+                onClick={() => setDlFilter(s)}
+              />
+            ))}
+            {dlFilter !== "all" && (
+              <button
+                onClick={() => setDlFilter("all")}
+                className="px-2 py-0.5 rounded-full text-[11px] text-blue-400 hover:underline"
+              >
+                清除筛选
+              </button>
+            )}
           </div>
           <div className="overflow-y-auto" style={{ maxHeight: "42vh" }}>
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
-                <tr>
-                  <th className="text-left font-medium py-1.5 px-2">内容</th>
-                  <th className="text-right font-medium py-1.5 px-2">大小</th>
-                  <th className="text-left font-medium py-1.5 px-2">类型</th>
-                  <th className="text-left font-medium py-1.5 px-2">状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.recent.map((item) => {
-                  const kindLabel =
-                    item.kind === "image" ? "图片"
-                    : item.kind === "video" ? "视频"
-                    : item.kind === "file" ? "文件"
-                    : item.kind === "forward" ? "转发"
-                    : item.kind === "reply" ? "回复"
-                    : item.kind;
-                  const stateLabel =
-                    item.dl === "busy" ? "下载中"
-                    : item.dl === "dead" ? "失败"
-                    : item.dl === "pending" ? "排队"
-                    : item.dl === "none" ? (item.kind === "text" ? "已存档" : "已归档")
-                    : item.kind === "forward" ? "已归档"
-                    : item.dedup > 0 ? "重复跳过"
-                    : "已下载";
-                  const dedupSuffix =
-                    item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
-                  return (
-                    <tr
-                      key={item.id}
-                      className="border-t border-white/5 hover:bg-white/5"
-                      title={item.err ?? undefined}
-                    >
-                      <td className="py-1.5 px-2 text-gray-200 truncate max-w-[36ch]" title={item.label}>
-                        {item.label || `#${item.id}`}
-                      </td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
-                      <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
-                      <td className="py-1.5 px-2">
-                        <span className={
-                          item.dl === "busy" ? "text-blue-300"
-                          : item.dl === "dead" ? "text-red-300"
-                          : item.dl === "pending" ? "text-yellow-300"
-                          : item.dl === "none" ? "text-gray-500"
-                          : item.dedup > 0 ? "text-gray-400"
-                          : "text-emerald-300"
-                        }>
-                          {stateLabel}{dedupSuffix}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            {visibleItems.length === 0 ? (
+              <p className="py-6 text-center text-xs text-gray-500">
+                {todayItems.length === 0 ? "今天还没有下载记录" : "今日没有该状态的记录"}
+              </p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
+                  <tr>
+                    <th className="text-left font-medium py-1.5 px-2">内容</th>
+                    <th className="text-right font-medium py-1.5 px-2">大小</th>
+                    <th className="text-left font-medium py-1.5 px-2">类型</th>
+                    <th className="text-left font-medium py-1.5 px-2">状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleItems.map((item) => {
+                    const kindLabel = KIND_LABEL[item.kind] ?? item.kind;
+                    const label = dlItemLabel(item);
+                    const dedupSuffix =
+                      item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
+                    // 明细行缩进挂在所属转发行下面（后端已按 COALESCE(parent,id) 排好序）
+                    const isDetail = item.parent != null;
+                    return (
+                      <tr
+                        key={item.id}
+                        className="border-t border-white/5 hover:bg-white/5"
+                        title={item.err ?? (isDetail ? `转发 #${item.parent} 的第 ${item.id} 段` : undefined)}
+                      >
+                        <td
+                          className={`py-1.5 px-2 text-gray-200 truncate max-w-[36ch] ${
+                            isDetail ? "pl-6 text-gray-300" : ""
+                          }`}
+                          title={label}
+                        >
+                          {isDetail && <span className="text-gray-600 mr-1">└</span>}
+                          {label}
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
+                        <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
+                        <td className="py-1.5 px-2">
+                          <span className={STATUS_CLASS[dlStatusOf(item)]}>
+                            {statusLabel(item)}{dedupSuffix}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </section>
       )}

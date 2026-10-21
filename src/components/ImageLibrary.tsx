@@ -516,6 +516,7 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onMoveImage={handleSingleMove}
           onDeleteImage={handleSingleDelete}
           onError={(message) => notify(message, "error")}
+          viewerOpen={viewerIndex !== null}
           onClose={() => setDuplicatePanelOpen(false)}
         />
       )}
@@ -542,6 +543,7 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
           onMoveImage={handleSingleMove}
           onDeleteImage={handleSingleDelete}
           onError={(message) => notify(message, "error")}
+          viewerOpen={viewerIndex !== null}
           onClose={clearTemplate}
         />
       )}

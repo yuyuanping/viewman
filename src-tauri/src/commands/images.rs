@@ -13,7 +13,7 @@ use super::scan::{
 };
 use super::settings::{remember_root, IMAGE_SCAN_ROOTS_KEY};
 use super::thumbnails::{
-    cached_thumbnail_usable, clear_thumbnail_cache, run_thumbnail_jobs, ThumbEntry, ThumbJob,
+    cached_thumbnail_usable, clear_thumbnail_cache_in, run_thumbnail_jobs, ThumbEntry, ThumbJob,
 };
 use super::videos::{move_file, same_target_dir, validated_target_dir};
 use super::{clear_cancel, is_cancelled, undeleted_targets, AppState, MapErrStr};
@@ -517,15 +517,28 @@ pub async fn fix_mismatched_extensions(
 /// 批量删除图片：一次回收站事务 + 一次数据库事务，返回三类清单。
 /// 逐张删时每张都要过一次 IPC、一次 shell 调用和一次事务落盘，勾选几百张就是十几秒。
 /// 库里已经没有记录的 id 视作已删除，见 split_known_targets。
+/// 全程在 spawn_blocking 里跑：库锁是 std Mutex，async 命令里直接 lock 就是拿 tokio
+/// 工作线程去阻塞等它——与别的库锁持有者（统计、视图查询同抢一把锁）撞上时，
+/// 工作线程被占满而阻塞池里的查询又排不上线程，命令就永远不返回，
+/// 前端表现为「图已进回收站，按钮一直停在删除中」。
 #[tauri::command]
 pub async fn delete_images(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     image_ids: Vec<String>,
 ) -> Result<crate::models::DeletionReport, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_images_blocking(&app, &image_ids))
+        .await
+        .map_err_str()?
+}
+
+fn delete_images_blocking(
+    app: &tauri::AppHandle,
+    image_ids: &[String],
+) -> Result<crate::models::DeletionReport, String> {
+    let state = app.state::<AppState>();
     let (targets, mut deleted): (Vec<(String, String)>, Vec<String>) = {
         let conn = state.db.lock().map_err_str()?;
-        split_known_targets(&conn, &image_ids)
+        split_known_targets(&conn, image_ids)
             .map_err(|e| format!("读取库记录失败（文件未动）：{}", e))?
     };
 
@@ -537,9 +550,7 @@ pub async fn delete_images(
         .collect();
 
     let for_files = targets.clone();
-    let survivors = tauri::async_runtime::spawn_blocking(move || undeleted_targets(&for_files))
-        .await
-        .map_err_str()?;
+    let survivors = undeleted_targets(&for_files);
     let locked: Vec<String> = survivors.into_iter().map(|(id, _)| id).collect();
     let locked_set: HashSet<String> = locked.iter().cloned().collect();
     let stale_set: HashSet<String> = stale.iter().cloned().collect();
@@ -554,11 +565,14 @@ pub async fn delete_images(
     to_clear.extend(stale.clone());
 
     if !to_clear.is_empty() {
+        // 缓存目录必须在拿库锁之前定下来：锁内调 cache_base 会二次上同一把 std Mutex
+        // （不可重入）→ 永久死锁，那正是「图删掉了、按钮卡在删除中」的成因
+        let cache_root = super::cache_base(app);
         let conn = state.db.lock().map_err_str()?;
         // 自愈删除：坏行触发 malformed 时原地重建 FTS 重试，仍不行才把自检结果带回来
         super::delete_records_with_heal(&conn, &to_clear, "图片", db::delete_images_by_ids)?;
         for id in &to_clear {
-            clear_thumbnail_cache(&app, id);
+            clear_thumbnail_cache_in(&cache_root, id);
         }
     }
 

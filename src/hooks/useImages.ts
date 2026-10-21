@@ -30,7 +30,12 @@ export function useImages() {
    *  19 万行的视图整表过桥一次要好几秒（查询+序列化+解析+排序），短时间内的
    *  多次推进合并成一次，不然每个扫描根扫完都卡一下。
    *  已有待触发的刷新时后来者直接 join，不再重置计时——重置会清掉先到调用者的
-   *  定时器，让它返回的 Promise 永远不 resolve，await 方（删除/移动/扫描）全部挂死 */
+   *  定时器，让它返回的 Promise 永远不 resolve，await 方（删除/移动/扫描）全部挂死。
+   *
+   *  等待方在推完代次那一刻就放行，不等统计：代次一推，ImageLibrary 自己就重拉视图，
+   *  库内容已经是新的。统计只是一张侧栏用的聚合表，它要是被一个大查询卡住（它抢的
+   *  是与删除/视图同一把库锁），await 它的删除流程就会永远停在「删除中…」——
+   *  图早删掉了，按钮却一直不回来。统计拉不动就留旧值，下轮刷新再试。 */
   const refresh = useCallback(async () => {
     return new Promise<void>(resolve => {
       if (refreshTimer.current !== null) {
@@ -38,15 +43,18 @@ export function useImages() {
         return;
       }
       refreshWaiters.current.push(resolve);
-      refreshTimer.current = window.setTimeout(async () => {
+      refreshTimer.current = window.setTimeout(() => {
         refreshTimer.current = null;
         const waiters = refreshWaiters.current;
         refreshWaiters.current = [];
         setLibraryVersion(v => v + 1);
-        try {
-          setImageStats(await api.getImageStats());
-        } catch { /* 统计拉不动就先留旧的，下轮刷新再试 */ }
         waiters.forEach(resolve => resolve());
+        // 统计与等待方解绑：拉得动就更新侧栏，拉不动下一轮再说
+        void (async () => {
+          try {
+            setImageStats(await api.getImageStats());
+          } catch { /* 统计拉不动就先留旧的，下轮刷新再试 */ }
+        })();
       }, REFRESH_DEBOUNCE_MS);
     });
   }, []);

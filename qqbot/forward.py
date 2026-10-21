@@ -1,7 +1,10 @@
 """合并转发（asyncio）：递归展开（最多 3 层），媒体单次下载，返回格式化文本。"""
-from datetime import datetime
-from pathlib import Path
+import json
+import re
 from collections.abc import Callable
+from datetime import datetime
+from html import unescape
+from pathlib import Path
 
 
 
@@ -17,6 +20,79 @@ _LABELS = {
     "location": "[位置]", "music": "[音乐]", "redbag": "[红包]",
 }
 
+# 卡片/分享类段：正文要从载体里提取链接存档，不能只落占位符——
+# 网址分享、音乐/位置卡片、JSON 卡片里的磁力链接全在这一类（2026-10-11 用户要求）
+_CARD_TYPES = ("json", "xml", "share", "music", "location")
+# URL 段只认 ASCII 字符集：卡片 JSON 里链接后直接跟中文时不会吞字
+_LINK_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&*+,;=%()\[\]]+"
+                      r"|magnet:\?xt=urn:btih:[0-9A-Za-z]+")
+
+
+def _collect_links(obj, out: list[str]) -> None:
+    if isinstance(obj, str):
+        out.extend(_LINK_RE.findall(obj))
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _collect_links(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _collect_links(v, out)
+
+
+def card_text(seg: dict) -> str:
+    """卡片类段的可存档文本：占位标签 + 展示文案 + 提取出的全部链接。
+
+    json/xml 的 data 是载体字符串（JSON 串 / XML 串），链接藏在嵌套字段或
+    属性里，递归抓最稳；share/music/location 的字段是平铺的。重复链接只留
+    一处，一个链接都没有时退回纯占位标签。"""
+    t = seg.get("type")
+    d = seg.get("data", {})
+    label = _LABELS.get(t, f"[{t}]")
+    body = ""   # 给人看的正文：平铺字段；json 只取 prompt
+    if t in ("json", "xml"):
+        raw = str(d.get("data") or "")
+    elif t == "location":
+        # 位置卡不是 title/content/url 这些字段：NapCat 给的是经纬度 + 地名，
+        # 只拼平铺字段的话整张卡退化成 [位置]，坐标一个都不留
+        title = d.get("title") or d.get("name") or ""
+        summary = d.get("summary") or d.get("address") or ""
+        body = " ".join(str(x) for x in (title, summary) if x)
+        raw = body
+        lat, lng = d.get("lat"), d.get("lng")
+        if lat is not None and lng is not None:
+            raw = f"{raw}\n({lat},{lng})".strip()
+    else:
+        raw = body = " ".join(str(d.get(k, ""))
+                              for k in ("title", "content", "url", "address"))
+    if t == "xml":
+        raw = unescape(raw)   # 属性里的 &amp; 还原成 & 才能匹配出完整链接
+    if t == "json":
+        try:
+            body = str(json.loads(raw).get("prompt") or "")
+        except Exception:
+            body = ""         # 解析不了宁可只留标签 + 抓到的链接，别把 JSON 原文抄进日记
+    links: list[str] = []
+    _collect_links(raw, links)
+    seen: set[str] = set()
+    links = [u for u in links if not (u in seen or seen.add(u))]
+    lines = [label]
+    # 平铺字段的正文里本来就夹着链接（share/music/location），先摘掉链接再当标题，
+    # 否则同一链接在正文和下面各出现一次
+    title = body
+    for u in links:
+        title = title.replace(u, "")
+    title = " ".join(title.split())
+    # 分享类小程序的 prompt 自带 [小程序名]，跟标签重复的别再抄一遍
+    if title and title not in lines:
+        lines.append(title)
+    lines.extend(links)
+    if len(lines) == 1 and t == "location":
+        # 只有坐标没有地名：至少把坐标留下
+        tail = raw.split("\n")[-1].strip()
+        if tail.startswith("("):
+            lines.append(tail)
+    return "\n".join(lines)
+
 
 def seg_text(seg: dict) -> str:
     """单个非媒体段的文本表示（文本/表情/@/回复/卡片占位）。"""
@@ -24,6 +100,8 @@ def seg_text(seg: dict) -> str:
     d = seg.get("data", {})
     if t == "text":
         return d.get("text", "")
+    if t in _CARD_TYPES:
+        return card_text(seg)
     if t == "face":
         return f"[表情{d.get('id', '')}]"
     if t == "at":

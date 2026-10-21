@@ -142,7 +142,16 @@ fn register_orphans(
 /// 封面缓存文件名由条目 id 决定，条目移除后一并清理，避免留下孤儿文件。
 /// 新老扩展名都清（webp 迁移前的 jpg 不留尾巴）。
 pub(crate) fn clear_thumbnail_cache(app: &tauri::AppHandle, id: &str) {
-    let base = super::cache_base(app).join("thumbnails");
+    clear_thumbnail_cache_in(&super::cache_base(app), id);
+}
+
+/// 同上，但缓存目录由调用方给。**持着库锁时只能用这个，不能用上面那个**：
+/// `cache_base` 自己要读 settings 会去 lock 那把 std Mutex，而 std Mutex 不可重入：
+/// 持着锁再调它就是同线程二次上锁，永久阻塞。批量删除（图片/视频）正是这个形状：
+/// 文件已进回收站、库记录已删，然后卡死在清封面这一步，命令永不返回，
+/// 前端表现为「图删掉了，按钮一直停在删除中」。
+pub(crate) fn clear_thumbnail_cache_in(cache_root: &std::path::Path, id: &str) {
+    let base = cache_root.join("thumbnails");
     let _ = std::fs::remove_file(base.join(format!("{}.webp", id)));
     let _ = std::fs::remove_file(base.join(format!("{}.jpg", id)));
 }
@@ -656,7 +665,9 @@ pub async fn capture_frame(
         // 目录里（半个 png 会被下一轮图片扫描收进库）
         let tmp = out.with_file_name(format!(
             ".viewman-tmp-{}",
-            out.file_name().and_then(|n| n.to_str()).unwrap_or("frame.png")
+            out.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("frame.png")
         ));
 
         // -ss 0 不传：ffmpeg 62 对 image2/mjpeg 的 0 偏移 seek 会跳过唯一一帧（同 extract_thumbnail）
@@ -682,8 +693,7 @@ pub async fn capture_frame(
             Ok(m) if m.len() > 0 => {}
             _ => return Err(cleanup("ffmpeg 未产生有效截图".into())),
         }
-        std::fs::rename(&tmp, &out)
-            .map_err(|e| cleanup(format!("落盘失败: {}", e)))?;
+        std::fs::rename(&tmp, &out).map_err(|e| cleanup(format!("落盘失败: {}", e)))?;
         Ok(out.to_string_lossy().to_string())
     })
     .await

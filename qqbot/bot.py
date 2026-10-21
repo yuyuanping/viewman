@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import logging.handlers
+import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -21,16 +23,25 @@ import aiohttp
 
 from config import load_config
 from db import DB
-
-from storage import Storage, md5_hint
-from forward import render_node, seg_text
+from forward import card_text, render_node, seg_text
+from links import LinkRegistry
 from magnets import MagnetRegistry
+from storage import Storage, md5_hint
 
 logger = logging.getLogger("saver.bot")
 
 MAX_CONCURRENT_DL = 4
 SWEEP_INTERVAL = 20
 REPLY_TEXT_LIMIT = 200   # 引用原文在 md 里的截断长度
+# 打 QQ 侧消息类 API（历史、单条消息）的最小间隔。QQ 对 SsoGetGroupMsg 这类
+# 请求有频率风控，批量回捞被打成 retcode 1200 / video-url-get disabled 就是
+# 这么来的；所有调用点共用一个闸门，串行成 0.3s 一次。
+API_MIN_GAP_S = 0.3
+# 看门重连：NapCat 没起来时别按固定 5s 硬撞端口——实测停机期间 7s 一次
+# 刷出 4.2 万行相同 ERROR，把 5MB×5 的滚动预算全吃掉，真正的诊断线索留不住
+RECONNECT_BASE = 5       # 连上过之后断线的重连间隔（秒）
+RECONNECT_MAX = 120      # 一直连不上时的指数退避上限
+CONNECT_LOG_EVERY = 30   # 连续失败期间每 30 次才记一条，其余只计数
 
 # 停机补拉：连接建立/重连后拉漫游历史，把 NapCat 无订阅期间的缺口补进同一管道
 BACKFILL_ACTIVE_DAYS = 14    # 只补最近活跃过的会话
@@ -38,6 +49,22 @@ BACKFILL_PAGE = 100          # 单页历史条数
 BACKFILL_MAX_PAGES = 3       # 每会话最多往前翻几页
 BACKFILL_KNOWN_STREAK = 30   # 从新往旧连续见到这么多条已知消息即停
 BACKFILL_INTERVAL = 6 * 3600 # 进程不重启也每 6 小时补一轮（覆盖运行中断线漏的）
+
+# 断线缺口补录（默认开启）：只补「这段掉线期间」的消息——每个最近活跃过的会话
+# 打一次历史 API、单页，范围 = 掉线时刻 - 余量。与 backfill_enabled 的 14 天
+# 全量扫描不同：那个每会话 3 页 ×100 条会踩限流，这个每会话 1 页 20 条（热态实测
+# 10.2s/会话，2026-10-13 最近 3 天活跃会话只有 1 个），且所有请求被 API_MIN_GAP_S
+# 串行，掉线后自动补齐实时流漏掉的消息。
+GAP_CHAT_DAYS = 3          # 只回看最近 3 天有过消息的会话（掉线前活跃的必在其中）
+# 页大小实测（2026-10-13，同一私聊会话，get_friend_msg_history 走 HTTP）：
+#   count=1 →1.0s  count=5 →1.1s  count=10 →7.0s(覆盖 70 分钟)
+#   count=20 →10.2s(覆盖 22 小时)  count=50 →34.3s(覆盖 38 小时)
+# 耗时几乎线性于 count，50 条要 34s 会撞上超时；20 条已够覆盖一整天的消息量。
+GAP_PAGE = 20              # 单会话单页条数
+GAP_TIMEOUT = 45           # 单次历史请求超时：冷启时 NapCat 明显慢于热态实测
+GAP_MAX_DOWN_S = 7 * 86400 # 缺口长过一周不自动拉，交给 replay.py 手工按天补
+GAP_MAX_FAILS = 3          # 连续这么多轮问不到 QQ（超时/无返回）就销账并提示
+GAP_LEADIN_S = 120         # 缺口往前多取 2 分钟：断线信号本身有延迟，段也可能先到
 
 
 def md_prefix(scope: str, peer_id, sender_id, nickname: str) -> str:
@@ -105,11 +132,13 @@ def setup_logging(data_dir: str) -> None:
 
 class Bot:
     def __init__(self, config: dict, session: aiohttp.ClientSession, db: DB,
-                 magnets: MagnetRegistry | None = None):
+                 magnets: MagnetRegistry | None = None,
+                 links: LinkRegistry | None = None):
         self.config = config
         self.session = session
         self.db = db
         self.magnets = magnets
+        self.links = links
         # db 交给 storage：媒体落盘（含合并转发路径）当场登记 media 表
         self.storage = Storage(config["data_dir"], session, MAX_CONCURRENT_DL, db)
         # 全局下载限速（每秒下载数）：None/<=0 不限。配进 storage 的令牌桶
@@ -117,11 +146,17 @@ class Bot:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._seq = 0
+        self.connect_fails = 0   # 连续「连不上」次数，连上即清零
         self._tasks: set[asyncio.Task] = set()
         # 事件消费队列：单消费者保证 md 文本时序
         self.q: asyncio.Queue = asyncio.Queue()
-        self.magnet_kick = asyncio.Event()
+        self.registry_kick = asyncio.Event()
         self.backfill_kick = asyncio.Event()
+        self.gap_kick = asyncio.Event()
+        # 掉线起点（Unix 秒）：连接结束时打点，补完缺口才清空。None = 没欠缺口
+        self.down_since: int | None = None
+        self._gap_fails = 0    # 连续问不到 QQ 的缺口轮数（超时/无返回）
+        self._api_next = 0.0   # 下一次允许打消息类 API 的最早时刻（monotonic）
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -130,16 +165,27 @@ class Bot:
         return task
 
     def _kick_magnets(self, text: str, mid: int | None = None) -> None:
-        # 磁力链接落库即唤醒 sweeper 去登记，不等 20 秒班车：remove_magnets.py
+        # 磁力/网址落库即唤醒 sweeper 去登记，不等 20 秒班车：remove_magnets.py
         # 按行删 messages，晚登记的那条链接就只剩 Excel 里没人知道了。
-        if not self.magnets or "magnet:" not in text.lower():
-            return
-        if mid is not None:
-            # 回填走的是 UPDATE 老行，id 可能已低于 sweeper 游标，必须点名重扫
-            self.magnets.dirty.add(mid)
-        self.magnet_kick.set()
+        low = (text or "").lower()
+        if self.magnets and "magnet:" in low:
+            if mid is not None:
+                # 回填走的是 UPDATE 老行，id 可能已低于 sweeper 游标，必须点名重扫
+                self.magnets.dirty.add(mid)
+            self.registry_kick.set()
+        if self.links and ("http://" in low or "https://" in low):
+            if mid is not None:
+                self.links.dirty.add(mid)
+            self.registry_kick.set()
 
     # ---- OneBot API（请求/响应同步） ----
+    async def _api_gate(self) -> None:
+        """消息类 API 串行闸门：所有调用点共用，见 API_MIN_GAP_S。"""
+        now = time.monotonic()
+        if now < self._api_next:
+            await asyncio.sleep(self._api_next - now)
+        self._api_next = time.monotonic() + API_MIN_GAP_S
+
     async def call_api(self, action: str, params: dict, timeout: float = 15) -> Any | None:
         ws = self._ws
         if ws is None or ws.closed:
@@ -205,6 +251,7 @@ class Bot:
             mid: Any = int(message_id)
         except (TypeError, ValueError):
             mid = message_id
+        await self._api_gate()
         return await self.call_api("get_msg", {"message_id": mid}, timeout=20)
 
     # ---- 事件流水线 ----
@@ -327,6 +374,12 @@ class Bot:
                     row = dict(common, ref=rid, dl="pending")
                     mid = await self.db.add_message(**row)
                     self._spawn(self._attempt_row(dict(row, id=mid)))
+            elif t in ("json", "xml", "share", "music", "location"):
+                # 卡片/分享类：提取载体里的网址/磁力一起存档，纯占位会把链接丢掉
+                text = card_text(seg)
+                md_pending.append((text, prefix, ts))
+                mid = await self.db.add_message(**common, text=text)
+                self._kick_magnets(text, mid)
             else:
                 label = {"face": "[表情]", "at": "[@]"} .get(t, f"[{t}]")
                 md_pending.append((label, prefix, ts))
@@ -344,13 +397,13 @@ class Bot:
                 await self._sweep_once()
             except Exception as e:
                 logger.error("[SWEEP] %s", e)
-            # 定时班车之外，收到磁力链接会被 _kick_magnets 提前叫醒。
+            # 定时班车之外，收到磁力/网址链接会被 _kick_magnets 提前叫醒。
             # clear 放在 wait 之后：唤醒期间到达的链接不会丢，最坏是多跑一轮。
             try:
-                await asyncio.wait_for(self.magnet_kick.wait(), SWEEP_INTERVAL)
+                await asyncio.wait_for(self.registry_kick.wait(), SWEEP_INTERVAL)
             except TimeoutError:
                 pass
-            self.magnet_kick.clear()
+            self.registry_kick.clear()
 
     async def _sweep_once(self) -> None:
         for ev in await self.db.fetch_due_events(limit=10):
@@ -362,11 +415,12 @@ class Bot:
             self._spawn(self._run_event_safe(ev["id"], data))
         for row in await self.db.claim_pending_dl(limit=8):
             self._spawn(self._attempt_row(row, claimed=True))
-        if self.magnets:
-            try:
-                await self.magnets.sync(self.db)
-            except Exception as e:
-                logger.error("[MAGNET] sync 异常: %s: %s", type(e).__name__, e)
+        for reg, tag in ((self.magnets, "[MAGNET]"), (self.links, "[LINK]")):
+            if reg:
+                try:
+                    await reg.sync(self.db)
+                except Exception as e:
+                    logger.error("%s sync 异常: %s: %s", tag, type(e).__name__, e)
 
     # ---- 停机补拉 ----
     async def backfill_task(self) -> None:
@@ -422,6 +476,7 @@ class Bot:
             params: dict[str, Any] = {param: peer_id, "count": BACKFILL_PAGE}
             if cursor is not None:
                 params["message_seq"] = cursor
+            await self._api_gate()
             data = await self.call_api(action, params, timeout=30)
             if not data:
                 return added if got_any else None
@@ -459,6 +514,137 @@ class Bot:
         return await self.db.msg_known(str(m.get("message_id") or ""),
                                        scope, peer, sender,
                                        int(m.get("time") or 0))
+
+    # ---- 断线缺口补录 ----
+    async def gap_task(self) -> None:
+        """每次重连后补一次掉线期间的缺口。只有真问到 QQ 才销账：历史请求很慢
+        （实测热态 10.2s/会话，冷启能到 34s），一问不到就欠着等下次重连，
+        连续 GAP_MAX_FAILS 轮问不到才放弃并提示改用 replay.py。
+        补的过程中再次断线时 down_since 已被 run() 改成新的掉线时刻，
+        那一轮的账不销，留给下一轮从更早的时间点接着补。"""
+        while True:
+            await self.gap_kick.wait()
+            self.gap_kick.clear()
+            since = self.down_since
+            if since is None:
+                continue
+            if self._ws is None or self._ws.closed:
+                continue   # 又断了：run() 下次连上会重新 kick
+            try:
+                answered = await self._gap_backfill(int(since))
+            except Exception as e:
+                logger.error("[GAP] %s: %s", type(e).__name__, e)
+                answered = False
+            self._gap_settle(answered, int(since))
+
+    def _gap_settle(self, answered: bool, since: int) -> None:
+        """一轮缺口跑完后的销账/欠账判定。"""
+        if self.down_since != since:
+            return   # 补的过程中又断线，新缺口自己会 kick 下一轮
+        if answered:
+            self._gap_fails = 0
+            self.down_since = None
+            return
+        self._gap_fails += 1
+        if self._gap_fails < GAP_MAX_FAILS:
+            logger.warning("[GAP] 第 %d 轮没问到 QQ，缺口继续欠着", self._gap_fails)
+            return
+        logger.warning("[GAP] 连续 %d 轮问不到 QQ，放弃这段 %.1f 小时的缺口 —— "
+                       "要补历史请开 backfill_enabled 或跑 python replay.py",
+                       self._gap_fails, (time.time() - since) / 3600)
+        self._gap_fails = 0
+        self.down_since = None
+
+    async def _gap_backfill(self, since: int) -> bool:
+        """补这段缺口；返回是否至少问到了一个会话（一个都没问到就别销账）。"""
+        span = int(time.time()) - since
+        if span > GAP_MAX_DOWN_S:
+            logger.warning("[GAP] 缺口 %.1f 天，超出自动补录范围（%d 天），跳过 —— "
+                           "要这段历史请跑 python replay.py <起> <止>",
+                           span / 86400, GAP_MAX_DOWN_S // 86400)
+            return True
+        floor_ts = since - GAP_LEADIN_S
+        chats = await self.db.active_chats(GAP_CHAT_DAYS)
+        if not chats:
+            logger.info("[GAP] 缺口 %d 分钟，最近 %d 天无活跃会话，无需补录",
+                        span // 60, GAP_CHAT_DAYS)
+            return True
+        added = answered = 0
+        for ch in chats:
+            try:
+                n = await self._gap_backfill_chat(ch["scope"], ch["peer_id"], floor_ts)
+            except Exception as e:
+                logger.warning("[GAP] %s %s: %s: %s", ch["scope"], ch["peer_id"],
+                               type(e).__name__, e)
+                continue
+            if n is None:
+                logger.warning("[GAP] %s %s 历史请求无返回（超时或 API 不可用）",
+                               ch["scope"], ch["peer_id"])
+                continue
+            answered += 1
+            added += n
+        logger.info("[GAP] 缺口 %d 分钟：扫 %d 个会话，问到 %d 个，补录 %d 条",
+                    span // 60, len(chats), answered, added)
+        return answered > 0
+
+    async def _gap_backfill_chat(self, scope: str, peer_id,
+                                 floor_ts: int) -> int | None:
+        """一个会话一页历史，只取缺口起点之后的、且库里没有的，走正常管道入库。
+        返回 None 表示这一页压根没拿到——调用方据此决定缺口欠不欠着。"""
+        action = ("get_group_msg_history" if scope == "group"
+                  else "get_friend_msg_history")
+        param = "group_id" if scope == "group" else "user_id"
+        await self._api_gate()
+        data = await self.call_api(action, {param: peer_id, "count": GAP_PAGE},
+                                   timeout=GAP_TIMEOUT)
+        if not data:
+            return None
+        msgs = [m for m in (data.get("messages") or [])
+                if int(m.get("time") or 0) >= floor_ts]
+        msgs.sort(key=lambda m: m.get("time") or 0)
+        added = 0
+        for m in msgs:                 # 旧 -> 新补录，日记顺序才对
+            if await self._msg_known(m):
+                continue
+            await self._ingest(json.dumps(m, ensure_ascii=False), m)
+            added += 1
+        return added
+
+    @staticmethod
+    def _fresh_url(msg: dict, kind: str, seg_index) -> str | None:
+        """从 get_msg 回来的消息里挑出本段的新鲜 url。
+        先认段号 + 类型都对得上的，其次同类型的，最后任何带 url 的段（单段消息常见）。"""
+        if not isinstance(msg, dict):
+            return None
+        segs = [(i, s) for i, s in enumerate(msg.get("message") or [])
+                if isinstance(s, dict)]
+        for same in (lambda i, s: i == seg_index and s.get("type") == kind,
+                     lambda i, s: s.get("type") == kind,
+                     lambda i, s: True):
+            for i, s in segs:
+                url = (s.get("data") or {}).get("url")
+                if url and same(i, s):
+                    return url
+        return None
+
+    async def _refresh_src(self, row: dict, kind: str, src: str) -> str:
+        """重试前先换个新地址。存下来的 CDN url 带 rkey（QQ 给的签名参数），
+        放几天就必然失效——拿死链重试要白跑 8 次快重试再加一周复检。get_msg 回来
+        的段里就是当前有效地址；WS 没连着、消息已翻不到或没给出 url 都沿用旧 src。
+        首次尝试（tries=0）不折腾：那时地址刚拿到，本来就是活的。"""
+        if int(row.get("tries") or 0) == 0 or not row.get("msg_id"):
+            return src
+        ws = self._ws
+        if ws is None or ws.closed:
+            return src   # 断线中打不出 get_msg，别让重试管线刷一屏 API SKIP
+        data = await self.get_message(row["msg_id"])
+        fresh = self._fresh_url(data or {}, kind, row.get("seg_index"))
+        if not fresh or fresh == src:
+            return src
+        await self.db.set_message_src(row["id"], fresh)
+        logger.info("[DL REURL] id=%d 旧地址已换签，用 get_msg 的新 url 重试",
+                    row["id"])
+        return fresh
 
     async def _attempt_row(self, row: dict, claimed: bool = False) -> None:
         mid = row["id"]
@@ -546,7 +732,7 @@ class Bot:
                                                  self.get_file_url, scope)
             else:  # image / video
                 r = None
-                src = row.get("src", "")
+                src = await self._refresh_src(row, kind, row.get("src", ""))
                 if src:
                     r = await self.storage.save_media(
                         src, kind, scope, expect_md5=md5_hint(row.get("ref")))
@@ -587,19 +773,26 @@ class Bot:
             if not fut.done():
                 fut.set_result({"status": "error", "wording": reason})
 
-    async def run(self) -> None:
-        """单次连接的生命周期：返回即代表断开，重连由外层看门循环负责。"""
+    async def run(self) -> bool:
+        """单次连接的生命周期：返回本次是否建立过连接，重连由外层看门循环负责。"""
         token = self.config.get("ws_token", "")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        connected = False
         try:
             # heartbeat=30 发协议层 ping，NapCat 不回 pong 即判超时断开，
             # 解决 TCP 半开假死时静默失联的问题
             async with self.session.ws_connect(self.config["ws_url"],
                                                headers=headers, heartbeat=30) as ws:
                 self._ws = ws
+                connected = True
+                if self.connect_fails:
+                    logger.info("[WS RECOVERED] 断连 %d 次后重新连上", self.connect_fails)
+                    self.connect_fails = 0
                 logger.info("[WS CONNECTED] Listening for messages (url=%s)",
                             self.config.get("ws_url"))
                 self.backfill_kick.set()   # 连接建立即唤醒停机补拉
+                if self.down_since is not None:
+                    self.gap_kick.set()    # 欠着一段缺口，连上了就去补
                 async for msg in ws:
                     if msg.type is aiohttp.WSMsgType.TEXT:
                         self._on_raw(msg.data)
@@ -607,11 +800,17 @@ class Bot:
                                       aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
         except Exception as e:
-            logger.error("[WS ERROR] %s", e)
+            self.connect_fails += 1
+            if self.connect_fails == 1 or self.connect_fails % CONNECT_LOG_EVERY == 0:
+                logger.error("[WS ERROR] %s（连续第 %d 次连不上）", e, self.connect_fails)
         finally:
             self._ws = None
             self._fail_pending("websocket closed")
-            logger.warning("[WS CLOSED] connection ended")
+            if connected:
+                # 掉线时刻打点：重连后 gap_task 按这个起点补缺口
+                self.down_since = int(time.time())
+                logger.warning("[WS CLOSED] connection ended")
+        return connected
 
 
 async def async_main() -> None:
@@ -628,16 +827,37 @@ async def async_main() -> None:
     except OSError:
         logging.error("[EXIT] another bot.py instance holds %s - exit", lock_path)
         return
+    # PID 落盘：面板的停止/状态探测优先读这个文件，PowerShell 按命令行匹配只是
+    # 兜底（start "" 拉起的 pythonw 命令行常为空，见 qqbot.rs resolve_pids 注释）
+    pid_path = Path(config["data_dir"]) / "bot.pid"
+    pid_path.write_text(str(os.getpid()))
+    try:
+        await _run(config)
+    finally:
+        # 正常退出（Ctrl+C / stop）自己删掉；被 taskkill / 崩溃时删不了，
+        # 留给 viewman 的状态探测按「进程身份对不上」清掉（见 qqbot.rs probe_pids）。
+        # 只删自己的：同目录另开一个 bot.py 抢不到锁会直接 return，走不到写 pid
+        try:
+            if pid_path.read_text().strip() == str(os.getpid()):
+                pid_path.unlink()
+        except OSError:
+            pass
+
+
+async def _run(config: dict) -> None:
+    """持有单实例锁之后的全部工作：初始化、起任务、看门重连，直到退出。"""
     logging.info("[START] ws_url=%s token_set=%s data_dir=%s",
                  config.get("ws_url"), bool(config.get("ws_token")),
                  config.get("data_dir"))
     # 已持单实例锁，此处做崩溃恢复是安全的
     db = DB(Path(config["data_dir"]) / "bot.db", recover=True)
     magnets = MagnetRegistry.build(config)
-    # 看门循环：连接断开/异常后 5s 重连。重连只此一处（曾在 _on_close 另起
-    # 线程重连，与看门循环叠加导致同进程双 WS 实例、消息双写）。
+    links = LinkRegistry.build(config)
+    # 看门循环：断线重连只此一处（曾在 _on_close 另起线程重连，与看门循环
+    # 叠加导致同进程双 WS 实例、消息双写）。连上后断线 5s 回连；一直连不上
+    # 时按 RECONNECT_BASE/2/4…封顶 RECONNECT_MAX 退避。
     async with aiohttp.ClientSession() as session:
-        bot = Bot(config, session, db, magnets)
+        bot = Bot(config, session, db, magnets, links)
         # 历史视频并入统一目录（DB 路径同步改写）；必须在 load_seen 之前，
         # seen 里灌进去的才是搬完后的新路径
         await bot.storage.migrate_videos(db)
@@ -657,6 +877,8 @@ async def async_main() -> None:
         # 会把消息里已有的磁力按 seq=1,2 再写一遍（曾在 xlsx 里堆重复行）
         if magnets:
             await magnets.load()
+        if links:
+            await links.load()
         worker = asyncio.create_task(bot.worker())
         sweeper = asyncio.create_task(bot.sweeper())
         # 停机补拉：批量回捞断线期间漏掉的历史，会触发 QQ 侧限流
@@ -670,6 +892,17 @@ async def async_main() -> None:
         else:
             backfiller = None
             logging.info("[START] 停机补拉已关闭（backfill_enabled 未开启）")
+        # 断线缺口补录：默认开。缺口起点取最后一次入库事件的时间，所以进程被杀
+        # /重启期间的那段也用同一条路补上，不必等 backfill_enabled 的全量扫描
+        gap_on = config.get("gap_backfill_enabled", True)
+        if gap_on:
+            bot.down_since = await db.last_seen_ts() or None
+            gapper = asyncio.create_task(bot.gap_task())
+            logging.info("[START] 缺口补录已开启（起点 %s）",
+                         bot.down_since or "无历史缺口")
+        else:
+            gapper = None
+            logging.info("[START] 缺口补录已关闭（gap_backfill_enabled=false）")
         # 上次运行（含崩溃）遗留的未处理事件回队重放
         backlog = await db.fetch_due_events(limit=100000)
         if backlog:
@@ -681,13 +914,19 @@ async def async_main() -> None:
                 await db.fail_event(ev["id"], f"bad payload: {e}")
         try:
             while True:
-                await bot.run()
-                await asyncio.sleep(5)
+                if await bot.run():
+                    await asyncio.sleep(RECONNECT_BASE)
+                    continue
+                # 连不上（NapCat/QQ 没在跑）：指数退避 + 抖动，恢复后自动回到 5s
+                await asyncio.sleep(min(RECONNECT_BASE * 2 ** bot.connect_fails,
+                                        RECONNECT_MAX) + random.uniform(0, 3))
         finally:
             worker.cancel()
             sweeper.cancel()
             if backfiller is not None:
                 backfiller.cancel()
+            if gapper is not None:
+                gapper.cancel()
 
 
 def main() -> None:
