@@ -1,3 +1,4 @@
+import { useCallback, useMemo, useRef } from "react";
 import type { Video } from "../types";
 import { VideoCard } from "./VideoCard";
 import { useGridWindow } from "../hooks/useGridWindow";
@@ -22,6 +23,31 @@ interface VideoGridProps {
 export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, duplicateIds, selectMode, selectedIds, onToggleSelect, onPlay, onDeleted, onMoved, resetKey }: VideoGridProps) {
   const { onScroll, viewportRef, gridRef, slice, padTop, padBottom } =
     useGridWindow(videos.length, resetKey);
+
+  // 卡片勾选回调与 ImageGrid 同一套：每张卡绑一个「第几张 + shift」的闭包，
+  // 按 id 缓存保证引用稳定（VideoCard 是 memo 的），闭包里经 ref 实时查当前下标
+  const indexOf = useMemo(() => {
+    const m = new Map<string, number>();
+    videos.forEach((v, i) => m.set(v.id, i));
+    return m;
+  }, [videos]);
+  const indexRef = useRef(indexOf);
+  indexRef.current = indexOf;
+  const onToggleSelectRef = useRef(onToggleSelect);
+  onToggleSelectRef.current = onToggleSelect;
+  const toggleCache = useRef(new Map<string, (shiftKey: boolean) => void>());
+  const toggleFor = useCallback((id: string) => {
+    const cache = toggleCache.current;
+    let fn = cache.get(id);
+    if (!fn) {
+      fn = (shiftKey: boolean) => onToggleSelectRef.current?.(indexRef.current.get(id) ?? -1, shiftKey);
+      cache.set(id, fn);
+      if (cache.size > videos.length * 2) {
+        for (const key of cache.keys()) if (!indexOf.has(key)) cache.delete(key);
+      }
+    }
+    return fn;
+  }, [videos.length, indexOf]);
 
   if (videos.length === 0) {
     return (
@@ -48,7 +74,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
     >
       <div className="video-tiles" ref={gridRef}>
         {padTop > 0 && <div data-pad="top" style={{ height: padTop, gridColumn: "1 / -1" }} aria-hidden="true" />}
-        {videos.slice(start, end).map((video, at) => (
+        {videos.slice(start, end).map((video) => (
           <VideoCard
             key={video.id}
             video={video}
@@ -59,7 +85,7 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
             duplicate={duplicateIds?.has(video.id) ?? false}
             selectMode={selectMode}
             selected={selectedIds?.has(video.id) ?? false}
-            onToggleSelect={shiftKey => onToggleSelect?.(start + at, shiftKey)}
+            onToggleSelect={toggleFor(video.id)}
             onPlay={onPlay}
             onDeleted={onDeleted}
             onMoved={onMoved}

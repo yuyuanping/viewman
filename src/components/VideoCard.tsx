@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
@@ -23,7 +23,7 @@ interface VideoCardProps {
   onMoved: (videoId: string, newPath: string) => void;
 }
 
-export function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, selectMode = false, selected = false, onToggleSelect, onPlay, onDeleted, onMoved }: VideoCardProps) {
+export const VideoCard = memo(function VideoCard({ video, progress, missing = false, fake = false, short = false, duplicate = false, selectMode = false, selected = false, onToggleSelect, onPlay, onDeleted, onMoved }: VideoCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const { menu, openMenu, closeMenu } = useContextMenu<void>();
@@ -75,13 +75,14 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
     setMovePromptOpen(true);
   };
 
-  /** 右键菜单：与图片卡片/播放列表同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站） */
-  const menuItems = [
+  /** 右键菜单：与图片卡片/播放列表同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站）。
+   *  只在菜单打开时拼，网格里几十张卡每帧建一遍数组不值当 */
+  const menuItems = useMemo(() => menu ? [
     { key: "reveal", label: "打开文件所在位置", onSelect: () => { void openContainingFolder(); } },
     { key: "copy", label: "复制文件名", onSelect: () => { void copyFilename(); } },
     { key: "move", label: moving ? "移动中…" : "移动到…", disabled: moving, onSelect: handleMove },
     { key: "delete", label: deleting ? "删除中…" : "删除到回收站", disabled: deleting, onSelect: () => { void handleDelete(); } },
-  ];
+  ] : [], [menu, video, moving, deleting]);
 
   return (
     <article
@@ -194,5 +195,5 @@ export function VideoCard({ video, progress, missing = false, fake = false, shor
       )}
     </article>
   );
-}
+});
 

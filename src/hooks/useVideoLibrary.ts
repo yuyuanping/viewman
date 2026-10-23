@@ -18,16 +18,22 @@ export interface VideoLibraryOptions {
 
 /** 视频库过滤 + 排序 + 聚合：从 App.tsx 抽出的纯派生逻辑，避免 God Component 继续膨胀 */
 export function useVideoLibrary(videos: Video[], opts: VideoLibraryOptions) {
+  const { selectedDir, searchQuery, progressMap, watchState, minSizeGb, minDurationMin, minHeight, sortField, sortDirection } = opts;
+  // 观看状态筛选才需要进度：progressMap 每 15 秒保存进度就换一次引用，
+  // 把它放进依赖会让「按文件名/大小/时间」这些常规视图每 15 秒对全库重排一遍
+  const needsProgress = watchState !== "all";
   const filteredVideos = useMemo(() => {
-    const matched = filterMedia(videos, opts.selectedDir, opts.searchQuery);
-    const byWatchState = filterByWatchState(matched, opts.progressMap, (v) => v.id, opts.watchState);
+    const matched = filterMedia(videos, selectedDir, searchQuery);
+    // progressMap 只在 needsProgress 时进依赖（下面的 eslint 豁免是有意的）
+    const byWatchState = needsProgress ? filterByWatchState(matched, progressMap, (v) => v.id, watchState) : matched;
     const byMedia = filterByMedia(byWatchState, {
-      minSize: opts.minSizeGb ? Number(opts.minSizeGb) * 1024 ** 3 : null,
-      minDuration: opts.minDurationMin ? Number(opts.minDurationMin) * 60 : null,
-      minHeight: opts.minHeight ? Number(opts.minHeight) : null,
+      minSize: minSizeGb ? Number(minSizeGb) * 1024 ** 3 : null,
+      minDuration: minDurationMin ? Number(minDurationMin) * 60 : null,
+      minHeight: minHeight ? Number(minHeight) : null,
     });
-    return sortMedia(byMedia, opts.sortField, opts.sortDirection);
-  }, [videos, opts.selectedDir, opts.searchQuery, opts.progressMap, opts.watchState, opts.minSizeGb, opts.minDurationMin, opts.minHeight, opts.sortField, opts.sortDirection]);
+    return sortMedia(byMedia, sortField, sortDirection);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videos, selectedDir, searchQuery, needsProgress ? progressMap : null, watchState, minSizeGb, minDurationMin, minHeight, sortField, sortDirection]);
 
   const videoTotals = useMemo(() => {
     let totalDuration = 0;

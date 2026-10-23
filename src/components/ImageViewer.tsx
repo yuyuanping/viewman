@@ -92,6 +92,11 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
 
   const scale = zoom ?? fitScale;
 
+  // 最新的缩放/适应倍率/旋转：原生 wheel 与 window keydown 监听只在挂载时绑一次，
+  // 回调里读 ref 拿当前值。以前这些量进依赖，每滚一档、每翻一张都会解绑重绑
+  const viewRef = useRef({ zoom, fitScale, rotation });
+  viewRef.current = { zoom, fitScale, rotation };
+
   // 滚轮缩放：围绕指针把图上同一点留在原地；旋转态下退化为居中缩放。
   // 原生非被动监听——React 合成 wheel 是被动的，preventDefault 会被忽略
   useEffect(() => {
@@ -99,6 +104,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      const { zoom, fitScale, rotation } = viewRef.current;
       const base = zoom ?? fitScale;
       const factor = e.deltaY < 0 ? WHEEL_ZOOM : 1 / WHEEL_ZOOM;
       const next = clampScale(base * factor);
@@ -121,7 +127,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
-  }, [zoom, fitScale, rotation]);
+  }, []);
 
   const toggleActualSize = useCallback(() => {
     setZoom(prev => (prev === 1 ? null : 1));
@@ -167,8 +173,11 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
 
   const handleDragEnd = useCallback(() => { dragRef.current = null; }, []);
 
+  const keyRef = useRef({ go, onClose, toggleActualSize, deleteCurrent, moveCurrent, onMove });
+  keyRef.current = { go, onClose, toggleActualSize, deleteCurrent, moveCurrent, onMove };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const { go, onClose, toggleActualSize, deleteCurrent, moveCurrent, onMove } = keyRef.current;
       // 移动对话框盖在上面时整层让位（Esc 由对话框的捕获监听截下，到不了这里）
       if (isMovePromptOpen()) return;
       if (e.key === "Escape") { onClose(); }
@@ -186,7 +195,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, onClose, toggleActualSize, deleteCurrent, moveCurrent, onMove]);
+  }, []);
 
   // 幻灯片：定时翻页；到末尾一张即停（不循环）
   useEffect(() => {
@@ -294,7 +303,12 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
               onDoubleClick={toggleActualSize}
               onLoad={(e) => {
                 const el = e.currentTarget;
-                if (!image.width || !image.height) setNatural({ w: el.naturalWidth, h: el.naturalHeight });
+                if (!image.width || !image.height) {
+                  const w = el.naturalWidth;
+                  const h = el.naturalHeight;
+                  // 值没变就别换对象：natural 参与尺寸计算，换引用会重渲染并重算适应倍率
+                  setNatural(prev => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+                }
               }}
               onError={() => setBroken(true)}
             />

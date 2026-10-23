@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 /** 移动目标目录对话框开着时在 body 上打的标记：所有全局快捷键见它就让位 */
 const MOVE_PROMPT_FLAG = "movePromptOpen";
@@ -36,17 +36,22 @@ export function movesOnNumberKey(key: string, target: { tagName?: string; isCont
 }
 
 function useKeyShortcut(fires: (key: string, target: { tagName?: string; isContentEditable?: boolean } | null) => boolean, onFire: (key: string) => void, enabled: boolean): void {
+  // 回调经 ref 取最新值，effect 只依赖「快捷键规则 + 开关」：
+  // 调用方传的多是内联箭头（依赖 selectedIds），直接进依赖会让每勾选一张图
+  // 就解绑/重绑一次 window keydown，App 与图片库两处叠加
+  const onFireRef = useRef(onFire);
+  onFireRef.current = onFire;
   useEffect(() => {
     if (!enabled) return;
     const onKey = (e: KeyboardEvent) => {
       if (isMovePromptOpen()) return;
       if (!fires(e.key, e.target as HTMLElement | null)) return;
       e.preventDefault();
-      onFire(e.key);
+      onFireRef.current(e.key);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fires, onFire, enabled]);
+  }, [fires, enabled]);
 }
 
 /** Del 键 = 「删除所选」；什么时候不算由调用方用 enabled 决定（查看器盖在上面等） */

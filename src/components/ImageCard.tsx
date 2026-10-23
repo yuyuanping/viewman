@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
@@ -20,6 +20,8 @@ interface ImageCardProps {
   animated?: boolean;
   /** 以这张图为模板找库内相似图；不给就不显示右键菜单项 */
   onFindSimilar?: (image: Image) => void;
+  /** 只给 id：网格把「第几张 + shift」绑定的闭包收在自己手里（见 ImageGrid），
+   *  卡片这边保持稳定引用，memo 才不会被每次渲染的新箭头打穿 */
   onToggleSelect?: (shiftKey: boolean) => void;
   onOpen: (image: Image) => void;
   /** 删除成功后回报 id，父层据此就地剔除，不再重拉整库 */
@@ -27,7 +29,7 @@ interface ImageCardProps {
   onMoved: (imageId: string, newPath: string) => void;
 }
 
-export function ImageCard({ image, imageHeight, selectMode = false, selected = false, duplicate = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
+export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMode = false, selected = false, duplicate = false, animated = false, onFindSimilar, onToggleSelect, onOpen, onDeleted, onMoved }: ImageCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [moving, setMoving] = useState(false);
   const { menu, openMenu, closeMenu } = useContextMenu<void>();
@@ -75,8 +77,9 @@ export function ImageCard({ image, imageHeight, selectMode = false, selected = f
     setMovePromptOpen(true);
   };
 
-  /** 右键菜单：与视频卡片/播放列表同一套，另加模板找相似 */
-  const menuItems = [
+  /** 右键菜单：与视频卡片/播放列表同一套，另加模板找相似。
+   *  只在菜单打开时才拼——网格里几十张卡每帧都建一遍数组不值当 */
+  const menuItems = useMemo(() => menu ? [
     { key: "reveal", label: "打开文件所在位置", onSelect: () => { void openContainingFolder(); } },
     { key: "copy", label: "复制文件名", onSelect: () => { void copyFilename(); } },
     ...(onFindSimilar
@@ -84,7 +87,7 @@ export function ImageCard({ image, imageHeight, selectMode = false, selected = f
       : []),
     { key: "move", label: moving ? "移动中…" : "移动到…", disabled: moving, onSelect: handleMove },
     { key: "delete", label: deleting ? "删除中…" : "删除到回收站", disabled: deleting, onSelect: () => { void handleDelete(); } },
-  ];
+  ] : [], [menu, onFindSimilar, image, moving, deleting]);
 
   // 没有封面缓存时直接引用原图：靠 loading="lazy" 兜住首屏，生成封面后走缩略图
   const preview = image.thumbnail_path ?? image.path;
@@ -169,4 +172,4 @@ export function ImageCard({ image, imageHeight, selectMode = false, selected = f
       )}
     </article>
   );
-}
+});

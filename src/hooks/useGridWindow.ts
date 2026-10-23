@@ -87,8 +87,21 @@ export function useGridWindow(
     setGridEl(el);
   }, []);
 
+  // 滚动 rAF 节流：不节流时一次滑动几十次重渲染，窗口内卡片全量 diff。
+  // 与图片网格同一套逻辑，这里内联一份（本模块要能被 node --test 直接导入做纯函数测试，
+  // 再带一个依赖 ./useRafScrollTop 的运行时模块就让那个相对导入解析不了）
+  const rafId = useRef(0);
+  const pendingTop = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (rafId.current) cancelAnimationFrame(rafId.current);
+  }, []);
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop);
+    pendingTop.current = e.currentTarget.scrollTop;
+    if (rafId.current) return;
+    rafId.current = requestAnimationFrame(() => {
+      rafId.current = 0;
+      if (pendingTop.current !== null) setScrollTop(pendingTop.current);
+    });
   }, []);
 
   // 视口高度跟踪；元素刚挂上时以它的真实滚动位置为准（重挂载后 DOM 归零，

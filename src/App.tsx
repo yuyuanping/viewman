@@ -58,6 +58,9 @@ const SIDEBAR_VISIBLE_KEY = "viewman.sidebarVisible";
 
 function App() {
   const { videos, progressMap, recentlyPlayed, loading, error: libraryError, clearError: clearLibraryError, scanDirectory, saveProgress, loadVideos, rescanStatus, applyScan: applyVideoScan, dropLocally: dropVideosLocally, retargetLocally: retargetVideosLocally } = useVideos();
+  // 卡片级删除/移动的回报：包一层稳定引用，内联箭头会让 memo 过的 VideoCard 全部失效
+  const handleVideoDeleted = useCallback((videoId: string) => dropVideosLocally([videoId]), [dropVideosLocally]);
+  const handleVideoMoved = useCallback((videoId: string, newPath: string) => retargetVideosLocally([[videoId, newPath]]), [retargetVideosLocally]);
   const {
     imageStats, libraryVersion, loading: imagesLoading, error: imagesError, clearError: clearImagesError,
     rescanStatus: imagesRescanStatus, scanDirectory: scanImageDirectory, loadImages, initialRun: loadImageLibrary,
@@ -637,7 +640,7 @@ function App() {
               onRandomPick={handleRandomPick}
               onOpenHistory={() => setHistoryOpen(true)}
             />
-            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={selectVideoAt} onPlay={handlePlayVideo} onDeleted={(videoId) => dropVideosLocally([videoId])} onMoved={(videoId, newPath) => retargetVideosLocally([[videoId, newPath]])} resetKey={selectedDir} />
+            <VideoGrid videos={filteredVideos} progressMap={progressMap} missingIds={missingIds} fakeIds={fakeIds} shortIds={shortIds} duplicateIds={duplicateIds} selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={selectVideoAt} onPlay={handlePlayVideo} onDeleted={handleVideoDeleted} onMoved={handleVideoMoved} resetKey={selectedDir} />
           </>
         )}
       </main>

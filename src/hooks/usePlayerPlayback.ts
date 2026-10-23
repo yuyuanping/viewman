@@ -63,7 +63,12 @@ export function usePlayerPlayback({ video, initialPosition, onProgress, playlist
     resumeAfterSeek.current = false;
   }, [video.id, initialPosition]);
 
-  const dismissError = useCallback(() => setShowError(false), []);
+  // 关闭错误提示时顺手清掉文案：以前靠一个 effect 在 showError=false 时清，
+  // 每次换片/拿可播放路径都要多跑一轮再触发一次渲染
+  const dismissError = useCallback(() => {
+    setShowError(false);
+    setPlaybackError(null);
+  }, []);
 
   const handlePlaybackError = useCallback(async () => {
     setShowError(true);
@@ -108,9 +113,6 @@ export function usePlayerPlayback({ video, initialPosition, onProgress, playlist
     return () => { cancelled = true; };
   }, [video.id, video.path]);
 
-  useEffect(() => {
-    if (!showError) setPlaybackError(null);
-  }, [video.id, playSrc, showError]);
 
   const tryPlay = useCallback((el: HTMLVideoElement) => {
     el.play()

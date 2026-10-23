@@ -2,13 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Image } from "../types";
 import { ImageCard } from "./ImageCard";
 import { justifiedRows, justifiedWindow, cardAspect, CARD_TEXT_H } from "../justifiedLayout";
+import { useRafScrollTop } from "../hooks/useRafScrollTop";
 
 interface ImageGridProps {
   images: Image[];
   duplicateIds?: Set<string>;
   /** 动图检测命中的条目（多帧）：紫色高亮 */
   animatedIds?: Set<string>;
-  /** 以某张图为模板找库内相似图（右键菜单入口）；不给就不显示菜单项 */
+  /** 以某张图为模板找库内相似图（右键菜单入口）；不给就不显示菜单项。
+   *  调用方多是内联箭头、每次渲染换新引用，网格按 id 缓存稳定包装再交给卡片 */
   onFindSimilar?: (image: Image) => void;
   selectMode?: boolean;
   selectedIds?: Set<string>;
@@ -37,25 +39,14 @@ export function ImageGrid({ images, duplicateIds, animatedIds, onFindSimilar, se
   const [viewportW, setViewportW] = useState(0);
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null);
   const viewportRefObj = useRef<HTMLDivElement | null>(null);
+  const findSimilarCache = useRef(new Map<string, (image: Image) => void>());
 
   const viewportRef = useCallback((el: HTMLDivElement | null) => {
     viewportRefObj.current = el;
     setViewportEl(el);
   }, []);
-  // 滚动 rAF 节流：高频 scroll 事件只记最新位置，下一帧统一 setState，避免每事件一次重渲染
-  const rafId = useRef(0);
-  const pendingTop = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (rafId.current) cancelAnimationFrame(rafId.current);
-  }, []);
-  const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    pendingTop.current = e.currentTarget.scrollTop;
-    if (rafId.current) return;
-    rafId.current = requestAnimationFrame(() => {
-      rafId.current = 0;
-      if (pendingTop.current !== null) setScrollTop(pendingTop.current);
-    });
-  }, []);
+  // 滚动 rAF 节流见 useRafScrollTop（视频网格共用同一个）
+  const onScroll = useRafScrollTop(setScrollTop);
 
   // 视口尺寸跟踪；元素刚挂上时以它的真实滚动位置为准（重挂载后 DOM 归零，
   // 而 scrollTop state 还留着旧值，会让窗口算到列表中段去）
@@ -108,6 +99,51 @@ export function ImageGrid({ images, duplicateIds, animatedIds, onFindSimilar, se
     [aspects, viewportW],
   );
 
+  // 卡片勾选回调：网格里每张卡都绑一个「第几张 + shift」的闭包。
+  // 闭包一旦生成就稳定（ref 复用），卡片 memo 才生效；视图重排/增减后
+  // 闭包仍指向生成时的下标，所以统一经 ref 实时查当前下标
+  const indexOf = useMemo(() => {
+    const m = new Map<string, number>();
+    images.forEach((img, i) => m.set(img.id, i));
+    return m;
+  }, [images]);
+  const indexRef = useRef(indexOf);
+  indexRef.current = indexOf;
+  // 上层传入的回调本身每次渲染都会换新（多是内联箭头），闭包里别直接捕获它
+  const onToggleSelectRef = useRef(onToggleSelect);
+  onToggleSelectRef.current = onToggleSelect;
+  const onFindSimilarRef = useRef(onFindSimilar);
+  onFindSimilarRef.current = onFindSimilar;
+  // 缓存只增不减会随翻遍全库无限长：超过视图两倍时只保留视图里还在的 id。
+  // 判据必须是「这个 id 还在视图里吗」，不能按当前下标判——清一次之后
+  // 命中缓存的路径不再进来，把判断写错成 indexOf.get(id) === undefined
+  // 也会让缓存彻底失效、每帧重建闭包
+  const findSimilarFor = useCallback((id: string) => {
+    const cache = findSimilarCache.current;
+    let fn = cache.get(id);
+    if (!fn) {
+      fn = (img: Image) => onFindSimilarRef.current?.(img);
+      cache.set(id, fn);
+      if (cache.size > images.length * 2) {
+        for (const key of cache.keys()) if (!indexOf.has(key)) cache.delete(key);
+      }
+    }
+    return fn;
+  }, [images.length, indexOf]);
+  const toggleCache = useRef(new Map<string, (shiftKey: boolean) => void>());
+  const toggleFor = useCallback((id: string) => {
+    const cache = toggleCache.current;
+    let fn = cache.get(id);
+    if (!fn) {
+      fn = (shiftKey: boolean) => onToggleSelectRef.current?.(indexRef.current.get(id) ?? -1, shiftKey);
+      cache.set(id, fn);
+      if (cache.size > images.length * 2) {
+        for (const key of cache.keys()) if (!indexOf.has(key)) cache.delete(key);
+      }
+    }
+    return fn;
+  }, [images.length, indexOf]);
+
   if (images.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -135,16 +171,16 @@ export function ImageGrid({ images, duplicateIds, animatedIds, onFindSimilar, se
     return (
       <div className="flex-1 overflow-y-auto" ref={viewportRef} onScroll={onScroll}>
         <div className="image-tiles">
-          {images.slice(0, 60).map((image, at) => (
+          {images.slice(0, 60).map((image) => (
             <ImageCard
               key={image.id}
               image={image}
               duplicate={duplicateIds?.has(image.id) ?? false}
               animated={animatedIds?.has(image.id) ?? false}
-              onFindSimilar={onFindSimilar}
+              onFindSimilar={onFindSimilar ? findSimilarFor(image.id) : undefined}
               selectMode={selectMode}
               selected={selectedIds?.has(image.id) ?? false}
-              onToggleSelect={shiftKey => onToggleSelect?.(at, shiftKey)}
+              onToggleSelect={toggleFor(image.id)}
               onOpen={onOpen}
               onDeleted={onDeleted}
               onMoved={onMoved}
@@ -166,19 +202,19 @@ export function ImageGrid({ images, duplicateIds, animatedIds, onFindSimilar, se
             className="absolute left-0 right-0 flex overflow-hidden"
             style={{ top: row.top, height: row.imageH + CARD_TEXT_H, columnGap: GAP }}
           >
-            {images.slice(row.start, row.start + row.count).map((image, at) => {
-              const index = row.start + at;
+            {images.slice(row.start, row.start + row.count).map((image) => {
+              const aspect = aspects[indexOf.get(image.id) ?? row.start];
               return (
-                <div key={image.id} style={{ width: row.imageH * cardAspect(aspects[index]) }}>
+                <div key={image.id} style={{ width: row.imageH * cardAspect(aspect) }}>
                   <ImageCard
                     image={image}
                     imageHeight={row.imageH}
                     duplicate={duplicateIds?.has(image.id) ?? false}
                     animated={animatedIds?.has(image.id) ?? false}
-                    onFindSimilar={onFindSimilar}
+                    onFindSimilar={onFindSimilar ? findSimilarFor(image.id) : undefined}
                     selectMode={selectMode}
                     selected={selectedIds?.has(image.id) ?? false}
-                    onToggleSelect={shiftKey => onToggleSelect?.(index, shiftKey)}
+                    onToggleSelect={toggleFor(image.id)}
                     onOpen={onOpen}
                     onDeleted={onDeleted}
                     onMoved={onMoved}

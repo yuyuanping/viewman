@@ -221,17 +221,20 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     describe: async (ids) => {
       const names: string[] = [];
       const missing: string[] = [];
+      // 先建 id→文件名 的 Map：以前每个 id 都在视图里 find 一遍，
+      // 19 万张 × 一批被锁文件就是几十万次比较，提示文案要顿几百毫秒才出来。
+      // 视图里查不到再查两个检测面板的索引，都没有才记进待查后端名单
+      const byId = new Map(filteredImages.map(i => [i.id, i.filename] as const));
       for (const id of ids) {
-        const hit = filteredImages.find(i => i.id === id)
-          ?? duplicateIndex.get(id) ?? templateIndex.get(id);
-        if (hit) names.push(hit.filename);
+        const name = byId.get(id) ?? duplicateIndex.get(id)?.filename ?? templateIndex.get(id)?.filename;
+        if (name !== undefined) names.push(name);
         else missing.push(id);
       }
       if (missing.length > 0) {
         try {
           const rows = await api.getImagesByIds(missing);
-          const byId = new Map(rows.map(r => [r.id, r.filename] as const));
-          for (const id of missing) names.push(byId.get(id) ?? id);
+          const fetched = new Map(rows.map(r => [r.id, r.filename] as const));
+          for (const id of missing) names.push(fetched.get(id) ?? id);
         } catch {
           names.push(...missing);
         }
@@ -241,6 +244,10 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     moveOne: async (id, dir) => { await api.moveImage(id, dir); return id; },
     afterMove: () => refreshLibrary(),
   });
+
+  // 卡片级删除/移动后重拉视图：给 ImageGrid 稳定引用（卡片是 memo 的）
+  const handleCardDeleted = useCallback(() => { void refreshLibrary(); }, [refreshLibrary]);
+  const handleCardMoved = useCallback(() => { void refreshLibrary(); }, [refreshLibrary]);
 
   // 动图检测：后端按文件头数帧，命中即高亮；「勾选」把当前列表里的动图送进多选，
   // 删除仍复用「删除所选」那条通路（confirm + 回收站），不再另造一键删除
@@ -484,8 +491,8 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
         onToggleSelect={handleGridToggle}
         onOpen={openViewer}
         onScanDirectory={onScanDirectory}
-        onDeleted={() => refreshLibrary()}
-        onMoved={() => refreshLibrary()}
+        onDeleted={handleCardDeleted}
+        onMoved={handleCardMoved}
         onFindSimilar={runTemplateSearch}
         resetKey={selectedDir}
       />
