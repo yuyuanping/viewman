@@ -396,9 +396,11 @@ pub async fn generate_thumbnails(
             })
             .collect()
     };
+    // 待办 id 一次建表查 O(1)：体检后要重建的是十万级全集，any() 的 O(n²) 会把命令卡死
+    let wanted: std::collections::HashSet<&String> = video_ids.iter().collect();
     let jobs: Vec<ThumbJob> = candidates
         .into_iter()
-        .filter(|e| video_ids.iter().any(|id| id == &e.id))
+        .filter(|e| wanted.contains(&e.id))
         // 缓存文件仍在的跳过；文件被删掉的会重新生成
         .filter(|e| !cached_thumbnail_usable(&e.thumbnail_path))
         .map(|e| ThumbJob {
@@ -414,6 +416,99 @@ pub async fn generate_thumbnails(
 /// 缓存文件仍在磁盘上才算可用
 pub(crate) fn cached_thumbnail_usable(path: &Option<String>) -> bool {
     matches!(path, Some(p) if std::path::Path::new(p).exists())
+}
+
+/// 死路径判定：库里记着的封面文件已经不在这盘上了。按封面所在目录分组，
+/// 一个目录只读一次目录清单（12 万条逐条 stat 是几十秒，一次 read_dir 几秒）。
+/// 目录本身读不到（可移动盘没插、缓存换了盘）整组跳过——那是"暂时看不见"，
+/// 不是"没了"，跟着清就是把好封面全删了重抽。真清错了也还有救：缓存文件
+/// 重新可见时 `resume_thumbnails` 的孤儿登记会按 id 认回来。
+/// Windows 路径不分大小写，两边都转小写比文件名。
+fn stale_thumbnail_ids(rows: &[(String, String)]) -> Vec<String> {
+    let mut by_dir: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for (id, path) in rows {
+        let Some(file) = std::path::Path::new(path).file_name() else {
+            continue;
+        };
+        let dir = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        by_dir
+            .entry(dir)
+            .or_default()
+            .push((id.clone(), file.to_string_lossy().to_lowercase()));
+    }
+    let mut stale = Vec::new();
+    for (dir, group) in by_dir {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let present: std::collections::HashSet<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(|n| n.to_lowercase()))
+            .collect();
+        stale.extend(
+            group
+                .into_iter()
+                .filter(|(_, name)| !present.contains(name))
+                .map(|(id, _)| id),
+        );
+    }
+    stale
+}
+
+/// 封面路径体检的回报：两张表各清掉多少条死路径
+#[derive(Clone, Copy, serde::Serialize)]
+pub struct ThumbnailRepairReport {
+    pub images: usize,
+    pub videos: usize,
+}
+
+/// 封面路径体检：把库里指向"已不在盘上的缓存文件"的死路径清成 NULL。
+/// 缓存目录整个没了（换盘、手动清、误删）之后，库里 `thumbnail_path` 仍全有值，
+/// 于是「缺封面」永远算出 0：工具栏「生成封面」按钮一直禁着、待办清单为空、
+/// 卡片按死路径加载出 404 —— 整条重建通路被堵死。体检把库拉回与磁盘一致，
+/// 计数与待办清单立刻恢复真实值，重建入口也就回来了。
+/// 由前端启动时调一次（不放 setup：回报要递给界面，才能提示用户去重建）。
+#[tauri::command]
+pub async fn repair_thumbnail_paths(
+    app: tauri::AppHandle,
+) -> Result<ThumbnailRepairReport, String> {
+    let report = tauri::async_runtime::spawn_blocking(move || -> Result<ThumbnailRepairReport, String> {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        // 锁内只拉 (id, 封面路径) 两列，逐组 read_dir 的文件系统活在锁外做
+        let (image_rows, video_rows) = {
+            let conn = state.db.lock().map_err_str()?;
+            (
+                db::list_image_thumbnail_paths(&conn).map_err_str()?,
+                db::list_video_thumbnail_paths(&conn).map_err_str()?,
+            )
+        };
+        let stale_images = stale_thumbnail_ids(&image_rows);
+        let stale_videos = stale_thumbnail_ids(&video_rows);
+        if stale_images.is_empty() && stale_videos.is_empty() {
+            return Ok(ThumbnailRepairReport {
+                images: 0,
+                videos: 0,
+            });
+        }
+        let conn = state.db.lock().map_err_str()?;
+        let tx = conn.unchecked_transaction().map_err_str()?;
+        let images = db::clear_thumbnail_paths(&tx, "images", &stale_images).map_err_str()?;
+        let videos = db::clear_thumbnail_paths(&tx, "videos", &stale_videos).map_err_str()?;
+        tx.commit().map_err_str()?;
+        println!(
+            "repaired stale thumbnail paths: {} images, {} videos",
+            images, videos
+        );
+        Ok(ThumbnailRepairReport { images, videos })
+    })
+    .await
+    .map_err_str()??;
+    Ok(report)
 }
 
 /// 启动续跑：先登记上次中断留下的孤儿缓存（不抽帧，纯写库），再接着跑没跑完的批次。
@@ -516,7 +611,9 @@ pub async fn resume_thumbnails(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{get_all_videos, insert_video, sample_video, setup_test_db};
+    use crate::db::{
+        get_all_videos, insert_image, insert_video, sample_image, sample_video, setup_test_db,
+    };
 
     /// 孤儿登记只认磁盘上真实存在的非空缓存文件；库里有可用封面的不碰
     #[test]
@@ -620,6 +717,72 @@ mod tests {
         assert!(!dir.join("dead.part.jpg").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 死路径体检：目录读得到就按目录清单判——文件没了的才清，还在的一律不动
+    /// （Windows 路径不分大小写，库里记 `CASED.JPG`、盘上是 `cased.jpg` 也算同一份）
+    #[test]
+    fn test_stale_thumbnail_ids_clears_only_missing_files() {
+        let base =
+            std::env::temp_dir().join(format!("viewman-thumb-repair-{}", std::process::id()));
+        let dir = base.join("thumbnails");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("alive.jpg"), [0u8; 8]).unwrap();
+        std::fs::write(dir.join("cased.jpg"), [0u8; 8]).unwrap();
+
+        let rows = vec![
+            (
+                "alive".to_string(),
+                dir.join("alive.jpg").to_string_lossy().to_string(),
+            ),
+            (
+                "gone".to_string(),
+                dir.join("gone.jpg").to_string_lossy().to_string(),
+            ),
+            (
+                "cased".to_string(),
+                dir.join("CASED.JPG").to_string_lossy().to_string(),
+            ),
+        ];
+        let mut stale = stale_thumbnail_ids(&rows);
+        stale.sort();
+        assert_eq!(stale, vec!["gone".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 缓存目录整个读不到（可移动盘没插）时一条都不清：看不见 ≠ 没了
+    #[test]
+    fn test_stale_thumbnail_ids_skips_unreadable_dir() {
+        let rows = vec![(
+            "v1".to_string(),
+            r"D:\viewman-没有这个目录-修复测试\thumbnails\v1.jpg".to_string(),
+        )];
+        assert!(stale_thumbnail_ids(&rows).is_empty());
+    }
+
+    /// 清掉死路径后「缺封面」立刻数得到、待办清单也捞得到——重建入口恢复
+    #[test]
+    fn test_clear_thumbnail_paths_reopens_regeneration_path() {
+        let conn = setup_test_db();
+        insert_image(&conn, &sample_image("i1", r"C:\pics\a.png")).unwrap();
+        insert_image(&conn, &sample_image("i2", r"C:\pics\b.png")).unwrap();
+        db::set_image_thumbnail(&conn, "i1", r"D:\viewman_cache\thumbnails\i1.jpg").unwrap();
+        db::set_image_thumbnail(&conn, "i2", r"D:\viewman_cache\thumbnails\i2.jpg").unwrap();
+        assert!(db::get_missing_image_thumbnail_ids(&conn)
+            .unwrap()
+            .is_empty());
+
+        let cleared =
+            db::clear_thumbnail_paths(&conn, "images", &["i1".to_string(), "i2".to_string()])
+                .unwrap();
+        assert_eq!(cleared, 2);
+        let mut missing = db::get_missing_image_thumbnail_ids(&conn).unwrap();
+        missing.sort();
+        assert_eq!(missing, vec!["i1".to_string(), "i2".to_string()]);
+        // 清单只给有路径的行，清空后不再出现在体检输入里
+        assert!(db::list_image_thumbnail_paths(&conn).unwrap().is_empty());
     }
 }
 

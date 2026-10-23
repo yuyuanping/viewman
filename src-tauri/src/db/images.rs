@@ -175,6 +175,17 @@ pub fn get_image_stats(conn: &Connection, roots: &[String]) -> Result<ImageStats
     })
 }
 
+/// 有封面路径的 (id, 封面路径)：启动体检拿这份清单核对缓存文件还在不在盘上
+pub fn list_image_thumbnail_paths(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, thumbnail_path FROM images WHERE thumbnail_path IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// 缺封面的图片 id：封面批任务的待办清单，前端不再需要全量清单来 filter
 pub fn get_missing_image_thumbnail_ids(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM images WHERE thumbnail_path IS NULL")?;

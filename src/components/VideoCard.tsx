@@ -50,7 +50,10 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
   const progressPct = progress !== null && video.duration && video.duration > 0
     ? Math.max(0, Math.min(100, (progress / video.duration) * 100)) : 0;
   const extension = video.filename.split(".").pop()?.toUpperCase() || "VIDEO";
-  const thumbnailPath = video.thumbnail_path ?? null;
+  // 封面缓存文件在运行中没了（手动清缓存、缓存盘拔掉）：加载失败就当没封面，退回
+  // 扩展名占位，不剩一个 404 的破图。记路径而不是布尔量——重新生成出新的缓存路径就自动走回
+  const [deadThumb, setDeadThumb] = useState<string | null>(null);
+  const thumbnailPath = video.thumbnail_path && video.thumbnail_path !== deadThumb ? video.thumbnail_path : null;
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -119,6 +122,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
               alt={video.filename}
               loading="lazy"
               className="media-thumbnail"
+              onError={() => setDeadThumb(thumbnailPath)}
             />
           ) : (
             <>

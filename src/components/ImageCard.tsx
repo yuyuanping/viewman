@@ -90,7 +90,11 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
   ] : [], [menu, onFindSimilar, image, moving, deleting]);
 
   // 没有封面缓存时直接引用原图：靠 loading="lazy" 兜住首屏，生成封面后走缩略图
-  const preview = image.thumbnail_path ?? image.path;
+  // 记录"这张封面加载失败过"（运行中缓存被删、缓存盘被拔），只当它没有封面退回原图；
+  // 记的是路径而不是布尔量，封面重新生成后换了新路径就自动走回缓存
+  const [deadThumb, setDeadThumb] = useState<string | null>(null);
+  const thumb = image.thumbnail_path ?? null;
+  const preview = thumb && thumb !== deadThumb ? thumb : image.path;
 
   return (
     <article
@@ -117,7 +121,13 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
               {selected ? "✓" : ""}
             </span>
           )}
-          <img src={convertFileSrc(preview)} alt={image.filename} loading="lazy" className="media-thumbnail" />
+          <img
+            src={convertFileSrc(preview)}
+            alt={image.filename}
+            loading="lazy"
+            className="media-thumbnail"
+            onError={() => { if (thumb) setDeadThumb(thumb); }}
+          />
           <span className="media-badge bottom-2 right-2">{formatResolution(image.width, image.height)}</span>
         </div>
         <div className="px-2.5 pt-2 pb-2 overflow-hidden" style={{ height: CARD_TEXT_H }}>

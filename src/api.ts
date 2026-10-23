@@ -90,6 +90,12 @@ export const api = {
   generateImageThumbnails: (imageIds: string[]) =>
     invoke<number>("generate_image_thumbnails", { imageIds }),
   resumeImageThumbnails: () => invoke<boolean>("resume_thumbnails", { kind: "image" }),
+  /**
+   * 封面路径体检：清掉库里指向"已不在盘上的缓存文件"的死路径（缓存目录被整个清空后，
+   * 「缺封面」会一直算出 0、生成按钮一直禁着）。返回两张表各清了多少条；
+   * 封面目录整个读不到（可移动盘没插）时一条都不清。
+   */
+  repairThumbnailPaths: () => invoke<{ images: number; videos: number }>("repair_thumbnail_paths"),
   /** 动图检测：按文件头结构数帧（GIF/APNG/动态 WebP/AVIF 序列），返回多帧图片的 id */
   findAnimatedImages: () => invoke<string[]>("find_animated_images"),
   findDuplicateImages: (pixelVerify: boolean) =>

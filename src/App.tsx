@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { QqBotPanel } from "./components/QqBotPanel";
@@ -168,6 +168,30 @@ function App() {
       .catch(() => { /* 自检失败不挡启动 */ });
     return () => { cancelled = true; };
   }, [notify]);
+  // 封面路径体检：缓存目录被整个清空（换盘、手动清、误删）之后，库里 thumbnail_path 仍全有值，
+  // 「缺封面」于是永远算出 0——工具栏「生成封面」一直禁着、待办清单为空、卡片全按死路径加载出
+  // 404，重建通路被堵死。启动跑一趟把死路径清成 NULL，计数与清单立刻恢复真实值。
+  // 一个进程只跑一趟：StrictMode 会双调用 effect，ref 拦住第二趟的重复全库目录扫描
+  const thumbnailRepairRan = useRef(false);
+  useEffect(() => {
+    if (thumbnailRepairRan.current) return;
+    thumbnailRepairRan.current = true;
+    let cancelled = false;
+    api.repairThumbnailPaths()
+      .then((report) => {
+        if (cancelled) return;
+        const cleared = report.images + report.videos;
+        if (cleared === 0) return;
+        notify(
+          `封面缓存丢了 ${cleared} 个文件（图片 ${report.images} · 视频 ${report.videos}）：` +
+            "已清除失效记录，点工具栏「生成封面」重建。",
+        );
+        void loadVideos();
+        void refreshImagesQuietly();
+      })
+      .catch(() => { /* 体检失败不挡启动，封面照旧按库里的路径显示 */ });
+    return () => { cancelled = true; };
+  }, [notify, loadVideos, refreshImagesQuietly]);
   const { scanProgress, resetScanProgress } = useScanProgress(rescanStatus, setNotice);
   const { scanProgress: imageScanProgress, resetScanProgress: resetImageScanProgress } =
     useScanProgress(imagesRescanStatus, setNotice, "image-scan-progress");

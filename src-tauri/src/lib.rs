@@ -113,6 +113,7 @@ pub fn run() {
             commands::potplayer_status,
             commands::generate_thumbnails,
             commands::resume_thumbnails,
+            commands::repair_thumbnail_paths,
             commands::get_images,
             commands::get_image_view,
             commands::get_image_stats,

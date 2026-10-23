@@ -23,6 +23,23 @@ pub fn like_escape(raw: &str) -> String {
     out
 }
 
+/// 批量把封面路径清空（缓存文件已不在盘上的死路径）。表名由调用方给死（images/videos），
+/// id 走参数化 IN，按 400 一块——一次几千上万个参数会顶到 SQLite 的参数上限
+pub fn clear_thumbnail_paths(conn: &Connection, table: &str, ids: &[String]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut cleared = 0usize;
+    for chunk in ids.chunks(400) {
+        let sql = format!(
+            "UPDATE {table} SET thumbnail_path = NULL WHERE id IN ({})",
+            vec!["?"; chunk.len()].join(",")
+        );
+        cleared += conn.execute(&sql, rusqlite::params_from_iter(chunk.iter()))?;
+    }
+    Ok(cleared)
+}
+
 pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS videos (

@@ -82,6 +82,17 @@ pub fn insert_video(conn: &Connection, video: &Video) -> Result<()> {
     Ok(())
 }
 
+/// 有封面路径的 (id, 封面路径)：启动体检拿这份清单核对缓存文件还在不在盘上
+pub fn list_video_thumbnail_paths(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, thumbnail_path FROM videos WHERE thumbnail_path IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn set_thumbnail(conn: &Connection, video_id: &str, thumbnail_path: &str) -> Result<()> {
     conn.execute(
         "UPDATE videos SET thumbnail_path = ?1 WHERE id = ?2",
