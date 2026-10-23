@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { BotStatus } from "../types";
+import { dlSnapshotChanged } from "../botDlSnapshot";
 
 /** 全量轮询间隔：进程/端口探测（PowerShell 冷启动约 1 秒）不宜更快 */
 const POLL_MS = 10000;
@@ -42,8 +43,10 @@ export function useBotStatus() {
       try {
         const snap = await api.getBotDlSnapshot();
         if (!mounted.current) return;
+        // 队列积压没变就不换引用：status 是 App 的 state，每 2 秒换新对象会把
+        // 侧栏、工具栏、视频网格整棵树重渲染一遍（用户在别的标签页也躲不掉）
         setStatus((prev) =>
-          prev ? { ...prev, dl: snap.dl, summary: snap.summary, today_items: snap.today_items } : prev,
+          prev && dlSnapshotChanged(prev, snap) ? { ...prev, dl: snap.dl, summary: snap.summary, today_items: snap.today_items } : prev,
         );
       } catch {
         // 轻量快照失败不打扰用户（全量轮询负责报错）

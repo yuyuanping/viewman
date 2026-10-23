@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import type { BotDlItem, BotStatus, NapCatStage } from "../types";
 import type { Notify } from "../hooks/useToasts";
+import { formatDlSize } from "../utils";
 import { useNapcatStatus } from "../hooks/useNapcatStatus";
 import {
   countByDlStatus,
@@ -14,18 +15,6 @@ import {
   type DlStatus,
 } from "../botDlFilter";
 
-function formatBytes(bytes: number | null): string {
-  if (bytes == null || bytes <= 0) return "-";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let idx = 0;
-  while (value >= 1024 && idx < units.length - 1) {
-    value /= 1024;
-    idx += 1;
-  }
-  return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 1)} ${units[idx]}`;
-}
-
 /** 状态文字的配色：行内标签与筛选条共用一套，深浅不同但语义一致 */
 const STATUS_CLASS: Record<DlStatus, string> = {
   busy: "text-blue-300",
@@ -35,6 +24,9 @@ const STATUS_CLASS: Record<DlStatus, string> = {
   ok: "text-emerald-300",
   archived: "text-gray-500",
 };
+
+/** 没有状态时的稳定空数组：每次渲染新建 [] 会让下面的 memo 全部失效 */
+const EMPTY_ITEMS: BotDlItem[] = [];
 
 const KIND_LABEL: Record<string, string> = {
   image: "图片",
@@ -78,17 +70,19 @@ function FilterChip({
   );
 }
 
+/** 阶段文案与配色：模块级常量，别放进组件里每次渲染重建一遍 */
+const STAGE_MAP: Record<NapCatStage, { text: string; cls: string }> = {
+  ready: { text: "已就绪", cls: "bg-emerald-500/20 text-emerald-300" },
+  initializing: { text: "初始化中", cls: "bg-blue-500/20 text-blue-300" },
+  waiting_qr: { text: "等扫码", cls: "bg-amber-500/20 text-amber-300" },
+  starting: { text: "启动中", cls: "bg-slate-500/20 text-slate-300" },
+  error: { text: "报错", cls: "bg-red-500/20 text-red-300" },
+  not_running: { text: "未运行", cls: "bg-gray-500/20 text-gray-400" },
+};
+
 /** 阶段彩色小标签：一眼看出卡在哪一步 */
 function StageBadge({ stage }: { stage: NapCatStage }) {
-  const map: Record<NapCatStage, { text: string; cls: string }> = {
-    ready: { text: "已就绪", cls: "bg-emerald-500/20 text-emerald-300" },
-    initializing: { text: "初始化中", cls: "bg-blue-500/20 text-blue-300" },
-    waiting_qr: { text: "等扫码", cls: "bg-amber-500/20 text-amber-300" },
-    starting: { text: "启动中", cls: "bg-slate-500/20 text-slate-300" },
-    error: { text: "报错", cls: "bg-red-500/20 text-red-300" },
-    not_running: { text: "未运行", cls: "bg-gray-500/20 text-gray-400" },
-  };
-  const m = map[stage] ?? map.not_running;
+  const m = STAGE_MAP[stage] ?? STAGE_MAP.not_running;
   return <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${m.cls}`}>{m.text}</span>;
 }
 
@@ -102,6 +96,36 @@ function StatusDot({ up, label, title }: { up: boolean; label: string; title: st
 }
 
 /** QQ 存档 Bot 面板：运行状态、启停控制与 NapCat 登录状态 */
+/** 表格一行：转发明细缩进挂在父行下面；行组件 memo 后，2 秒一轮快照只重渲变化行 */
+const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
+  const kindLabel = KIND_LABEL[item.kind] ?? item.kind;
+  const label = dlItemLabel(item);
+  const dedupSuffix = item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
+  // 明细行缩进挂在所属转发行下面（后端已按 COALESCE(parent,id) 排好序）
+  const isDetail = item.parent != null;
+  return (
+    <tr
+      className="border-t border-white/5 hover:bg-white/5"
+      title={item.err ?? (isDetail ? `转发 #${item.parent} 的第 ${item.id} 段` : undefined)}
+    >
+      <td
+        className={`py-1.5 px-2 text-gray-200 truncate max-w-[36ch] ${isDetail ? "pl-6 text-gray-300" : ""}`}
+        title={label}
+      >
+        {isDetail && <span className="text-gray-600 mr-1">└</span>}
+        {label}
+      </td>
+      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatDlSize(item.size)}</td>
+      <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
+      <td className="py-1.5 px-2">
+        <span className={STATUS_CLASS[dlStatusOf(item)]}>
+          {statusLabel(item)}{dedupSuffix}
+        </span>
+      </td>
+    </tr>
+  );
+});
+
 export function QqBotPanel({
   notify,
   status,
@@ -150,10 +174,11 @@ export function QqBotPanel({
 
   const running = status != null && (status.bot_running || status.bot_pid != null);
 
-  // 当日列表：后端已按自然日取全量，这里只做前端筛选，切换状态不用回后端
-  const todayItems = status?.today_items ?? [];
-  const statusCounts = countByDlStatus(todayItems);
-  const visibleItems = filterByDlStatus(todayItems, dlFilter);
+  // 当日列表：后端已按自然日取全量，这里只做前端筛选，切换状态不用回后端。
+  // 计数与筛选都走 memo：下载活跃期每 2 秒换一次列表，没必要每轮再全量遍历两遍
+  const todayItems = status?.today_items ?? EMPTY_ITEMS;
+  const statusCounts = useMemo(() => countByDlStatus(todayItems), [todayItems]);
+  const visibleItems = useMemo(() => filterByDlStatus(todayItems, dlFilter), [todayItems, dlFilter]);
 
   // 端口不通且 bot 也没在跑时提示冷启动等待；NapCat 侧的扫码引导由下方
   // NapCat 状态卡的二维码+summary 负责，这里不再重复说
@@ -291,11 +316,11 @@ export function QqBotPanel({
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
             <span>
               累计已下载 <span className="text-gray-200 font-medium">{status.summary.ok}</span> 个
-              （{formatBytes(status.summary.ok_bytes)}）
+              （{formatDlSize(status.summary.ok_bytes)}）
             </span>
             <span>
               今日 <span className="text-gray-200 font-medium">{status.summary.today}</span> 个
-              （{formatBytes(status.summary.today_bytes)}）
+              （{formatDlSize(status.summary.today_bytes)}）
             </span>
             {status.summary.dedup_today > 0 && (
               <span>今日重复跳过 {status.summary.dedup_today}</span>
@@ -347,38 +372,9 @@ export function QqBotPanel({
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleItems.map((item) => {
-                    const kindLabel = KIND_LABEL[item.kind] ?? item.kind;
-                    const label = dlItemLabel(item);
-                    const dedupSuffix =
-                      item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
-                    // 明细行缩进挂在所属转发行下面（后端已按 COALESCE(parent,id) 排好序）
-                    const isDetail = item.parent != null;
-                    return (
-                      <tr
-                        key={item.id}
-                        className="border-t border-white/5 hover:bg-white/5"
-                        title={item.err ?? (isDetail ? `转发 #${item.parent} 的第 ${item.id} 段` : undefined)}
-                      >
-                        <td
-                          className={`py-1.5 px-2 text-gray-200 truncate max-w-[36ch] ${
-                            isDetail ? "pl-6 text-gray-300" : ""
-                          }`}
-                          title={label}
-                        >
-                          {isDetail && <span className="text-gray-600 mr-1">└</span>}
-                          {label}
-                        </td>
-                        <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatBytes(item.size)}</td>
-                        <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
-                        <td className="py-1.5 px-2">
-                          <span className={STATUS_CLASS[dlStatusOf(item)]}>
-                            {statusLabel(item)}{dedupSuffix}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {visibleItems.map((item) => (
+                    <DlRow key={item.id} item={item} />
+                  ))}
                 </tbody>
               </table>
             )}
