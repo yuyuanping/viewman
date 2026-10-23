@@ -4,8 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 # dev 构建不生成调试信息：debug 目录曾膨胀到 7 GB
+#
+# 只调 debuginfo 级别，不要在这里另写 debug-assertions/overflow-checks：
+# cargo 的 dev profile 默认就开着这两项，显式再写只会和上游工具的假设打架。
+# （曾经这里只有 `debug = 0`，整段覆盖了 cargo 默认 dev profile 的其余键。）
 [profile.dev]
 debug = 0
+
+[features]
+# tauri 用 custom-protocol 这个 feature 区分"生产/开发"模式（不看 cargo profile）：
+# 没有它时二进制会去加载 build.devUrl（localhost:1420），vite 不在就连不上。
+# `tauri dev` 自带 --no-default-features，`tauri build` 会自动补 feature；
+# 这里设默认开，裸 `cargo build --release` 也产出生产二进制，防止误跑 dev 壳。
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 
 [lib]
 name = "viewman_lib"

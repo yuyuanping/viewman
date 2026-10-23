@@ -229,10 +229,12 @@ pub fn scan_image_directory_recursive(dir: &Path) -> Result<Walked, String> {
 /// 根目录本身打不开必须是错误而不是"扫到 0 个文件"——后者会被调用方当成
 /// "全盘已删除"去清库
 fn require_dir(dir: &Path) -> Result<(), String> {
-    if dir.is_dir() {
-        Ok(())
-    } else {
-        Err(format!("Not a directory: {}", dir.display()))
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        // 盘符没了（U 盘/移动硬盘拔掉）和"这是个文件"是两回事，分开放文案：
+        // 前者常见且能恢复，提示用户"目录不存在"比笼统的 Not a directory 有用
+        Err(_) => Err(format!("目录不存在或无法访问：{}", dir.display())),
+        Ok(_) => Err(format!("不是目录：{}", dir.display())),
     }
 }
 
