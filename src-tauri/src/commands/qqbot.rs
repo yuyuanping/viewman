@@ -328,9 +328,16 @@ mod winpid {
             len: *mut u32,
         ) -> i32;
         pub fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
+        pub fn ReadProcessMemory(
+            h: *mut core::ffi::c_void,
+            base: *const core::ffi::c_void,
+            buf: *mut core::ffi::c_void,
+            size: usize,
+            read: *mut usize,
+        ) -> i32;
     }
-    // 只查命令行用它是唯一不需要 PROCESS_VM_READ 的口子（PROCESS_QUERY_LIMITED_INFORMATION
-    // 就够，普通权限下拿得到 pythonw 的命令行）；ProcessBasicInformation = 0
+    // ProcessBasicInformation = 0，拿 PEB 地址；随后每一处远程内存都必须走
+    // ReadProcessMemory（它需要 PROCESS_VM_READ，OpenProcess 时一并申请）
     #[link(name = "ntdll")]
     extern "system" {
         pub fn NtQueryInformationProcess(
@@ -343,57 +350,114 @@ mod winpid {
     }
 }
 
-const PROCESS_QUERY_LIMITED: u32 = 0x1000;
+/// 从目标进程读一块内存到本地字节切片。地址为 0、权限不足、短读（目标恰好退出）
+/// 一律返回 false——绝不把远程地址解引用成本进程指针。
+/// 历史教训：曾经直接 `*(peb + 0x20)` 读远程 PEB，同位宽进程的 PEB VA 平时"碰巧"
+/// 也映射在本进程里所以没炸；目标进程一退出、该 VA 解除映射，下一次轮询就
+/// 0xC0000005 打死主进程（2026-10-23 十个崩溃 dump 全在同一指令 peb+0x20）。
+#[cfg(windows)]
+unsafe fn rpm_into(
+    h: *mut core::ffi::c_void,
+    base: usize,
+    dst: &mut [u8],
+) -> bool {
+    if base == 0 {
+        return false;
+    }
+    let mut done = 0usize;
+    winpid::ReadProcessMemory(
+        h,
+        base as *const core::ffi::c_void,
+        dst.as_mut_ptr().cast(),
+        dst.len(),
+        &mut done,
+    ) != 0
+        && done == dst.len()
+}
+
+/// 读目标进程里的一个指针/usize 值
+#[cfg(windows)]
+unsafe fn rpm_usize(h: *mut core::ffi::c_void, base: usize) -> Option<usize> {
+    let mut buf = [0u8; 8];
+    rpm_into(h, base, &mut buf).then(|| usize::from_le_bytes(buf))
+}
+
+/// 只查映像名（QueryFullProcessImageNameW）用 LIMITED 就够
+const PROCESS_QUERY_LIMITED: u32 = 0x1000; // PROCESS_QUERY_LIMITED_INFORMATION
+/// NtQueryInformationProcess 走它；读 PEB 链还要 PROCESS_VM_READ——两者一起申请
+const PROCESS_QUERY_VM: u32 = 0x1000 | 0x10; // PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ
 
 /// 进程命令行。取不到返回 None：调用方据此**拒绝**使用这个 PID——
-/// 读不到就不认，宁可退回 PowerShell 兜底，也不要凭一个无法核实的号去 taskkill
+/// 读不到就不认，宁可退回 PowerShell 兜底，也不要凭一个无法核实的号去 taskkill。
+///
+/// PEB → ProcessParameters → CommandLine 每一跳都必须经 ReadProcessMemory：
+/// 这些是**目标进程**的地址，直接解引用只有在本进程恰好映射了同一 VA 时才"碰巧"
+/// 不炸；目标一退出（bot 重启、被杀、PID 复用的间隙）VA 解除映射，下一次 10s
+/// 轮询就是 0xC0000005 打死主进程。2026-10-23 的十个崩溃 dump 全停在旧实现的
+/// `read_unaligned(peb.add(0x20))` 这一条指令上。
 #[cfg(windows)]
 fn process_command_line(pid: u32) -> Option<String> {
+    unsafe {
+        let h = winpid::OpenProcess(PROCESS_QUERY_VM, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let result = read_cmdline(h);
+        winpid::CloseHandle(h);
+        result
+    }
+}
+
+/// h 必须是带 PROCESS_VM_READ 的活句柄。任何一跳读不到都返回 None，绝不 panic。
+#[cfg(windows)]
+unsafe fn read_cmdline(h: *mut core::ffi::c_void) -> Option<String> {
     use std::os::windows::ffi::OsStringExt;
     /// RTL_USER_PROCESS_PARAMETERS::CommandLine 在 x64 上的偏移
     const CMDLINE_OFFSET: usize = 0x70;
     /// UNICODE_STRING 布局：Length(2) + MaximumLength(2) + padding(4) + Buffer(8)
     const US_LEN_AT: usize = 0;
     const US_BUF_AT: usize = 8;
+    /// PEB->ProcessParameters 在 x64 上偏移 0x20
+    const PEB_PARAMS_AT: usize = 0x20;
 
-    unsafe {
-        let h = winpid::OpenProcess(PROCESS_QUERY_LIMITED, 0, pid);
-        if h.is_null() {
-            return None;
-        }
-        // PROCESS_BASIC_INFORMATION：PebBaseAddress 在第 2 个指针；用 usize 数组接，8 字节对齐
-        let mut pbi = [0usize; 6];
-        let mut ret = 0u32;
-        let status = winpid::NtQueryInformationProcess(
-            h,
-            0,
-            pbi.as_mut_ptr().cast(),
-            std::mem::size_of_val(&pbi) as u32,
-            &mut ret,
-        );
-        winpid::CloseHandle(h);
-        if status != 0 {
-            return None;
-        }
-        let peb = pbi[1] as *const u8;
-        if peb.is_null() {
-            return None;
-        }
-        // PEB->ProcessParameters 在 x64 上偏移 0x20
-        let params = std::ptr::read_unaligned(peb.add(0x20).cast::<*const u8>());
-        if params.is_null() {
-            return None;
-        }
-        let us = params.add(CMDLINE_OFFSET);
-        let len = std::ptr::read_unaligned(us.add(US_LEN_AT).cast::<u16>()) as usize;
-        let buf = std::ptr::read_unaligned(us.add(US_BUF_AT).cast::<*const u16>());
-        if buf.is_null() || len == 0 || len > 0x8000 {
-            return None;
-        }
-        // 只读 Length 个字节（不含结尾 NUL）
-        let chars = std::slice::from_raw_parts(buf, len / 2);
-        Some(std::ffi::OsString::from_wide(chars).to_string_lossy().into_owned())
+    // PROCESS_BASIC_INFORMATION：PebBaseAddress 在第 2 个指针；用 usize 数组接，8 字节对齐
+    let mut pbi = [0usize; 6];
+    let mut ret = 0u32;
+    let status = winpid::NtQueryInformationProcess(
+        h,
+        0,
+        pbi.as_mut_ptr().cast(),
+        std::mem::size_of_val(&pbi) as u32,
+        &mut ret,
+    );
+    if status != 0 {
+        return None;
     }
+    let peb = pbi[1];
+    // PEB->ProcessParameters
+    let params = rpm_usize(h, peb.checked_add(PEB_PARAMS_AT)?)?;
+    // RTL_USER_PROCESS_PARAMETERS::CommandLine (UNICODE_STRING)
+    let us = params.checked_add(CMDLINE_OFFSET)?;
+    let mut len_buf = [0u8; 2];
+    if !rpm_into(h, us.checked_add(US_LEN_AT)?, &mut len_buf) {
+        return None;
+    }
+    let len = u16::from_le_bytes(len_buf) as usize;
+    let mut ptr_buf = [0u8; 8];
+    if !rpm_into(h, us.checked_add(US_BUF_AT)?, &mut ptr_buf) {
+        return None;
+    }
+    let buf = usize::from_le_bytes(ptr_buf);
+    if buf == 0 || len == 0 || len > 0x8000 {
+        return None;
+    }
+    // 只读 Length 个字节（不含结尾 NUL；Length 为偶数，按 u16 个数取 len/2）
+    let mut chars = vec![0u16; len / 2];
+    let dst = std::slice::from_raw_parts_mut(chars.as_mut_ptr() as *mut u8, (len / 2) * 2);
+    if !rpm_into(h, buf, dst) {
+        return None;
+    }
+    Some(std::ffi::OsString::from_wide(&chars).to_string_lossy().into_owned())
 }
 
 /// 进程命令行是否指向某个脚本（`<python 路径> D:\...\bot.py`）。
@@ -1196,6 +1260,23 @@ mod tests {
         unsafe { winlock::UnlockFileEx(handle, 0, 1, 0, &mut ov) };
         assert!(!bot_lock_held(&dir), "释放后不应再判定为运行");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：读不存在的 PID 必须安静返回 None。
+    /// 旧实现对远程 PEB 直接解引用，PID 恰好失效时把主进程打成 0xC0000005
+    /// （2026-10-23 十个 dump 全停在 `read_unaligned(peb.add(0x20))`）。
+    /// 这里用一个几乎不可能存活的号，走 OpenProcess 失败与句柄有效但远程读
+    /// 失败两条分支都必须返回 None 的契约。
+    #[cfg(windows)]
+    #[test]
+    fn process_command_line_of_dead_pid_returns_none() {
+        // 4 是 System，映像名查询能过但 PEB 读会因缺权限失败——两条路都只能返回 None
+        assert!(process_command_line(4).is_none());
+        assert!(process_command_line(u32::MAX).is_none());
+        // 当前进程自己：命令行读得到，且必须包含 cargo/test 相关字样
+        let me = std::process::id();
+        let cl = process_command_line(me).expect("自身命令行应可读");
+        assert!(!cl.is_empty());
     }
 
     #[test]
