@@ -90,6 +90,9 @@ pub struct BotDlItem {
     pub dl_bytes: Option<i64>,
     /// Content-Length（来源未给或转发行聚合时为 NULL → 只显示已下载量）
     pub dl_total: Option<i64>,
+    /// 消息时间（Unix 秒）。顶层行=收到的时刻；转发明细行=内层消息的原始
+    /// 发送时间，可能早于今天（面板据此对跨日的补显日期）
+    pub ts: Option<i64>,
 }
 
 /// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数与最近下载列表。
@@ -696,10 +699,15 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     // 实时进度两列是老库可能没有的（db.py 启动时才迁移）；缺列补 NULL，
     // 面板只在 busy 行读它们，拿不到就当没有进度
     let has_prog = has_messages_col(conn, "dl_bytes");
+    // 接收时间统一走 LEFT JOIN 取 COALESCE(p.ts, m.ts)：顶层行父为空、落回自身 ts；
+    // 转发明细行显示的是**父转发收到的时刻**（明细自身 ts 是内层消息的原始发送时间，
+    // 可能是几个月前——那不是这条内容进入本机的时间）。LEFT JOIN 对驱动表扫描无影响
+    // （顶层仍走 messages_ts，父行按 rowid 点查），老库也都有这两列，无需缺列兜底
     let cols = format!(
         "SELECT m.id, m.kind, COALESCE(NULLIF(m.name, ''), \
          substr(COALESCE(m.text, ''), 1, 80), ''), m.bytes, m.dedup, \
-         m.err, m.dl, m.parent, m.sender_nick{} FROM messages m",
+         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts) \
+         FROM messages m LEFT JOIN messages p ON p.id = m.parent",
         if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" }
     );
     let cols = cols.as_str();
@@ -719,6 +727,7 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
                     sender: r.get(8)?,
                     dl_bytes: r.get(9)?,
                     dl_total: r.get(10)?,
+                    ts: r.get(11)?,
                 })
             })
             .map_err_str()?;
@@ -738,11 +747,10 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     push(&mut stmt).map_err_str()?;
 
     // 今天收到的转发带进来的全部明细行（含文本/嵌套转发这些 dl='none' 的）。
+    // 父行关联已在 cols 里 LEFT JOIN 好，这里只差 WHERE；
     // 需要 messages_parent 索引（db.py 启动时建），否则这条会退化成全表扫 27ms
     let mut stmt = conn
-        .prepare(&format!(
-            "{cols} JOIN messages p ON p.id = m.parent WHERE p.ts >= ?1"
-        ))
+        .prepare(&format!("{cols} WHERE p.ts >= ?1"))
         .map_err_str()?;
     push(&mut stmt).map_err_str()?;
 
@@ -1091,6 +1099,12 @@ mod tests {
         let it1 = items.iter().find(|it| it.id == 1).unwrap();
         assert_eq!(it1.dl_bytes, Some(12345));
         assert_eq!(it1.dl_total, Some(98765));
+        // 接收时间：顶层行就是自身 ts；明细行取父转发收到的时刻（内层旧时间被覆盖）；
+        // 昨日消息今日转死的行仍是自身旧 ts（面板对跨日的补显日期）
+        assert_eq!(it1.ts, Some(now));
+        assert_eq!(items.iter().find(|it| it.id == 3).unwrap().ts, Some(now));
+        assert_eq!(items.iter().find(|it| it.id == 9).unwrap().ts, Some(now), "明细 9 自身 ts 是旧的，跟父行 2 取今天");
+        assert_eq!(items.iter().find(|it| it.id == 5).unwrap().ts, Some(old), "昨日转死行保留原始时间");
         // 非进度行取建表默认值（0/NULL），面板按 busy 才读它们
         assert_eq!(items.iter().find(|it| it.id == 8).unwrap().dl_bytes, Some(0));
         assert_eq!(items.iter().find(|it| it.id == 2).unwrap().dl_total, None);

@@ -95,6 +95,8 @@ export interface BotDlItem {
   dl_bytes: number | null;
   /** Content-Length；来源未给（或转发聚合行）为 null → 只显示已下载量不显百分比 */
   dl_total: number | null;
+  /** 接收时间（Unix 秒）。转发明细行取父转发收到的时刻，不是内层消息的原始发送时间 */
+  ts: number | null;
 }
 
 /** 下载汇总：媒体文件（image/video/file，dl='ok'）的累计与今日完成量 */
