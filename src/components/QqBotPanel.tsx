@@ -163,7 +163,7 @@ export function QqBotPanel({
           <div className="flex items-center justify-between">
             <span className="text-sm font-medium">下载列表（今日 {todayItems.length} 条）</span>
             <span className="text-xs text-gray-400">
-              {status.dl.busy + status.dl.pending > 0 ? "实时刷新中（约 2 秒）" : "每 10 秒自动刷新"}
+              {status.dl.busy + status.dl.pending > 0 ? "实时刷新中（约 1 秒）" : "每 10 秒自动刷新"}
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
