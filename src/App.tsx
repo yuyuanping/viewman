@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { QqBotPanel } from "./components/QqBotPanel";
 import { useBotStatus } from "./hooks/useBotStatus";
+import { useNapcatStatus } from "./hooks/useNapcatStatus";
 import { VideoGrid } from "./components/VideoGrid";
 import { SearchBar } from "./components/SearchBar";
 // 重面板懒加载：首屏只下视频库，图片库/播放器/历史按需拆包（JS 335KB 单包→多 chunk）
@@ -80,6 +81,7 @@ function App() {
   const [selectedImageDir, setSelectedImageDir] = useState<string | null>(null);
   // QQ Bot 状态常驻轮询：侧栏 tab 徽标在任何标签页下都实时，不等面板打开
   const { status: botStatus, error: botError, refresh: refreshBot } = useBotStatus();
+  const napcat = useNapcatStatus();
   const qqQueueCount = botStatus ? botStatus.dl.pending + botStatus.dl.busy + botStatus.dl.dead : 0;
 
   useEffect(() => {
@@ -544,6 +546,10 @@ function App() {
           api.cancelTask(task).catch((e) => notify(`取消失败：${String(e)}`, "error"));
         }}
         qqQueueCount={qqQueueCount}
+        napcat={napcat}
+        botStatus={botStatus}
+        notify={notify}
+        refreshBot={refreshBot}
       />
       )}
       <button
@@ -580,7 +586,7 @@ function App() {
           </div>
         )}
         {tab === "qq" ? (
-          <QqBotPanel notify={notify} status={botStatus} loadError={botError} refresh={refreshBot} />
+          <QqBotPanel status={botStatus} loadError={botError} />
         ) : tab === "image" ? (
           <Suspense fallback={<PanelFallback label="图片库" />}>
             <ImageLibrary

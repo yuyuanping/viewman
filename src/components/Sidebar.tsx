@@ -6,7 +6,10 @@ import { DirTree } from "./DirTree";
 import { RecentlyPlayedList } from "./RecentlyPlayedList";
 import { countUnderDirs, countUnderDirsFromCounts } from "../scanRoots";
 import type { RescanStatus } from "../hooks/useVideos";
-import type { MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
+import { useNapcatStatus } from "../hooks/useNapcatStatus";
+import type { Notify } from "../hooks/useToasts";
+import type { BotStatus, MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
+import { QqBotControls } from "./QqBotControls";
 
 interface SidebarProps {
   tab: MediaKind;
@@ -36,6 +39,14 @@ interface SidebarProps {
   onCancelScan?: (task: string) => void;
   /** QQ 存档 tab 徽标：下载队列里未完成的条数（pending + busy + dead） */
   qqQueueCount: number;
+  /** NapCat 状态由 App 上的 useNapcatStatus 常驻提供，QQ tab 时侧栏底部显示精简状态条 */
+  napcat: ReturnType<typeof useNapcatStatus>;
+  /** QQ tab 下移到侧栏的控制面：标题行 + NapCat 配置卡。主面板只剩下载列表 */
+  botStatus: BotStatus | null;
+  /** 操作反馈：启停 / 同步配置的结果走这里 */
+  notify: Notify;
+  /** 启停后刷新 bot 状态（App 上的 useBotStatus 轮询） */
+  refreshBot: () => Promise<void>;
 }
 
 export function Sidebar({
@@ -44,7 +55,8 @@ export function Sidebar({
   loading, scanProgress, rescanStatus, usePotPlayer, onTogglePotPlayer,
   images, selectedImageDir, onSelectImageDir, onScanImageDirectory,
   imageLoading, imageScanProgress, imageRescanStatus,
-  roots, removingRoot, onRemoveRoot, onCancelScan, qqQueueCount,
+  roots, removingRoot, onRemoveRoot, onCancelScan, qqQueueCount, napcat,
+  botStatus, notify, refreshBot,
 }: SidebarProps) {
   const [potplayerOk, setPotplayerOk] = useState<boolean | null>(null);
   const [ffprobeOk, setFfprobeOk] = useState<boolean | null>(null);
@@ -215,6 +227,11 @@ export function Sidebar({
         </>
       )}
       </>}
+      {isQqTab && (
+        <div className="mt-auto pt-3 border-t border-gray-700/60">
+          <QqBotControls status={botStatus} notify={notify} refresh={refreshBot} napcat={napcat} />
+        </div>
+      )}
     </aside>
   );
 }
