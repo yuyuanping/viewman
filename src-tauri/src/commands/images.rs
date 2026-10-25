@@ -666,9 +666,11 @@ pub async fn generate_image_thumbnails(
             })
             .collect()
     };
+    // 待办 id 一次建表查 O(1)：体检后要重建的是十万级全集，any() 的 O(n²) 会把命令卡死
+    let wanted: std::collections::HashSet<&String> = image_ids.iter().collect();
     let jobs: Vec<ThumbJob> = candidates
         .into_iter()
-        .filter(|e| image_ids.iter().any(|id| id == &e.id))
+        .filter(|e| wanted.contains(&e.id))
         .filter(|e| !cached_thumbnail_usable(&e.thumbnail_path))
         .map(|e| ThumbJob {
             id: e.id,
