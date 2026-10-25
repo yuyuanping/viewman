@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS messages(
   tries       INTEGER NOT NULL DEFAULT 0,
   next_try    REAL NOT NULL DEFAULT 0,
   dead_at     INTEGER,       -- 本轮转死时刻（Unix 秒），面板「今日失败」按它归日
+  dl_bytes    INTEGER NOT NULL DEFAULT 0,  -- 本次尝试已落盘字节（下载中实时进度）
+  dl_total    INTEGER,                     -- Content-Length（未知为 NULL）
   err         TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_due ON messages(dl, next_try);
@@ -118,6 +120,14 @@ class DB:
                     "UPDATE messages SET dead_at=CAST(next_try - "
                     f"(tries - {MAX_DL_TRIES} + 1) * {DL_LATE_INTERVAL} AS INTEGER) "
                     "WHERE dl='dead' AND next_try>0")
+            # 下载实时进度两列：写回只发生在 busy 行，终态行靠认领/收敛处清零，
+            # 历史行无需回填（NULL 与 0 在面板上都显示为无进度）
+            if "dl_bytes" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN dl_bytes INTEGER NOT NULL DEFAULT 0")
+            if "dl_total" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN dl_total INTEGER")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
             # 转发明细行按 parent 查（viewman 面板「当日列表」靠它把今天收到的转发
@@ -130,7 +140,9 @@ class DB:
             # 工具若也做恢复，会把运行中 bot 正在处理的事件打回队列造成重复处理
             if recover:
                 self._conn.execute("UPDATE events SET status='new' WHERE status='busy'")
-                self._conn.execute("UPDATE messages SET dl='pending' WHERE dl='busy'")
+                # 回队同时清掉残进度：崩溃瞬间的 dl_bytes 不是任何有效进度
+                self._conn.execute(
+                    "UPDATE messages SET dl='pending', dl_bytes=0, dl_total=NULL WHERE dl='busy'")
                 # 历史误伤回收：止血初版把"无 msg_id"明细行一律推到一年后，未区分
                 # 有 parent（可由父转发重新展开刷新、本可得救）与孤儿行。新语义下
                 # 有 parent 的行不该出现在一年后——把它拉回每日复检轨道，下次班车
@@ -233,22 +245,32 @@ class DB:
                 (now, now, DL_LATE_TRIES, limit)).fetchall()
             ids = [r["id"] for r in rows]
             if ids:
+                # 认领即清零进度：上一轮尝试的残值不能冒充本轮的实时进度
                 c.execute(
-                    f"UPDATE messages SET dl='busy' WHERE id IN "
+                    f"UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL WHERE id IN "
                     f"({','.join('?' * len(ids))})", ids)
             return [dict(r) for r in rows]
         return await self._run(_do)
 
     async def claim_dl_row(self, mid: int) -> bool:
-        """按 id 认领单行（pending -> busy）。False 表示他人已在处理。"""
+        """按 id 认领单行（pending -> busy，进度清零）。False 表示他人已在处理。"""
         return await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl='busy' WHERE id=? AND dl='pending'",
+            "UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL WHERE id=? AND dl='pending'",
             (mid,)).rowcount > 0)
+
+    async def set_dl_progress(self, mid: int, done: int, total: int | None) -> None:
+        """下载中实时进度写回：只更 busy 行，行被回收/转终态后晚到的回调不会
+        把残值写进 ok/dead。调用方节流（256KB/0.3s 其一），写库在单锁 to_thread 里。"""
+        await self._run(lambda c: c.execute(
+            "UPDATE messages SET dl_bytes=?, dl_total=? WHERE id=? AND dl='busy'",
+            (done, total, mid)))
 
     async def mark_dl_ok(self, mid: int, md5: str, path: str,
                          size: int, dedup: bool = False) -> None:
+        # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值
         await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL WHERE id=?",
+            "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL, "
+            "dl_bytes=0, dl_total=NULL WHERE id=?",
             (md5, path, size, int(bool(dedup)), mid)))
 
     async def set_message_text(self, mid: int, text: str, dedup: int = 0) -> None:

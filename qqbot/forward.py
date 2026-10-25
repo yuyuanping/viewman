@@ -113,18 +113,20 @@ def seg_text(seg: dict) -> str:
 
 
 async def _save_media_segment(data: dict, kind: str, storage,
-                              get_file_url: Callable, scope: str):
+                              get_file_url: Callable, scope: str,
+                              on_progress=None):
     file_id = data.get("file_id") or data.get("file") or ""
     expect_md5 = md5_hint(file_id)
     url = data.get("url", "")
     result = await storage.save_media(
-        url, kind, scope, expect_md5=expect_md5
+        url, kind, scope, expect_md5=expect_md5, on_progress=on_progress
     ) if url else None
     if result is None and file_id:
         fallback_url = await get_file_url(file_id)
         if fallback_url:
             result = await storage.save_media(
-                fallback_url, kind, scope, expect_md5=expect_md5
+                fallback_url, kind, scope, expect_md5=expect_md5,
+                on_progress=on_progress
             )
     return result
 
@@ -132,7 +134,7 @@ async def _save_media_segment(data: dict, kind: str, storage,
 async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                       get_file_url: Callable, scope: str = "private",
                       depth: int = 0, stats: dict | None = None,
-                      report=None) -> str:
+                      report=None, on_progress=None) -> str:
     """递归渲染转发消息。图片/视频/文件在此层下载一次，避免重复。
     scope 决定媒体存入 private/ 还是 group/。
     stats 传入 dict 时累计 {"saved": 成功落盘数, "dedup": 其中复用现有文件的数}。
@@ -157,7 +159,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             d = seg.get("data", {})
             if t == "image":
                 r = await _save_media_segment(d, "image", storage,
-                                              get_file_url, scope)
+                                              get_file_url, scope, on_progress)
                 if r and stats is not None:
                     stats["saved"] = stats.get("saved", 0) + 1
                     if r.get("dedup"):
@@ -174,7 +176,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                 parts.append(r["placeholder"] if r else "[图片]")
             elif t == "video":
                 r = await _save_media_segment(d, "video", storage,
-                                              get_file_url, scope)
+                                              get_file_url, scope, on_progress)
                 if r and stats is not None:
                     stats["saved"] = stats.get("saved", 0) + 1
                     if r.get("dedup"):
@@ -192,7 +194,8 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             elif t == "file":
                 fid = d.get("file_id") or d.get("url") or ""
                 r = await storage.save_file(fid, d.get("file", "file"),
-                                            get_file_url, scope)
+                                            get_file_url, scope,
+                                            on_progress=on_progress)
                 if r and stats is not None:
                     stats["saved"] = stats.get("saved", 0) + 1
                     if r.get("dedup"):
@@ -210,7 +213,8 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             elif t == "record":
                 fid = d.get("file_id") or d.get("url") or ""
                 name = d.get("file") or f"voice_{fid[:8] or 'msg'}.mp3"
-                r = await storage.save_file(fid, name, get_file_url, scope)
+                r = await storage.save_file(fid, name, get_file_url, scope,
+                                            on_progress=on_progress)
                 if r and stats is not None:
                     stats["saved"] = stats.get("saved", 0) + 1
                     if r.get("dedup"):
@@ -225,7 +229,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                 parts.append(r["placeholder"] if r else "[语音]")
             elif t == "mface":
                 r = await _save_media_segment(d, "image", storage,
-                                              get_file_url, scope)
+                                              get_file_url, scope, on_progress)
                 if r and stats is not None:
                     stats["saved"] = stats.get("saved", 0) + 1
                     if r.get("dedup"):
@@ -243,7 +247,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             elif t == "forward":
                 nested = await _expand(seg.get("data", {}), storage, expand_forward,
                                        get_file_url, scope, depth, stats, report,
-                                       nickname, inner_ts)
+                                       nickname, inner_ts, on_progress)
                 parts.append(nested or "[合并转发]")
             else:
                 if report and t == "text":
@@ -259,7 +263,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
 async def _expand(data: dict, storage, expand_forward: Callable,
                   get_file_url: Callable, scope: str, depth: int,
                   stats: dict | None = None, report=None,
-                  sender: str = "", ts: int = 0) -> str:
+                  sender: str = "", ts: int = 0, on_progress=None) -> str:
     nested_fid = data.get("id", "")
     if not nested_fid or depth >= MAX_DEPTH:
         return ""
@@ -267,12 +271,12 @@ async def _expand(data: dict, storage, expand_forward: Callable,
     if content:
         nested_text = await render_node(content, storage, expand_forward,
                                         get_file_url, scope, depth + 1, stats,
-                                        report)
+                                        report, on_progress)
     else:
         nested_data = await expand_forward(nested_fid)
         nested_text = await render_node(
             nested_data.get("messages", []), storage, expand_forward,
-            get_file_url, scope, depth + 1, stats, report
+            get_file_url, scope, depth + 1, stats, report, on_progress
         ) if nested_data else ""
     if report:
         first = (nested_text or "[合并转发]").splitlines()[0][:80]

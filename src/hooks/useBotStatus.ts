@@ -5,8 +5,9 @@ import { dlSnapshotChanged } from "../botDlSnapshot";
 
 /** 全量轮询间隔：进程/端口探测（PowerShell 冷启动约 1 秒）不宜更快 */
 const POLL_MS = 10000;
-/** 轻量快照间隔：下载活跃期只读 bot.db（毫秒级），列表近实时 */
-const FAST_MS = 2000;
+/** 轻量快照间隔：下载活跃期只读 bot.db（毫秒级），列表近实时。
+ * 1 秒一轮是为了下载进度字节跳动看起来是连续的（bot 侧也按 256KB/0.3s 节流写回） */
+const FAST_MS = 1000;
 
 /**
  * 常驻轮询 QQ Bot 状态。挂在 App 上而非面板里，侧栏 tab 徽标在任何标签页下都保持实时，

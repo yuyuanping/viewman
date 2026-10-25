@@ -39,6 +39,25 @@ function statusLabel(item: BotDlItem): string {
   return status === "archived" && item.kind === "text" ? "已存档" : DL_STATUS_LABEL[status];
 }
 
+/** 下载中行的实时进度串：总量已知给「42%」，未知只显「下载中」 */
+function progressPct(item: BotDlItem): string {
+  if (item.dl !== "busy") return "";
+  const done = item.dl_bytes ?? 0;
+  const total = item.dl_total;
+  if (total == null || total <= 0) return "";
+  // 转发块聚合进度的 total 恒为 NULL，这里只兜单行；夹到 100 防最后一块超额
+  return ` ${Math.min(100, Math.round((done / total) * 100))}%`;
+}
+
+/** 下载中行的尺寸串：显示已落盘字节（转发父行=块内累计），下完翻回最终大小 */
+function sizeText(item: BotDlItem): string {
+  if (item.dl === "busy") {
+    const done = item.dl_bytes ?? 0;
+    return done > 0 ? formatDlSize(done) : "…";
+  }
+  return formatDlSize(item.size);
+}
+
 /** 状态筛选条上的胶囊按钮；选中态高亮，角标是该状态的当日条数 */
 function FilterChip({
   active,
@@ -86,11 +105,11 @@ const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
         {isDetail && <span className="text-gray-600 mr-1">└</span>}
         {label}
       </td>
-      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatDlSize(item.size)}</td>
+      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{sizeText(item)}</td>
       <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
       <td className="py-1.5 px-2">
         <span className={STATUS_CLASS[dlStatusOf(item)]}>
-          {statusLabel(item)}{dedupSuffix}
+          {statusLabel(item)}{progressPct(item)}{dedupSuffix}
         </span>
       </td>
     </tr>
