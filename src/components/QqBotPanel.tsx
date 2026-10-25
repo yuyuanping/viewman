@@ -107,7 +107,7 @@ const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
   const isDetail = item.parent != null;
   return (
     <tr
-      className="border-t border-white/5 hover:bg-white/5"
+      className="border-t border-white/5 hover:bg-white/5 transition-colors duration-75"
       title={item.err ?? (isDetail ? `转发 #${item.parent} 的第 ${item.id} 段` : undefined)}
     >
       <td
@@ -211,7 +211,8 @@ export function QqBotPanel({
               </p>
             ) : (
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
+                {/* 底缘阴影让滚动内容"从表头下面滑过"；近不透明底与卡片底色一致，sticky 时不露出下层行 */}
+                <thead className="sticky top-0 bg-[#182231] text-gray-500 shadow-[0_1px_0_#ffffff0f,0_6px_10px_-6px_#00000080]">
                   <tr>
                     <th className="text-left font-medium py-1.5 px-2">内容</th>
                     <th className="text-left font-medium py-1.5 px-2">接收时间</th>

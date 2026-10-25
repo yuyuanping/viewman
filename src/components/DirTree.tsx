@@ -29,7 +29,7 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
       <>
         <button
           onClick={() => onSelectDir(null)}
-          className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 ${isSelected ? "bg-blue-600" : "hover:bg-gray-700"}`}
+          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center gap-2 transition-colors ${isSelected ? "bg-blue-600 text-white" : "text-gray-200 hover:bg-white/5"}`}
         >
           <span>📁 {node.name}</span>
           <span className="ml-auto text-xs text-gray-400">{node.itemCount}</span>
@@ -51,8 +51,8 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
     <>
       <button
         onClick={() => { onSelectDir(node.path); if (hasChildren) setExpanded(!expanded); }}
-        className={`w-full text-left px-2 py-1 rounded text-sm flex items-center gap-1 ${isSelected ? "bg-blue-600" : "hover:bg-gray-700"}`}
-        style={{ paddingLeft: `${8 + depth * 16}px` }}
+        className={`w-full text-left px-2 py-1.5 rounded-lg text-sm flex items-center gap-1 transition-colors ${isSelected ? "bg-blue-600 text-white" : "text-gray-200 hover:bg-white/5"}`}
+        style={{ paddingLeft: `${10 + depth * 16}px` }}
       >
         {hasChildren ? (
           <span className="text-xs w-4">{expanded ? "▼" : "▶"}</span>
