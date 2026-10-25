@@ -91,6 +91,10 @@ export interface BotDlItem {
   parent: number | null;
   /** 明细行的内层发送者昵称，转发里不同人发的图靠它区分 */
   sender: string | null;
+  /** 本次尝试已落盘字节：仅 dl='busy' 行有意义；转发父行=块内聚合值；老库为 null */
+  dl_bytes: number | null;
+  /** Content-Length；来源未给（或转发聚合行）为 null → 只显示已下载量不显百分比 */
+  dl_total: number | null;
 }
 
 /** 下载汇总：媒体文件（image/video/file，dl='ok'）的累计与今日完成量 */

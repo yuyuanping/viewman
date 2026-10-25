@@ -85,6 +85,11 @@ pub struct BotDlItem {
     pub parent: Option<i64>,
     /// 明细行的内层发送者昵称（转发里不同人发的图靠它区分）
     pub sender: Option<String>,
+    /// 本次尝试已落盘字节：仅 dl='busy' 时有意义，面板据此显示实时进度。
+    /// 转发父行是块内聚合值。老库缺列时为 NULL
+    pub dl_bytes: Option<i64>,
+    /// Content-Length（来源未给或转发行聚合时为 NULL → 只显示已下载量）
+    pub dl_total: Option<i64>,
 }
 
 /// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数与最近下载列表。
@@ -688,9 +693,16 @@ fn today_start_ts() -> i64 {
 /// 结果在内存里合并去重。
 fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, String> {
     let today = today_start_ts();
-    const COLS: &str = "SELECT m.id, m.kind, COALESCE(NULLIF(m.name, ''), \
-                         substr(COALESCE(m.text, ''), 1, 80), ''), m.bytes, m.dedup, \
-                         m.err, m.dl, m.parent, m.sender_nick FROM messages m";
+    // 实时进度两列是老库可能没有的（db.py 启动时才迁移）；缺列补 NULL，
+    // 面板只在 busy 行读它们，拿不到就当没有进度
+    let has_prog = has_messages_col(conn, "dl_bytes");
+    let cols = format!(
+        "SELECT m.id, m.kind, COALESCE(NULLIF(m.name, ''), \
+         substr(COALESCE(m.text, ''), 1, 80), ''), m.bytes, m.dedup, \
+         m.err, m.dl, m.parent, m.sender_nick{} FROM messages m",
+        if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" }
+    );
+    let cols = cols.as_str();
     let mut out = Vec::new();
     let mut push = |stmt: &mut rusqlite::Statement| -> Result<(), String> {
         let rows = stmt
@@ -705,6 +717,8 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
                     dl: r.get(6)?,
                     parent: r.get(7)?,
                     sender: r.get(8)?,
+                    dl_bytes: r.get(9)?,
+                    dl_total: r.get(10)?,
                 })
             })
             .map_err_str()?;
@@ -719,7 +733,7 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     // 「ts 是今天的明细行」也无妨——转发里的消息时间必然不晚于转发本身，三支重叠
     // 由下面的去重兜住。
     let mut stmt = conn
-        .prepare(&format!("{COLS} WHERE m.dl != 'none' AND m.ts >= ?1"))
+        .prepare(&format!("{cols} WHERE m.dl != 'none' AND m.ts >= ?1"))
         .map_err_str()?;
     push(&mut stmt).map_err_str()?;
 
@@ -727,7 +741,7 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     // 需要 messages_parent 索引（db.py 启动时建），否则这条会退化成全表扫 27ms
     let mut stmt = conn
         .prepare(&format!(
-            "{COLS} JOIN messages p ON p.id = m.parent WHERE p.ts >= ?1"
+            "{cols} JOIN messages p ON p.id = m.parent WHERE p.ts >= ?1"
         ))
         .map_err_str()?;
     push(&mut stmt).map_err_str()?;
@@ -736,7 +750,7 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     // bot.db 由 python 侧建，老库可能还没有 dead_at 列；缺列就只按消息时间归日
     if has_messages_col(conn, "dead_at") {
         let mut stmt = conn
-            .prepare(&format!("{COLS} WHERE m.dl = 'dead' AND m.dead_at >= ?1"))
+            .prepare(&format!("{cols} WHERE m.dl = 'dead' AND m.dead_at >= ?1"))
             .map_err_str()?;
         push(&mut stmt).map_err_str()?;
     }
@@ -1042,7 +1056,8 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
-                                   dead_at INTEGER);",
+                                   dead_at INTEGER, dl_bytes INTEGER NOT NULL DEFAULT 0,
+                                   dl_total INTEGER);",
         )
         .unwrap();
         let now = std::time::SystemTime::now()
@@ -1066,7 +1081,19 @@ mod tests {
             rusqlite::params![now, old, now, old],
         )
         .unwrap();
+        // 1 改成下载中并带实时进度：busy 行要把 dl_bytes/dl_total 透出给面板
+        conn.execute(
+            "UPDATE messages SET dl='busy', dl_bytes=12345, dl_total=98765 WHERE id=1",
+            [],
+        )
+        .unwrap();
         let items = read_today_items(&conn).unwrap();
+        let it1 = items.iter().find(|it| it.id == 1).unwrap();
+        assert_eq!(it1.dl_bytes, Some(12345));
+        assert_eq!(it1.dl_total, Some(98765));
+        // 非进度行取建表默认值（0/NULL），面板按 busy 才读它们
+        assert_eq!(items.iter().find(|it| it.id == 8).unwrap().dl_bytes, Some(0));
+        assert_eq!(items.iter().find(|it| it.id == 2).unwrap().dl_total, None);
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
         // 排序键 COALESCE(parent,id) 倒序、块内 id 正序：8、5 各一组，转发 2 置顶、
         // 明细（3/9）跟在它下面，再下面 1。10/11 是昨天那批发来的转发与它的明细，

@@ -273,22 +273,37 @@ class Storage:
             self._tokens = max(self._tokens - 1, 0)
 
     async def _stream_to(self, url: str, kind: str,
-                         tmp: Path) -> tuple[str, int, str] | None:
+                         tmp: Path,
+                         on_progress: Callable[[int, int | None], Coroutine[None, None, None]] | None = None
+                         ) -> tuple[str, int, str] | None:
         """流式下载 url 到 tmp：1MB 块边写边算 md5，内存占用与文件大小无关。
-        失败重试 1 次（并清掉残件）；成功返回 (md5hex, bytes, Content-Type)。"""
+        失败重试 1 次（并清掉残件）；成功返回 (md5hex, bytes, Content-Type)。
+        on_progress 在每块落盘后回报 (已传字节, Content-Length 或 None)：
+        累计 ≥256KB 或距上次 ≥0.3 秒才触发一次（面板 1 秒轮询，更密没有意义），
+        回调异常只记日志，绝不拖垮下载本身。"""
         timeout = aiohttp.ClientTimeout(total=_TIMEOUT_BY_KIND.get(kind, 30))
         for attempt in (1, 2):
             try:
                 digest = hashlib.md5()
                 size = 0
+                last_done, last_t = -1, 0.0
                 async with self.session.get(url, timeout=timeout) as resp:
                     resp.raise_for_status()
                     ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                    total = int(resp.headers.get("Content-Length") or 0) or None
                     with open(tmp, "wb") as f:
                         async for chunk in resp.content.iter_chunked(1 << 20):
                             await asyncio.to_thread(f.write, chunk)
                             digest.update(chunk)
                             size += len(chunk)
+                            if on_progress is not None \
+                                    and (size - last_done >= (1 << 18)
+                                         or time.monotonic() - last_t >= 0.3):
+                                last_done, last_t = size, time.monotonic()
+                                try:
+                                    await on_progress(size, total)
+                                except Exception as e:
+                                    logger.debug("[PROGRESS] 写回失败 kind=%s: %s", kind, e)
                 return digest.hexdigest(), size, ct
             except Exception as e:
                 logger.error("[ERROR] download %s attempt %d/2 failed: %s",
@@ -318,7 +333,7 @@ class Storage:
 
     # ---- 图片/视频 ----
     async def save_media(self, url: str, kind: str, scope: str = "private",
-                         expect_md5: str | None = None) -> dict | None:
+                         expect_md5: str | None = None, on_progress=None) -> dict | None:
         """下载图片或视频，按 MD5 命名去重。图片按 scope 分流 private/group；
         视频统一入 videos/（scope 只对图片有意义）。
         支持两类来源：http(s) 直链；本地绝对路径（NapCat 有时直接给 nt_qq
@@ -345,7 +360,7 @@ class Storage:
             tmp = None
             if url.startswith(("http://", "https://")):
                 tmp = self._media_base(kind, scope) / f"~dl{uuid4().hex}.part"
-                got = await self._stream_to(url, kind, tmp)
+                got = await self._stream_to(url, kind, tmp, on_progress)
                 if got is None:
                     return None
                 digest, size, ct = got
@@ -388,7 +403,7 @@ class Storage:
     # ---- 文件 ----
     async def save_file(self, file_id_or_url: str, filename: str,
                         get_url: Callable[[str], Coroutine[None, None, str | None]],
-                        scope: str = "private") -> dict | None:
+                        scope: str = "private", on_progress=None) -> dict | None:
         """下载文件，按 MD5 命名去重。三种来源：http(s) 直链；本地绝对路径；
         文件 ID 经 get_url 解析（NapCat 通常给本地路径）——解析是慢 API 调用，
         放在下载并发额度之外，NapCat 卡住时不会占死下载槽。传输流式落盘，
@@ -418,7 +433,7 @@ class Storage:
             try:
                 if src.startswith(("http://", "https://")):
                     tmp = base / f"~dl{uuid4().hex}.part"
-                    got = await self._stream_to(src, "file", tmp)
+                    got = await self._stream_to(src, "file", tmp, on_progress)
                     if got is None:
                         return None
                     digest, size, ct = got

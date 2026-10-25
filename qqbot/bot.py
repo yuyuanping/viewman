@@ -730,6 +730,11 @@ class Bot:
         kind = row.get("kind", "")
         scope = row.get("scope") or "private"
         had_text = bool((row.get("text") or "").strip())
+
+        async def _progress_self(done: int, total: int | None) -> None:
+            """顶层媒体/文件行下载中把进度报在自己行上；转发行的聚合进度见下方"""
+            await self.db.set_dl_progress(mid, done, total)
+
         try:
             if kind == "forward":
                 fid = row.get("ref", "")
@@ -741,6 +746,18 @@ class Bot:
                 # 媒体熔断：转发送来后先检查原文是否命中高危词，命中则
                 # 展开时只产文本占位，不下载内部媒体（涉黄资源常见于合并转发）
                 stats: dict = {}
+                # 块内媒体一次下载一个，实时进度聚合报在父行：已完成段的字节由
+                # report 逐段落库时推进 base，当前段的 done 实时加在上面
+                seg = {"base": 0}
+
+                def _block_progress():
+                    async def cb(done: int, total: int | None) -> None:
+                        # seg["base"] 在回调时刻读：前序段落完成时 report 已滚入 base，
+                        # 创建时快照的话第二段起就丢掉前面段的字节。
+                        # total 是「当前这一段」的大小，配整块累计字节会误导
+                        # （done 还可能反超 total）——块行只报累计，不报百分比
+                        await self.db.set_dl_progress(mid, seg["base"] + done, None)
+                    return cb
 
                 async def report(item: dict) -> None:
                     """转发明细逐段落库：文本/嵌套转发记 dl=none，成功媒体记 ok，
@@ -763,6 +780,8 @@ class Bot:
                                 md5=item.get("md5"), path=item.get("path"),
                                 bytes=item.get("bytes"), dl="ok",
                                 dedup=int(bool(item.get("dedup"))))
+                            # 本段落盘，字节滚入父行聚合进度的 base
+                            seg["base"] += int(item.get("bytes") or 0)
                         else:
                             # 展开时下载失败：进正常重试队列按 src/ref 重下
                             await self.db.add_message(
@@ -774,7 +793,8 @@ class Bot:
 
                 text = await render_node(data.get("messages", []), self.storage,
                                          self.expand_forward, self.get_file_url,
-                                         scope, stats=stats, report=report)
+                                         scope, stats=stats, report=report,
+                                         on_progress=_block_progress())
                 if not text:
                     raise RuntimeError("forward rendered empty")
                 # 先记账（text/ok）后写 md：崩溃落在中间时重放会因 had_text
@@ -805,19 +825,22 @@ class Bot:
             if kind == "file":
                 arg = row.get("ref") or row.get("src") or ""
                 r = await self.storage.save_file(arg, row.get("name") or "file",
-                                                 self.get_file_url, scope)
+                                                 self.get_file_url, scope,
+                                                 on_progress=_progress_self)
             else:  # image / video
                 r = None
                 src = await self._refresh_src(row, kind, row.get("src", ""))
                 if src:
                     r = await self.storage.save_media(
-                        src, kind, scope, expect_md5=md5_hint(row.get("ref")))
+                        src, kind, scope, expect_md5=md5_hint(row.get("ref")),
+                        on_progress=_progress_self)
                 if r is None and row.get("ref"):
                     # CDN url 可能已过期：改经 NapCat file_id 取本地原件重试
                     p = await self.get_file_url(row["ref"])
                     if p:
                         r = await self.storage.save_media(
-                            p, kind, scope, expect_md5=md5_hint(row["ref"]))
+                            p, kind, scope, expect_md5=md5_hint(row["ref"]),
+                            on_progress=_progress_self)
             if r is None:
                 raise RuntimeError("download failed")
             await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
