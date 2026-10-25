@@ -27,17 +27,17 @@ export function RecentlyPlayedList({ items, onPlay }: Props) {
       <div className="border-t border-gray-700 my-1" />
       <span className="text-xs text-gray-400 font-medium">播放记录 ({items.length})</span>
       {items.length === 0 ? (
-        <span className="text-xs text-gray-600 px-2">暂无记录</span>
+        <span className="text-xs text-gray-600 px-2.5">暂无记录</span>
       ) : (
         <div className="flex flex-col gap-0.5 overflow-y-auto max-h-48">
           {items.map(item => (
             <button
               key={item.video.id}
               onClick={() => onPlay(item.video.id, item.position)}
-              className="w-full text-left px-2 py-1.5 rounded text-sm hover:bg-gray-700 flex items-center gap-2"
+              className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors hover:bg-white/5 flex items-center gap-2 group"
             >
-              <span className="truncate flex-1 text-gray-300 text-xs">{item.video.filename}</span>
-              <span className="text-xs text-gray-600 shrink-0">{formatTimeAgo(item.updated_at)}</span>
+              <span className="truncate flex-1 text-gray-300 transition-colors group-hover:text-gray-100">{item.video.filename}</span>
+              <span className="shrink-0 text-gray-600 tabular-nums">{formatTimeAgo(item.updated_at)}</span>
             </button>
           ))}
         </div>

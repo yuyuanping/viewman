@@ -561,20 +561,21 @@ function App() {
         {sidebarVisible ? "‹" : "›"}
       </button>
       <main className="library-main flex-1 flex flex-col gap-5 overflow-hidden">
+        {/* 提示条：12px 圆角与卡片体系一致；左侧 3px 强调色竖条 + 轻内阴影，层级立起来 */}
         {(activeError || notice) && (
-          <div role="alert" className="bg-amber-900/80 text-amber-100 px-3 py-2 rounded text-sm flex justify-between items-center">
+          <div role="alert" className="bg-amber-900/50 text-amber-100 px-3.5 py-2.5 rounded-xl text-sm flex justify-between items-center border border-amber-500/25 shadow-[inset_3px_0_0_#f59e0b66]">
             <span>{activeError || notice}</span>
-            <button onClick={() => { clearActiveError(); clearNotice(); }} aria-label="关闭提示" className="hover:text-white ml-2 shrink-0">✕</button>
+            <button onClick={() => { clearActiveError(); clearNotice(); }} aria-label="关闭提示" className="hover:text-white ml-2 shrink-0 text-amber-300/70">✕</button>
           </div>
         )}
         {potPlayerError && (
-          <div className="bg-red-900/80 text-red-200 px-3 py-2 rounded text-sm flex justify-between items-center">
+          <div className="bg-red-900/50 text-red-200 px-3.5 py-2.5 rounded-xl text-sm flex justify-between items-center border border-red-500/25 shadow-[inset_3px_0_0_#ef444466]">
             <span>{potPlayerError}</span>
-            <button onClick={clearPotPlayerError} className="text-red-300 hover:text-white ml-2">✕</button>
+            <button onClick={clearPotPlayerError} className="text-red-300/70 hover:text-white ml-2">✕</button>
           </div>
         )}
         {dbIssue && (
-          <div role="alert" className="bg-red-900/80 text-red-100 px-3 py-2 rounded text-sm flex justify-between items-center gap-3">
+          <div role="alert" className="bg-red-900/50 text-red-100 px-3.5 py-2.5 rounded-xl text-sm flex justify-between items-center gap-3 border border-red-500/25 shadow-[inset_3px_0_0_#ef444466]">
             <span className="break-all">{dbIssue}</span>
             <button
               onClick={() => void runRepair()}
