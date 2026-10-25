@@ -131,6 +131,15 @@ class DB:
             if recover:
                 self._conn.execute("UPDATE events SET status='new' WHERE status='busy'")
                 self._conn.execute("UPDATE messages SET dl='pending' WHERE dl='busy'")
+                # 历史误伤回收：止血初版把"无 msg_id"明细行一律推到一年后，未区分
+                # 有 parent（可由父转发重新展开刷新、本可得救）与孤儿行。新语义下
+                # 有 parent 的行不该出现在一年后——把它拉回每日复检轨道，下次班车
+                # 即借父转发刷新地址重试。幂等：解冻后 next_try 落到近期，不再命中。
+                self._conn.execute(
+                    "UPDATE messages SET next_try=? "
+                    "WHERE dl='dead' AND parent IS NOT NULL "
+                    "AND (msg_id IS NULL OR msg_id='') AND next_try>?",
+                    (time.time(), time.time() + 100 * 86400))
             self._conn.commit()
 
     # ---- 异步包装 ----
@@ -206,6 +215,11 @@ class DB:
         dl='dead' 且还没跑满复检轮次的行也算到期：快重试只有约 4 小时窗口，
         而 QQ 往往在那之后（用户点开播放过）才把原件下到本地。
         两支都用 messages_due(dl, next_try) 索引，别写成跨 dl 的 OR。
+
+        dead 复检资格：有 msg_id（get_msg 能刷地址）**或**有 parent（转发明细
+        行，重新展开父转发能按文件名刷地址，见 bot._refresh_src_by_forward）。
+        两者皆无的孤儿行没有任何刷新路径——bump_dl 已把它们推到一年后，这里再
+        显式排除，防止旧库遗留行（next_try 仍在过去）被反复认领空转。
         """
         now = time.time()
 
@@ -214,6 +228,7 @@ class DB:
                 "SELECT * FROM messages WHERE dl='pending' AND next_try<=?"
                 " UNION ALL "
                 "SELECT * FROM messages WHERE dl='dead' AND next_try<=? AND tries<? "
+                "AND ((msg_id IS NOT NULL AND msg_id<>'') OR parent IS NOT NULL) "
                 "ORDER BY id LIMIT ?",
                 (now, now, DL_LATE_TRIES, limit)).fetchall()
             ids = [r["id"] for r in rows]
@@ -246,6 +261,12 @@ class DB:
         await self._run(lambda c: c.execute(
             "UPDATE messages SET src=? WHERE id=?", (src, mid)))
 
+    async def get_message_ref(self, mid: int) -> str | None:
+        """取某行的 ref（转发死链刷新用：明细行凭 parent 查父转发行的 forward id）。"""
+        row = await self._run(lambda c: c.execute(
+            "SELECT ref FROM messages WHERE id=?", (mid,)).fetchone())
+        return row["ref"] if row else None
+
     async def clear_event_messages(self, eid: int) -> None:
         """事件重放前清掉上次尝试已写的 messages 行（含转发明细行），
         防止重放把同一段内容重复入库。单条 DELETE，天然原子。"""
@@ -254,20 +275,36 @@ class DB:
 
     async def bump_dl(self, mid: int, err: str) -> str:
         """失败退避 30*2^tries 秒（封顶 30 分钟），跑满 MAX_DL_TRIES 后转 dead
-        并改成每天复检一次；复检满 DL_LATE_TRIES-MAX_DL_TRIES 轮才真正不再碰。"""
+        并改成每天复检一次；复检满 DL_LATE_TRIES-MAX_DL_TRIES 轮才真正不再碰。
+
+        转发死链（无 msg_id）快转死：明细行的 src 是旧 rkey 直链、几天必失效
+        （必 400），get_file 又拿文件名当 file_id（必 file not found）——tries>=3
+        即转 dead，不再跑满 8 次快重试白刷一屏 400。但**有 parent 的明细行保留
+        每日复检**：刷新走重新展开父转发（bot._refresh_src_by_forward），转发在
+        QQ 端通常几天内有效，WS 断线期间又打不出去——复检到 tries 跑满 15 才彻底
+        放手，别把本可救回的行错杀。无 msg_id 又无 parent 的孤儿行两条刷新路都
+        不通，直接推一年后不再碰（见 claim_pending_dl）。"""
         def _do(c):
-            row = c.execute("SELECT tries FROM messages WHERE id=?", (mid,)).fetchone()
+            row = c.execute(
+                "SELECT tries, msg_id, parent FROM messages WHERE id=?", (mid,)).fetchone()
             tries = (row["tries"] if row else 0) + 1
-            late = tries >= MAX_DL_TRIES
+            no_mid = not (row["msg_id"] if row else "")
+            # 无 msg_id 3 次足矣：CDN 与本地兜底都必失败；能否得救看父转发还在不在
+            late = (no_mid and tries >= 3) or tries >= MAX_DL_TRIES
             dl = "dead" if late else "pending"
-            nxt = time.time() + (DL_LATE_INTERVAL if late
-                                 else min(30 * 2 ** tries, 1800))
-            # dead_at = 本轮转死时刻：tries 刚跑满（含 replay --retry 重置后再跑满）时刷新，
+            orphan = no_mid and not (row["parent"] if row else None)
+            if late and orphan:
+                nxt = time.time() + 365 * 86400   # 远未来：孤儿行无刷新路径，不再复检
+            elif late:
+                nxt = time.time() + DL_LATE_INTERVAL
+            else:
+                nxt = time.time() + min(30 * 2 ** tries, 1800)
+            # dead_at = 本轮转死时刻：首次转死（含 fast_dead 与跑满 MAX_DL_TRIES）时刷新，
             # 之后的每日复检失败不动它。面板的「今日失败」按它归日，才不会把旧积压天天重计
             c.execute("UPDATE messages SET dl=?, tries=?, next_try=?, err=?, "
                       "dead_at=COALESCE(?, dead_at) WHERE id=?",
                       (dl, tries, nxt, err[:500],
-                       int(time.time()) if tries == MAX_DL_TRIES else None, mid))
+                       int(time.time()) if late else None, mid))
             return dl
         return await self._run(_do)
 
