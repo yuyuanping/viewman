@@ -157,6 +157,11 @@ class Bot:
         self.down_since: int | None = None
         self._gap_fails = 0    # 连续问不到 QQ 的缺口轮数（超时/无返回）
         self._api_next = 0.0   # 下一次允许打消息类 API 的最早时刻（monotonic）
+        # 转发展开短缓存 {fid: (单调时刻, data 或 None)}：一条转发的十几个明细行
+        # 常在同一班车里重试，逐行 expand_forward 会把同一转发向 QQ 连打十几次。
+        # 60 秒窗口够一班车复用；None（失败/过期）也缓存，免得过期的旧转发被
+        # 每行反复重试。rkey 只按分钟级轮换，缓存里的 url 在窗口内依然有效。
+        self._fwd_cache: dict[str, tuple[float, Any | None]] = {}
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -629,11 +634,27 @@ class Bot:
 
     async def _refresh_src(self, row: dict, kind: str, src: str) -> str:
         """重试前先换个新地址。存下来的 CDN url 带 rkey（QQ 给的签名参数），
-        放几天就必然失效——拿死链重试要白跑 8 次快重试再加一周复检。get_msg 回来
-        的段里就是当前有效地址；WS 没连着、消息已翻不到或没给出 url 都沿用旧 src。
-        首次尝试（tries=0）不折腾：那时地址刚拿到，本来就是活的。"""
-        if int(row.get("tries") or 0) == 0 or not row.get("msg_id"):
+        放几天就必然失效——拿死链重试要白跑 8 次快重试再加一周复检。
+
+        两条刷新路径，按行有没有 msg_id 分流：
+        - 顶层消息行：有 msg_id，调 get_msg 拿当前有效地址。
+        - 转发明细行：无 msg_id（parent 非空指向父转发行），父行 ref 存的是转发
+          id——重新 get_forward_msg 展开父转发，按文件名匹配本段的新 url。NapCat
+          的转发展开段只有 file（哈希文件名）+ url（带 rkey 直链），没有 file_id
+          键，所以 ref 当初只能存文件名；重展开按 name 匹配是唯一能刷新的路径。
+
+        首次尝试（tries=0）不折腾：那时地址刚拿到，本来就是活的。
+        WS 没连着、消息已翻不到或没给出 url 都沿用旧 src。"""
+        if int(row.get("tries") or 0) == 0:
             return src
+        if row.get("msg_id"):
+            return await self._refresh_src_by_msg(row, kind, src)
+        if row.get("parent"):
+            return await self._refresh_src_by_forward(row, kind, src)
+        return src
+
+    async def _refresh_src_by_msg(self, row: dict, kind: str, src: str) -> str:
+        """顶层消息行：get_msg 回来的段里就是当前有效地址。"""
         ws = self._ws
         if ws is None or ws.closed:
             return src   # 断线中打不出 get_msg，别让重试管线刷一屏 API SKIP
@@ -645,6 +666,61 @@ class Bot:
         logger.info("[DL REURL] id=%d 旧地址已换签，用 get_msg 的新 url 重试",
                     row["id"])
         return fresh
+
+    async def _refresh_src_by_forward(self, row: dict, kind: str, src: str) -> str:
+        """转发明细行：用父行 ref 里的转发 id 重新展开，按文件名匹配本段新 url。
+
+        NapCat 展开转发时对同一文件名给的是确定 url（同转发内同名媒体是同一内容，
+        见当初排查），所以按 name 匹配不会因撞车拿错地址。转发 id 在 QQ 端也会过期
+        （retcode 1200 消息已过期），过期则拿不到新 url、沿用旧 src 走正常退避。"""
+        ws = self._ws
+        if ws is None or ws.closed:
+            return src
+        parent_id = row["parent"]
+        # 父转发行的 ref 存着 forward id；取不到（父行已删/异常）就沿用旧 src
+        fid = await self.db.get_message_ref(parent_id)
+        if not fid:
+            return src
+        now = time.monotonic()
+        hit = self._fwd_cache.get(fid)
+        if hit and now - hit[0] < 60:
+            data = hit[1]
+        else:
+            data = await self.expand_forward(fid)
+            self._fwd_cache[fid] = (now, data)
+            if len(self._fwd_cache) > 32:    # 防泄漏：只留最近展开的几条
+                oldest = min(self._fwd_cache, key=lambda k: self._fwd_cache[k][0])
+                self._fwd_cache.pop(oldest, None)
+        if not data:
+            return src   # 转发已过期 / WS 打不通——沿用旧 src 走退避
+        fresh = self._fresh_forward_url(data, kind, row.get("name"))
+        if not fresh or fresh == src:
+            return src
+        await self.db.set_message_src(row["id"], fresh)
+        logger.info("[DL REURL] id=%d 转发子行按文件名匹配到新 url，父转发 %s",
+                    row["id"], fid[:16])
+        return fresh
+
+    @staticmethod
+    def _fresh_forward_url(data: dict, kind: str, name: str | None) -> str | None:
+        """从 get_forward_msg 的返回里按文件名挑出本段的新鲜 url。
+
+        转发体内层消息是平铺的 message 列表，每个 media 段的 data.file 是
+        哈希文件名、data.url 是带 rkey 的直链。同一转发内同名段给同一 url
+        （同内容复用），所以按 name 精确匹配即可；匹配不到就返回 None 走旧
+        src 退避——绝不"取第一个同类型段"兜底，猜中别的文件会把错内容下进这行。"""
+        if not isinstance(data, dict) or not name:
+            return None
+        for m in data.get("messages", []):
+            if not isinstance(m, dict):
+                continue
+            for seg in m.get("message", []):
+                if not isinstance(seg, dict) or seg.get("type") != kind:
+                    continue
+                d = seg.get("data") or {}
+                if d.get("file") == name and d.get("url"):
+                    return d["url"]
+        return None
 
     async def _attempt_row(self, row: dict, claimed: bool = False) -> None:
         mid = row["id"]
