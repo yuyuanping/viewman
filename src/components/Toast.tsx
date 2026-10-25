@@ -27,7 +27,7 @@ function Toast({ toast, onClose }: { toast: ToastItem; onClose: (id: number) => 
     <button
       type="button"
       onClick={() => onClose(toast.id)}
-      className={`pointer-events-auto max-w-md px-3 py-2 rounded-lg text-sm shadow-lg ring-1 backdrop-blur transition-opacity hover:opacity-80 text-left ${
+      className={`toast-item pointer-events-auto max-w-md px-3.5 py-2.5 rounded-xl text-sm shadow-xl shadow-black/40 ring-1 backdrop-blur transition-opacity hover:opacity-80 text-left ${
         toast.tone === "error"
           ? "bg-red-950/90 text-red-100 ring-red-500/40"
           : "bg-slate-800/90 text-slate-100 ring-white/10"
