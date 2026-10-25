@@ -22,31 +22,50 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 * { scrollbar-width: thin; scrollbar-color: #34425a transparent; }
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-thumb { background: #34425a; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #435671; }
 
-.library-shell { background: radial-gradient(ellipse at 90% 0, #1a2245 0, transparent 48%), #0b1019; }
-.library-sidebar { width: 264px; flex-shrink: 0; border-right: 1px solid #ffffff0b; background: #111925e8; }
+/* 环境光：右上靛蓝 + 左下青蓝两盏极光叠在底色上，页面四角有"光源"而不是死黑 */
+.library-shell { background: radial-gradient(55rem 28rem at 88% -12%, #232e5e, transparent 62%), radial-gradient(42rem 26rem at -8% 112%, #12283b, transparent 58%), #0b1019; }
+/* 侧栏同向微渐变 + 内缘高光线，和主区环境光接出层次 */
+.library-sidebar { width: 264px; flex-shrink: 0; border-right: 1px solid #ffffff0d; background: linear-gradient(185deg, #141d2cf2, #0f1724f2); box-shadow: inset -1px 0 0 #ffffff05; }
 .library-main { padding: 28px; min-width: 0; }
 .library-heading { font-size: 24px; font-weight: 650; letter-spacing: -.6px; }
-.search-field { display: flex; align-items: center; gap: 12px; background: #182231b3; border: 1px solid #ffffff10; border-radius: 12px; padding: 0 14px; }
+.search-field { display: flex; align-items: center; gap: 12px; background: #182231b3; border: 1px solid #ffffff10; border-radius: 14px; padding: 0 14px; }
 .search-field:focus-within { border-color: #788cff; box-shadow: 0 0 0 3px #788cff14; }
+/* 顶栏统计胶囊：与搜索框同族的面板底，比裸描边pill更成体系 */
+.stats-pill { background: #182231a8; border: 1px solid #ffffff12; border-radius: 999px; padding: 6px 12px; font-size: 12px; color: #b9c6da; }
+
+/* 主按钮渐变体系：顶部 1px 内高光线 + 彩色投影，悬浮轻抬（Raycast 式） */
+.btn-primary { background: linear-gradient(135deg, #6276e8, #4659c9); border: 0; color: #fff; border-radius: 12px; font-weight: 500; box-shadow: 0 8px 22px -10px #4356bd80, inset 0 1px 0 #ffffff2e; transition: transform .15s, box-shadow .15s, background .15s; }
+.btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #6f83f5, #5268dc); transform: translateY(-1px); box-shadow: 0 10px 26px -10px #4356bda6, inset 0 1px 0 #ffffff33; }
+.btn-primary:active:not(:disabled) { transform: translateY(0); }
+.btn-primary:disabled { opacity: .5; }
+/* 品牌区：logo 块与标题共用渐变语言 */
+.brand-mark { background: linear-gradient(135deg, #6b83ff, #4356bd); box-shadow: 0 6px 18px -6px #5268dc99, inset 0 1px 0 #ffffff33; }
+.brand-name { background: linear-gradient(115deg, #eaf0ff 20%, #9fb0ff 78%); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .video-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; padding: 3px 3px 20px; }
-.media-card { position: relative; min-width: 0; overflow: hidden; border-radius: 14px; border: 1px solid #ffffff0c; background: #151f2e; transition: border-color .18s, background .18s; }
-.media-card:hover, .media-card:focus-within { border-color: #788cff80; background: #1b293d; }
+.media-card { position: relative; min-width: 0; overflow: hidden; border-radius: 14px; border: 1px solid #ffffff0c; background: #151f2e; transition: border-color .18s, background .18s, transform .18s, box-shadow .18s; }
+/* 悬浮轻抬：1px 位移 + 柔和投影，让卡片从栅格里"浮"出来 */
+.media-card:hover, .media-card:focus-within { border-color: #788cff80; background: #1b293d; transform: translateY(-1px); box-shadow: 0 10px 26px -6px #00000073, 0 0 0 1px #788cff1f; }
 .media-preview {
   aspect-ratio: 16/9;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(ellipse at 75% 15%, #4b609766, transparent 70%), linear-gradient(135deg,#253449,#141c2b);
+  /* 无封面时的占位底：斜向微光（右上高光 + 左下冷光），比纯平面渐变多一层质感 */
+  background: radial-gradient(ellipse at 75% 15%, #4b609766, transparent 70%), radial-gradient(ellipse at 10% 90%, #34425a4d, transparent 60%), linear-gradient(135deg,#253449,#141c2b);
   overflow: hidden;
 }
-.media-thumbnail { width: 100%; height: 100%; object-fit: cover; }
+/* 封面悬浮微缩放：卡片浮起时图在里面缓缓推近，媒体库最出效果的一处动效。
+   只给 cover 裁切的视频封面开——图片磁贴是 contain 完整显示，缩放会裁边 */
+.media-thumbnail { width: 100%; height: 100%; object-fit: cover; transition: transform .32s ease; }
+.media-card:hover .media-thumbnail, .media-card:focus-within .media-thumbnail { transform: scale(1.035); }
 /* 图片磁贴完整显示不裁切：正方形格子下竖图/横图两侧留边 */
 .image-preview .media-thumbnail { object-fit: contain; }
 .media-play { width: 48px; height: 48px; border: 1px solid #ffffff28; border-radius: 50%; display: grid; place-items: center; color: #c4d1e7; background: #ffffff07; transition: background .18s, color .18s; }
 .media-card:hover .media-play { background: #788cff; color: white; }
-.media-badge { position: absolute; font-size: 11px; font-weight: 500; padding: 3px 7px; border-radius: 5px; background: #090f1bcc; color: #d8e3f5; font-variant-numeric: tabular-nums; }
+.media-badge { position: absolute; font-size: 11px; font-weight: 500; padding: 3px 7px; border-radius: 6px; background: #090f1bcc; color: #d8e3f5; font-variant-numeric: tabular-nums; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
 .media-remove { opacity: 0; transition: opacity .15s; }
 .media-card:hover .media-remove, .media-card:focus-within .media-remove { opacity: 1; }
 @media (hover: none) { .media-remove { opacity: 1; } }
@@ -103,22 +122,24 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 }
 .media-context-menu button:hover { background: #788cff33; }
 
-/* 视频库 / 图片库切换 */
+/* 视频库 / 图片库切换：选中页签用主按钮同款渐变，语言统一 */
 .media-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #182231b3; border: 1px solid #ffffff10; }
 .media-tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
   padding: 6px 8px; border-radius: 9px; font-size: 13px; color: #9baac0;
-  background: none; border: 0; transition: background .15s, color .15s;
+  background: none; border: 0; transition: background .15s, color .15s, box-shadow .15s;
 }
 .media-tab:hover { color: #e6ecf5; background: #ffffff0d; }
-.media-tab-active, .media-tab-active:hover { background: #5268dc; color: #fff; }
+.media-tab-active, .media-tab-active:hover { background: linear-gradient(135deg, #6276e8, #4659c9); color: #fff; box-shadow: 0 4px 14px -6px #4356bda6, inset 0 1px 0 #ffffff2e; }
 .media-tab-count { font-size: 11px; opacity: .75; font-variant-numeric: tabular-nums; }
 
 /* 图片磁贴：正方形密集排布，缩略图缺失时直接引用原图 */
 .image-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; padding: 3px 3px 20px; }
-.image-card { position: relative; min-width: 0; overflow: hidden; border-radius: 12px; border: 1px solid #ffffff0c; background: #151f2e; transition: border-color .18s, background .18s; }
-.image-card:hover, .image-card:focus-within { border-color: #788cff80; background: #1b293d; }
-.image-preview { aspect-ratio: 1/1; position: relative; display: flex; align-items: center; justify-content: center; background: #0f1723; overflow: hidden; }
+.image-card { position: relative; min-width: 0; overflow: hidden; border-radius: 14px; border: 1px solid #ffffff0c; background: #151f2e; transition: border-color .18s, background .18s, transform .18s, box-shadow .18s; }
+/* 与视频卡同一套悬浮表现，两库切来切去手感一致 */
+.image-card:hover, .image-card:focus-within { border-color: #788cff80; background: #1b293d; transform: translateY(-1px); box-shadow: 0 10px 26px -6px #00000073, 0 0 0 1px #788cff1f; }
+/* 图底加一层同族微光，与视频卡占位底呼应 */
+.image-preview { aspect-ratio: 1/1; position: relative; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at 75% 15%, #4b609740, transparent 65%), #0f1723; overflow: hidden; }
 .image-duplicate { border-color: #991b1baa; }
 .image-animated { border-color: #7c3aedcc; }
 
@@ -162,17 +183,23 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 .toolbar-chip {
   border-radius: 999px; padding: 4px 11px; font-size: 12px;
   border: 1px solid #ffffff14; background: #ffffff08; color: #b9c6da;
-  transition: background .15s, color .15s, border-color .15s;
+  transition: background .15s, color .15s, border-color .15s, box-shadow .15s;
 }
 .toolbar-chip:hover { background: #ffffff12; color: #e6ecf5; }
-.toolbar-chip[aria-pressed="true"] { background: #5268dc; border-color: #5268dc; color: #fff; }
+.toolbar-chip[aria-pressed="true"] { background: linear-gradient(135deg, #6276e8, #4659c9); border-color: transparent; color: #fff; box-shadow: 0 4px 14px -6px #4356bda6, inset 0 1px 0 #ffffff2e; }
 .toolbar-chip:disabled { opacity: .5; }
 .toolbar-spacer { flex: 1 1 auto; }
 
-/* 自动重扫进度 */
+/* 自动重扫进度：渐变条 + 流光，跑起来能看出"在动" */
 .rescan-progress { display: flex; flex-direction: column; gap: 6px; margin-top: -2px; }
 .rescan-progress-track { height: 4px; border-radius: 999px; background: #ffffff14; overflow: hidden; }
-.rescan-progress-bar { height: 100%; border-radius: 999px; background: #5268dc; transition: width .3s ease; }
+.rescan-progress-bar { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #5268dc, #788cff); transition: width .3s ease; position: relative; overflow: hidden; }
+.rescan-progress-bar::after { content: ""; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 30%, #ffffff59 50%, transparent 70%); animation: progress-shimmer 1.4s linear infinite; }
+@keyframes progress-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* Toast 入场：从右下角轻轻升起，比直接出现有精神 */
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px) scale(.97); } to { opacity: 1; transform: none; } }
+.toast-item { animation: toast-in .22s ease-out; }
 
 /* 内置播放器 */
 .player-overlay { background: rgba(4, 7, 13, .94); }

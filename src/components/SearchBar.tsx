@@ -33,7 +33,7 @@ export function SearchBar({ value, onChange, total, title, unit, measure = "个"
     <header className="flex flex-col gap-5 shrink-0">
       <div className="flex items-end justify-between gap-3">
         <div><h2 className="library-heading">{title}</h2></div>
-        <span className="text-gray-400 text-xs rounded-full border border-white/10 px-3 py-1.5 tabular-nums" title={totalDuration ? "当前列表 · 总时长 · 总大小" : "当前列表 · 总大小"}>
+        <span className="stats-pill tabular-nums" title={totalDuration ? "当前列表 · 总时长 · 总大小" : "当前列表 · 总大小"}>
           {total.toLocaleString()} {measure}{unit}
           {totalDuration ? <> · {formatDuration(totalDuration)}</> : null}
           {totalSize > 0 ? <> · {formatFileSize(totalSize)}</> : null}

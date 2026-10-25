@@ -139,8 +139,8 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
           <span className="media-badge bottom-3 right-3">{formatDuration(video.duration)}</span>
           {short && !fake && <span className="media-badge bottom-3 left-3 short-badge">{video.duration !== null && video.duration < 1 ? "0 秒 · 可转图片" : "静图 · 可转图片"}</span>}
           {progressPct > 0 && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white/10">
-              <div className="h-full bg-blue-500" style={{ width: `${progressPct}%` }} />
+            <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-black/45">
+              <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-300" style={{ width: `${progressPct}%` }} />
             </div>
           )}
         </div>

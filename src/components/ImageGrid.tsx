@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Image } from "../types";
 import { ImageCard } from "./ImageCard";
+import { EmptyState } from "./EmptyState";
 import { justifiedRows, justifiedWindow, cardAspect, CARD_TEXT_H } from "../justifiedLayout";
 import { useRafScrollTop } from "../hooks/useRafScrollTop";
 
@@ -146,22 +147,22 @@ export function ImageGrid({ images, duplicateIds, animatedIds, onFindSimilar, se
 
   if (images.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-gray-500">
-        <div className="text-center">
-          <div className="mx-auto mb-5 w-16 h-16 rounded-2xl border border-white/10 bg-gray-800 grid place-items-center text-blue-500">
-            <svg width="28" height="28" viewBox="0 0 24 24" stroke="currentColor" fill="none" strokeWidth="1.5" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="3" />
-              <circle cx="8.5" cy="9.5" r="1.5" />
-              <path d="m4 17 5-5 4 4 3-2 4 4" />
-            </svg>
-          </div>
-          <p className="text-lg text-gray-200">这里还没有图片</p>
-          <p className="text-sm mt-2 mb-4">扫描图片目录加入图片库，或调整搜索条件。</p>
-          <button onClick={onScanDirectory} className="bg-blue-600 hover:bg-blue-500 py-2 px-4 rounded-xl text-sm font-medium">
+      <EmptyState
+        icon={
+          <svg width="30" height="30" viewBox="0 0 24 24" stroke="currentColor" fill="none" strokeWidth="1.5" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="3" />
+            <circle cx="8.5" cy="9.5" r="1.5" />
+            <path d="m4 17 5-5 4 4 3-2 4 4" />
+          </svg>
+        }
+        title="这里还没有图片"
+        hint="扫描图片目录加入图片库，或调整搜索条件。"
+        action={
+          <button onClick={onScanDirectory} className="btn-primary px-4 py-2 text-sm">
             扫描图片目录
           </button>
-        </div>
-      </div>
+        }
+      />
     );
   }
 
