@@ -58,6 +58,18 @@ function sizeText(item: BotDlItem): string {
   return formatDlSize(item.size);
 }
 
+/** 接收时间串：今天收到的只显 HH:MM 省宽度；跨日的（昨日消息今天复检转死等）补 MM-DD。
+ * 转发明细行后端已折算成父转发收到的时刻，不是内层消息的原始发送时间 */
+function recvText(item: BotDlItem): string {
+  if (item.ts == null) return "-";
+  const d = new Date(item.ts * 1000);
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? hm : `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+}
+
 /** 状态筛选条上的胶囊按钮；选中态高亮，角标是该状态的当日条数 */
 function FilterChip({
   active,
@@ -105,6 +117,7 @@ const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
         {isDetail && <span className="text-gray-600 mr-1">└</span>}
         {label}
       </td>
+      <td className="py-1.5 px-2 whitespace-nowrap tabular-nums text-gray-500">{recvText(item)}</td>
       <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{sizeText(item)}</td>
       <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
       <td className="py-1.5 px-2">
@@ -201,6 +214,7 @@ export function QqBotPanel({
                 <thead className="sticky top-0 bg-[#141d2b] text-gray-400">
                   <tr>
                     <th className="text-left font-medium py-1.5 px-2">内容</th>
+                    <th className="text-left font-medium py-1.5 px-2">接收时间</th>
                     <th className="text-right font-medium py-1.5 px-2">大小</th>
                     <th className="text-left font-medium py-1.5 px-2">类型</th>
                     <th className="text-left font-medium py-1.5 px-2">状态</th>
