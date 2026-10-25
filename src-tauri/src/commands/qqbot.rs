@@ -742,14 +742,14 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     }
 
     // 三支可能重复命中同一行（今天收到的、今天死的），按 id 去重。
-    // 排序键取 COALESCE(parent, id)：同一转发的明细聚在父行下面连成一块，
-    // 块内按 id 倒序（插入顺序，即转发里的先后）
+    // 排序键取 COALESCE(parent, id) 倒序（新消息在前），块内按 id 正序：
+    // 父行 id 最小排最前，转发明细跟在父行下面、按转发里的先后铺开
     let mut seen = std::collections::HashSet::with_capacity(out.len());
     out.retain(|it| seen.insert(it.id));
     out.sort_by(|a, b| {
         let ka = a.parent.unwrap_or(a.id);
         let kb = b.parent.unwrap_or(b.id);
-        kb.cmp(&ka).then(b.id.cmp(&a.id))
+        kb.cmp(&ka).then(a.id.cmp(&b.id))
     });
     Ok(out)
 }
@@ -1068,10 +1068,10 @@ mod tests {
         .unwrap();
         let items = read_today_items(&conn).unwrap();
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // 排序键 COALESCE(parent,id) 倒序：8、5 各一组，转发 2 的明细（9/3）聚在它下面，
-        // 再下面 1。10/11 是昨天那批发来的转发与它的明细，今天没动静就不出现；
-        // 4 是纯文本直发；8 两支都命中，去重后只出现一次
-        assert_eq!(ids, vec![8, 5, 9, 3, 2, 1]);
+        // 排序键 COALESCE(parent,id) 倒序、块内 id 正序：8、5 各一组，转发 2 置顶、
+        // 明细（3/9）跟在它下面，再下面 1。10/11 是昨天那批发来的转发与它的明细，
+        // 今天没动静就不出现；4 是纯文本直发；8 两支都命中，去重后只出现一次
+        assert_eq!(ids, vec![8, 5, 2, 3, 9, 1]);
         let detail = items.iter().find(|it| it.id == 3).unwrap();
         assert_eq!(detail.parent, Some(2));
         assert_eq!(detail.sender.as_deref(), Some("小明"));
