@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef } from "react";
 import type { Video } from "../types";
 import { VideoCard } from "./VideoCard";
+import { EmptyState } from "./EmptyState";
 import { useGridWindow } from "../hooks/useGridWindow";
 
 interface VideoGridProps {
@@ -51,13 +52,16 @@ export function VideoGrid({ videos, progressMap, missingIds, fakeIds, shortIds, 
 
   if (videos.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-gray-500">
-        <div className="text-center">
-          <div className="mx-auto mb-5 w-16 h-16 rounded-2xl border border-white/10 bg-gray-800 grid place-items-center text-blue-500"><svg width="28" height="28" viewBox="0 0 24 24" stroke="currentColor" fill="none" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m10 9 5 3-5 3z"/></svg></div>
-          <p className="text-lg text-gray-200">这里还没有视频</p>
-          <p className="text-sm mt-2">扫描目录添加视频，或调整搜索条件。</p>
-        </div>
-      </div>
+      <EmptyState
+        icon={
+          <svg width="30" height="30" viewBox="0 0 24 24" stroke="currentColor" fill="none" strokeWidth="1.5" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="3" />
+            <path d="m10 9 5 3-5 3z" />
+          </svg>
+        }
+        title="这里还没有视频"
+        hint="扫描目录添加视频，或调整搜索条件。"
+      />
     );
   }
 
