@@ -70,6 +70,7 @@ pub fn run() {
             }
             // 扫描根目录监视：文件变化防抖后自动增量扫描（失败不影响手动扫描）
             watcher::spawn(app.handle().clone());
+            watcher::spawn_bot_db(app.handle().clone());
             // 后台清一轮孤儿缩略图：两张表都查无此 id 的缓存文件（失败不影响启动）
             let cleanup_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {

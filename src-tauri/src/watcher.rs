@@ -8,7 +8,7 @@
 //! - 扫描失败（磁盘拔了等）静默跳过：下次事件再来时再试，不产生错误弹窗
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -241,5 +241,83 @@ fn refresh_watch_list(
     for (root, kind) in removed {
         let _ = watcher.unwatch(&root);
         w.remove(&(root, kind));
+    }
+}
+
+/// bot.db 变化监视：QQ 面板下载列表的实时推送源。
+/// bot 每次落库（明细行预登记/进度/终态）都写 bot.db(-wal)，这里对数据目录做
+/// 非递归监视，防抖后发一次 bot-dl-changed，前端拉一次轻量快照，叠在 10s
+/// 全量轮询之上——进程/端口状态仍靠轮询，这里只管下载列表。
+/// 建不起来（notify 不可用/目录缺失）就静默不推，10s 轮询兜底。
+const BOT_DB_DEBOUNCE: Duration = Duration::from_millis(500);
+
+pub(crate) fn spawn_bot_db(app: tauri::AppHandle) {
+    let db_path = {
+        let state = app.state::<AppState>();
+        let settings = match crate::commands::get_settings(&state) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("bot.db 监视未启用（读设置失败，退回 10s 轮询）：{e}");
+                return;
+            }
+        };
+        crate::commands::bot_db_path(&settings.root)
+    };
+    let data_dir = db_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+    let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher = match notify::recommended_watcher(tx) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("bot.db 监视不可用（退回 10s 轮询）：{e}");
+            return;
+        }
+    };
+    if let Err(e) = watcher.watch(&data_dir, RecursiveMode::NonRecursive) {
+        eprintln!("bot.db 目录监视建不起来（退回 10s 轮询）：{e}");
+        return;
+    }
+    if let Err(e) = std::thread::Builder::new()
+        .name("botdb-watcher".into())
+        .spawn(move || bot_db_loop(app, rx, db_path))
+    {
+        eprintln!("bot.db 监视线程起不来（退回 10s 轮询）：{e}");
+    }
+}
+
+/// 命中 bot.db*（含 -wal/-journal）才防抖发事件；config/log 等其余文件忽略。
+fn bot_db_loop(
+    app: tauri::AppHandle,
+    rx: Receiver<notify::Result<notify::Event>>,
+    db_path: PathBuf,
+) {
+    loop {
+        let first = match rx.recv() {
+            Ok(ev) => ev,
+            Err(_) => return, // watcher 已销毁，应用在退出
+        };
+        if !is_bot_db(&first, &db_path) {
+            continue;
+        }
+        // 防抖：窗口内的连续写（WAL 刷盘常成串）吸收成一次事件
+        while rx.recv_timeout(BOT_DB_DEBOUNCE).is_ok() {}
+        if app.emit("bot-dl-changed", ()).is_err() {
+            return; // 应用已退出
+        }
+    }
+}
+
+fn is_bot_db(ev: &notify::Result<notify::Event>, db_path: &Path) -> bool {
+    match ev {
+        Ok(event) => event.paths.iter().any(|p| {
+            p == db_path
+                || p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with("bot.db"))
+                    .unwrap_or(false)
+        }),
+        Err(_) => false,
     }
 }

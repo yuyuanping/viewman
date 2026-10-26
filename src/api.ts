@@ -120,7 +120,7 @@ export const api = {
   saveBotSettings: (root: string, python: string) =>
     invoke<void>("save_bot_settings", { root, python }),
   getBotStatus: () => invoke<BotStatus>("get_bot_status"),
-  /** 轻量快照：只读 bot.db，下载活跃期 2 秒一次让列表近实时 */
+  /** 轻量快照：只读 bot.db，bot-dl-changed 推送防抖后拉取，让列表近实时 */
   getBotDlSnapshot: () => invoke<BotDlSnapshot>("get_bot_dl_snapshot"),
   startBot: () => invoke<void>("start_bot"),
   /** 只停 bot.py 与 riskwatch，QQ/NapCat 不动；返回逐条结果说明 */
