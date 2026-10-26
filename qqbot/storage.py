@@ -283,7 +283,7 @@ class Storage:
         """流式下载 url 到 tmp：1MB 块边写边算 md5，内存占用与文件大小无关。
         失败重试 1 次（并清掉残件）；成功返回 (md5hex, bytes, Content-Type)。
         on_progress 在每块落盘后回报 (已传字节, Content-Length 或 None)：
-        累计 ≥256KB 或距上次 ≥0.3 秒才触发一次（面板 1 秒轮询，更密没有意义），
+        累计 ≥256KB 或距上次 ≥0.3 秒才触发一次（面板走 bot-dl-changed 事件推送，更密没有意义），
         回调异常只记日志，绝不拖垮下载本身。"""
         if kind == "video":
             timeout = aiohttp.ClientTimeout(

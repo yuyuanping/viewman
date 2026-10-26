@@ -1,6 +1,6 @@
 /** QQ Bot 下载快照的变化判定（纯函数）。
  *
- * useBotStatus 在下载活跃期每 2 秒拉一次轻量快照。status 是 App 的 state，
+ * useBotStatus 收到 bot-dl-changed 推送（200ms 防抖合并）后拉一次轻量快照。status 是 App 的 state，
  * 每轮都换新对象会把侧栏、工具栏、视频网格整棵树重渲染一遍；所以只有
  * 数字真变了才更新引用。
  */

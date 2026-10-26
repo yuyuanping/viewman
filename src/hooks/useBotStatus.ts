@@ -2,26 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { BotStatus } from "../types";
 import { dlSnapshotChanged } from "../botDlSnapshot";
-
+import { useTauriEvent } from "./useTauriEvent";
 /** 全量轮询间隔：进程/端口探测（PowerShell 冷启动约 1 秒）不宜更快 */
 const POLL_MS = 10000;
-/** 轻量快照间隔：下载活跃期只读 bot.db（毫秒级），列表近实时。
- * 1 秒一轮是为了下载进度字节跳动看起来是连续的（bot 侧也按 256KB/0.3s 节流写回） */
-const FAST_MS = 1000;
-
+/** 事件防抖：bot 落库很碎（明细行预登记/进度/终态连着来），200ms 窗口合并成一次拉取 */
+const EVENT_DEBOUNCE_MS = 200;
 /**
- * 常驻轮询 QQ Bot 状态。挂在 App 上而非面板里，侧栏 tab 徽标在任何标签页下都保持实时，
- * 面板切进来时直接读缓存，不用等第一次请求。
- *
- * 下载列表要近实时，但全量状态里的进程探测（PowerShell）与端口探测（netstat）扛不住
- * 高频，所以分两档：有媒体在排队/下载（pending+busy>0）时每 2 秒拉一次轻量快照
- * （只读 bot.db 的积压计数、汇总与当日列表），否则回到 10 秒全量轮询。
- */
+* 常驻轮询 QQ Bot 状态。挂在 App 上而非面板里，侧栏 tab 徽标在任何标签页下都保持实时，
+* 面板切进来时直接读缓存，不用等第一次请求。
+*
+* 下载列表的实时性走推送：bot 每次落库，Rust 侧监视 bot.db 防抖后发 bot-dl-changed，
+* 这里合并 200ms 再拉一次轻量快照（只读 bot.db，毫秒级）。10 秒全量轮询保留作兜底，
+* 负责进程/端口状态与 db_note——这些探测撑不起高频，也不需要。
+*/
 export function useBotStatus() {
   const [status, setStatus] = useState<BotStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
-
   const refresh = useCallback(async () => {
     try {
       const snap = await api.getBotStatus();
@@ -34,28 +31,27 @@ export function useBotStatus() {
       setError(String(e));
     }
   }, []);
-
-  // 下载活跃期（有 pending/busy 媒体）切 2 秒轻量快照；快照失败静默，
-  // 下一个全量轮询会带出 db_note/错误。依赖 active：空闲↔活跃切换时重排定时器
-  const active = status != null && status.dl.busy + status.dl.pending > 0;
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(async () => {
+  // bot-dl-changed 推送 -> 200ms 防抖合并 -> 轻量快照。窗口内的连续事件只排一次
+  // 拉取（不延长窗口）；status 是 App 的 state，只有快照数字真变了才换引用，
+  // 免得侧栏、工具栏、视频网格整棵树跟着空转重渲染
+  const debounceRef = useRef<number | null>(null);
+  useTauriEvent("bot-dl-changed", () => {
+    if (!mounted.current || debounceRef.current != null) return;
+    debounceRef.current = window.setTimeout(async () => {
+      debounceRef.current = null;
       try {
         const snap = await api.getBotDlSnapshot();
         if (!mounted.current) return;
-        // 队列积压没变就不换引用：status 是 App 的 state，每 2 秒换新对象会把
-        // 侧栏、工具栏、视频网格整棵树重渲染一遍（用户在别的标签页也躲不掉）
         setStatus((prev) =>
-          prev && dlSnapshotChanged(prev, snap) ? { ...prev, dl: snap.dl, summary: snap.summary, today_items: snap.today_items } : prev,
+          prev && dlSnapshotChanged(prev, snap)
+            ? { ...prev, dl: snap.dl, summary: snap.summary, today_items: snap.today_items }
+            : prev,
         );
       } catch {
         // 轻量快照失败不打扰用户（全量轮询负责报错）
       }
-    }, FAST_MS);
-    return () => clearInterval(timer);
-  }, [active]);
-
+    }, EVENT_DEBOUNCE_MS);
+  });
   useEffect(() => {
     mounted.current = true;
     void refresh();
@@ -63,8 +59,11 @@ export function useBotStatus() {
     return () => {
       mounted.current = false;
       clearInterval(timer);
+      if (debounceRef.current != null) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
     };
   }, [refresh]);
-
   return { status, error, refresh };
 }

@@ -189,7 +189,7 @@ pub(crate) fn port_of(url: &str, fallback: u16) -> u16 {
         .unwrap_or(fallback)
 }
 
-fn bot_db_path(root: &str) -> std::path::PathBuf {
+pub(crate) fn bot_db_path(root: &str) -> std::path::PathBuf {
     data_dir(root).join("bot.db")
 }
 
