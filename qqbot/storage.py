@@ -36,6 +36,10 @@ _VALID_FILE = _VALID_IMG + _VALID_VID + (
 
 # 各类下载的总超时（秒）
 _TIMEOUT_BY_KIND = {"image": 15, "video": 30, "file": 60}
+_CONNECT_TIMEOUT = 15
+# video 不设总时限：只要还在来数据就继续下（大视频/慢 CDN 常被 30s 总时限误杀）。
+# 改防停滞：sock_read 连续这么久一个字节都没到才判超时。
+_STALL_READ_TIMEOUT = 60
 
 
 def _ext_from_ct(ct: str, url: str, kind: str) -> str:
@@ -281,7 +285,12 @@ class Storage:
         on_progress 在每块落盘后回报 (已传字节, Content-Length 或 None)：
         累计 ≥256KB 或距上次 ≥0.3 秒才触发一次（面板 1 秒轮询，更密没有意义），
         回调异常只记日志，绝不拖垮下载本身。"""
-        timeout = aiohttp.ClientTimeout(total=_TIMEOUT_BY_KIND.get(kind, 30))
+        if kind == "video":
+            timeout = aiohttp.ClientTimeout(
+                total=None, sock_connect=_CONNECT_TIMEOUT,
+                sock_read=_STALL_READ_TIMEOUT)
+        else:
+            timeout = aiohttp.ClientTimeout(total=_TIMEOUT_BY_KIND.get(kind, 30))
         for attempt in (1, 2):
             try:
                 digest = hashlib.md5()
@@ -306,8 +315,8 @@ class Storage:
                                     logger.debug("[PROGRESS] 写回失败 kind=%s: %s", kind, e)
                 return digest.hexdigest(), size, ct
             except Exception as e:
-                logger.error("[ERROR] download %s attempt %d/2 failed: %s",
-                             kind, attempt, e)
+                logger.error("[ERROR] download %s attempt %d/2 failed: %s: %s",
+                             kind, attempt, type(e).__name__, e)
         tmp.unlink(missing_ok=True)
         return None
 
