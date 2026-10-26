@@ -1,5 +1,7 @@
-"""合并转发（asyncio）：递归展开（最多 3 层），媒体单次下载，返回格式化文本。"""
+"""合并转发（asyncio）：递归展开（最多 3 层），媒体整块并发下载，返回格式化文本。"""
+import asyncio
 import json
+import logging
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -7,6 +9,8 @@ from html import unescape
 from pathlib import Path
 
 
+
+logger = logging.getLogger("saver.forward")
 
 MAX_DEPTH = 3
 
@@ -134,121 +138,108 @@ async def _save_media_segment(data: dict, kind: str, storage,
 async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                       get_file_url: Callable, scope: str = "private",
                       depth: int = 0, stats: dict | None = None,
-                      report=None, on_progress=None) -> str:
-    """递归渲染转发消息。图片/视频/文件在此层下载一次，避免重复。
+                      report=None, on_progress_row=None) -> str:
+    """递归渲染转发消息。媒体在此层下载一次，避免重复。
     scope 决定媒体存入 private/ 还是 group/。
     stats 传入 dict 时累计 {"saved": 成功落盘数, "dedup": 其中复用现有文件的数}。
     report 传入 async fn 时逐段上报明细，条目字段：
-      kind: text/image/video/file/forward
-      sender/ts: 该段所在内层消息的发送者与时间
-      text: text/forward 的正文；label: 媒体文件名或占位
-
-      dedup/md5/path/bytes: ok=True 时媒体结果；src/ref/file: 供失败重试用"""
+    kind: text/image/video/file/forward
+    sender/ts: 该段所在内层消息的发送者与时间
+    text: text/forward 的正文；label: 媒体文件名或占位
+    dedup/md5/path/bytes: ok=True 时媒体结果；src/ref/file: 供失败重试用
+    report 另有两段式约定（并发下载用）：先 report({"queued": True}) 预登记
+    一行 dl=pending 并回传行 id——解析完立刻把整块明细亮上面板；每段下载
+    完成后 report 带 row_id 把该行就地收敛成终态。on_progress_row(mid,
+    done, total) 在每段下载中实时回报，聚合进度由调用方按 mid 分桶汇总。
+    """
     if depth > MAX_DEPTH or not msgs:
         return ""
     prefix = "  " * (depth + 1)
-    lines = []
-    for m in msgs:
+    _PH = {"image": "[图片]", "video": "[视频]", "file": "[文件]",
+           "record": "[语音]", "mface": "[表情]"}
+
+    async def _media_job(t: str, d: dict, nickname: str, inner_ts: int) -> str:
+        """单个媒体段：预登记 pending 行，下载，收敛终态，返回 md 占位文本。"""
+        kind = {"mface": "image", "record": "file"}.get(t, t)
+        if t in ("file", "record"):
+            src = d.get("file_id") or d.get("url") or ""
+            ref = d.get("file_id") or ""
+            vtag = "msg"
+            name = d.get("file") or (f"voice_{ref[:8] or vtag}.mp3"
+                                                 if t == "record" else "file")
+        else:
+            src = d.get("url", "")
+            ref = d.get("file_id") or ("" if t == "mface" else d.get("file") or "")
+            name = d.get("file") or ""
+        if t == "mface":
+            fail_label = d.get("emoji_id") or "表情"
+        elif t == "record":
+            fail_label = name
+        else:
+            fail_label = name or _PH[t].strip("[]")
+        row_id = None
+        if report:
+            row_id = await report({"kind": kind, "sender": nickname,
+                                   "ts": inner_ts, "src": src, "ref": ref,
+                                   "file": name, "queued": True})
+        if row_id is not None and report:
+            await report({"row_id": row_id, "start": True})
+        prog = None
+        if on_progress_row is not None and row_id is not None:
+            async def prog(done: int, total: int | None) -> None:
+                await on_progress_row(row_id, done, total)
+        if t in ("file", "record"):
+            r = await storage.save_file(src, name, get_file_url, scope,
+                                        on_progress=prog)
+        else:
+            r = await _save_media_segment(d, kind, storage, get_file_url,
+                                          scope, on_progress=prog)
+        if r and stats is not None:
+            stats["saved"] = stats.get("saved", 0) + 1
+            if r.get("dedup"):
+                stats["dedup"] = stats.get("dedup", 0) + 1
+        if report:
+            done_item = {"kind": kind, "sender": nickname, "ts": inner_ts,
+                         "src": src, "ref": ref, "file": name,
+                         "ok": r is not None,
+                         "dedup": (r or {}).get("dedup"),
+                         "md5": (r or {}).get("md5"),
+                         "path": (r or {}).get("path"),
+                         "bytes": (r or {}).get("bytes"),
+                         "label": Path(r["path"]).name if r else fail_label}
+            if row_id is not None:
+                done_item["row_id"] = row_id
+            await report(done_item)
+        return r["placeholder"] if r else _PH[t]
+
+    async def _expand_seg(d: dict, nickname: str, inner_ts: int) -> str:
+        nested = await _expand(d, storage, expand_forward, get_file_url,
+                               scope, depth, stats, report, nickname,
+                               inner_ts, on_progress_row)
+        return nested or "[合并转发]"
+
+    meta = []
+    parts_of = []
+    jobs = []
+    for mi, m in enumerate(msgs):
         sender = m.get("sender", {})
         nickname = sender.get("nickname", str(sender.get("user_id", "?")))
         inner_ts = m.get("time", 0)
-        ts = datetime.fromtimestamp(inner_ts).strftime("%H:%M:%S")
+        ts_str = datetime.fromtimestamp(inner_ts).strftime("%H:%M:%S")
+        meta.append((prefix, nickname, ts_str))
         parts = []
+        parts_of.append(parts)
         for seg in m.get("message", []):
             t = seg.get("type")
             d = seg.get("data", {})
-            if t == "image":
-                r = await _save_media_segment(d, "image", storage,
-                                              get_file_url, scope, on_progress)
-                if r and stats is not None:
-                    stats["saved"] = stats.get("saved", 0) + 1
-                    if r.get("dedup"):
-                        stats["dedup"] = stats.get("dedup", 0) + 1
-                if report:
-                    await report({"kind": "image", "sender": nickname, "ts": inner_ts,
-                                  "src": d.get("url", ""), "ref": d.get("file_id") or d.get("file") or "",
-                                  "file": d.get("file"),
-                                  "ok": r is not None,
-                                  "dedup": (r or {}).get("dedup"),
-                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
-                                  "bytes": (r or {}).get("bytes"),
-                                  "label": Path(r["path"]).name if r else (d.get("file") or "图片")})
-                parts.append(r["placeholder"] if r else "[图片]")
-            elif t == "video":
-                r = await _save_media_segment(d, "video", storage,
-                                              get_file_url, scope, on_progress)
-                if r and stats is not None:
-                    stats["saved"] = stats.get("saved", 0) + 1
-                    if r.get("dedup"):
-                        stats["dedup"] = stats.get("dedup", 0) + 1
-                if report:
-                    await report({"kind": "video", "sender": nickname, "ts": inner_ts,
-                                  "src": d.get("url", ""), "ref": d.get("file_id") or d.get("file") or "",
-                                  "file": d.get("file"),
-                                  "ok": r is not None,
-                                  "dedup": (r or {}).get("dedup"),
-                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
-                                  "bytes": (r or {}).get("bytes"),
-                                  "label": Path(r["path"]).name if r else (d.get("file") or "视频")})
-                parts.append(r["placeholder"] if r else "[视频]")
-            elif t == "file":
-                fid = d.get("file_id") or d.get("url") or ""
-                r = await storage.save_file(fid, d.get("file", "file"),
-                                            get_file_url, scope,
-                                            on_progress=on_progress)
-                if r and stats is not None:
-                    stats["saved"] = stats.get("saved", 0) + 1
-                    if r.get("dedup"):
-                        stats["dedup"] = stats.get("dedup", 0) + 1
-                if report:
-                    await report({"kind": "file", "sender": nickname, "ts": inner_ts,
-                                  "src": fid, "ref": d.get("file_id") or "",
-                                  "file": d.get("file"),
-                                  "ok": r is not None,
-                                  "dedup": (r or {}).get("dedup"),
-                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
-                                  "bytes": (r or {}).get("bytes"),
-                                  "label": d.get("file") or "文件"})
-                parts.append(r["placeholder"] if r else "[文件]")
-            elif t == "record":
-                fid = d.get("file_id") or d.get("url") or ""
-                name = d.get("file") or f"voice_{fid[:8] or 'msg'}.mp3"
-                r = await storage.save_file(fid, name, get_file_url, scope,
-                                            on_progress=on_progress)
-                if r and stats is not None:
-                    stats["saved"] = stats.get("saved", 0) + 1
-                    if r.get("dedup"):
-                        stats["dedup"] = stats.get("dedup", 0) + 1
-                if report:
-                    await report({"kind": "file", "sender": nickname, "ts": inner_ts,
-                                  "src": fid, "ref": d.get("file_id") or "",
-                                  "file": name, "ok": r is not None,
-                                  "dedup": (r or {}).get("dedup"),
-                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
-                                  "bytes": (r or {}).get("bytes"), "label": name})
-                parts.append(r["placeholder"] if r else "[语音]")
-            elif t == "mface":
-                r = await _save_media_segment(d, "image", storage,
-                                              get_file_url, scope, on_progress)
-                if r and stats is not None:
-                    stats["saved"] = stats.get("saved", 0) + 1
-                    if r.get("dedup"):
-                        stats["dedup"] = stats.get("dedup", 0) + 1
-                if report:
-                    await report({"kind": "image", "sender": nickname, "ts": inner_ts,
-                                  "src": d.get("url", ""), "ref": d.get("file_id") or "",
-                                  "file": d.get("file") or "",
-                                  "ok": r is not None,
-                                  "dedup": (r or {}).get("dedup"),
-                                  "md5": (r or {}).get("md5"), "path": (r or {}).get("path"),
-                                  "bytes": (r or {}).get("bytes"),
-                                  "label": Path(r["path"]).name if r else (d.get("emoji_id") or "表情")})
-                parts.append(r["placeholder"] if r else "[表情]")
+            if t in _PH:
+                parts.append(_PH[t])
+                jobs.append((mi, len(parts) - 1,
+                    _media_job(t, d, nickname, inner_ts)))
             elif t == "forward":
-                nested = await _expand(seg.get("data", {}), storage, expand_forward,
-                                       get_file_url, scope, depth, stats, report,
-                                       nickname, inner_ts, on_progress)
-                parts.append(nested or "[合并转发]")
+                parts.append("[合并转发]")
+                jobs.append((mi, len(parts) - 1,
+                    _expand_seg(d, nickname, inner_ts)))
             else:
                 if report and t == "text":
                     txt = d.get("text", "")
@@ -256,14 +247,26 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                         await report({"kind": "text", "sender": nickname,
                                       "ts": inner_ts, "text": txt})
                 parts.append(seg_text(seg))
-        lines.append(f"{prefix}{nickname}({ts}): {''.join(parts)}")
-    return "\n".join(lines)
-
+    if jobs:
+        results = await asyncio.gather(*(j for _, _, j in jobs),
+                                       return_exceptions=True)
+        for (mi, slot, _), res in zip(jobs, results):
+            if isinstance(res, BaseException):
+                logger.warning("[FWD SEG] 段任务异常（预登记行走重试管线）: "
+                                               "%s: %s", type(res).__name__, res)
+                continue
+            parts_of[mi][slot] = res
+    lines = []
+    for i, (pfx, nick, ts_str) in enumerate(meta):
+        joined = "".join(parts_of[i])
+        lines.append(f"{pfx}{nick}({ts_str}): {joined}")
+    nl = chr(10)
+    return nl.join(lines)
 
 async def _expand(data: dict, storage, expand_forward: Callable,
                   get_file_url: Callable, scope: str, depth: int,
                   stats: dict | None = None, report=None,
-                  sender: str = "", ts: int = 0, on_progress=None) -> str:
+                  sender: str = "", ts: int = 0, on_progress_row=None) -> str:
     nested_fid = data.get("id", "")
     if not nested_fid or depth >= MAX_DEPTH:
         return ""
@@ -271,12 +274,13 @@ async def _expand(data: dict, storage, expand_forward: Callable,
     if content:
         nested_text = await render_node(content, storage, expand_forward,
                                         get_file_url, scope, depth + 1, stats,
-                                        report, on_progress)
+                                        report, on_progress_row=on_progress_row)
     else:
         nested_data = await expand_forward(nested_fid)
         nested_text = await render_node(
-            nested_data.get("messages", []), storage, expand_forward,
-            get_file_url, scope, depth + 1, stats, report, on_progress
+                nested_data.get("messages", []), storage, expand_forward,
+                get_file_url, scope, depth + 1, stats, report,
+                on_progress_row=on_progress_row
         ) if nested_data else ""
     if report:
         first = (nested_text or "[合并转发]").splitlines()[0][:80]
@@ -285,5 +289,7 @@ async def _expand(data: dict, storage, expand_forward: Callable,
     if not nested_text:
         return "[合并转发](空)"
     indent = "  " * (depth + 1)
-    return f"[合并转发↓]\n{nested_text}\n{indent}[合并转发↑]"
+    nl = chr(10)
+    return f"[合并转发↓]{nl}{nested_text}{nl}{indent}[合并转发↑]"
+
 from storage import md5_hint
