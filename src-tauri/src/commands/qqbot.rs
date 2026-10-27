@@ -882,8 +882,8 @@ pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> 
     .map_err_str()?
 }
 
-/// 启动 = wscript 无窗跑 start_hidden.vbs（参数化路径）；start.bat 自带幂等：
-/// 查 NapCat 是否活着、按命令行杀旧 bot、拉起 pythonw bot.py 与 riskwatch.py
+/// 启动 = wscript 无窗跑 start_hidden.vbs（参数化路径）；start.bat 先杀后启：
+/// 杀掉旧 bot/riskwatch/NapCat/QQ 再全新拉起（僵尸 NapCat 曾让"活着就跳过"永远跳过启动）
 #[tauri::command]
 pub fn start_bot(state: State<AppState>) -> Result<(), String> {
     let s = get_settings(&state)?;
