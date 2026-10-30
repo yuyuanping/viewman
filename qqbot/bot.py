@@ -14,6 +14,7 @@ import logging
 import logging.handlers
 import os
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -42,6 +43,33 @@ API_MIN_GAP_S = 0.3
 RECONNECT_BASE = 5       # 连上过之后断线的重连间隔（秒）
 RECONNECT_MAX = 120      # 一直连不上时的指数退避上限
 CONNECT_LOG_EVERY = 30   # 连续失败期间每 30 次才记一条，其余只计数
+
+# NapCat 僵尸自愈：BootMain/QQ 进程还在但 9501/9502 没人监听时，bot 侧只表现为
+# WS 一直连不上（TCP 被拒）——退避到 RECONNECT_MAX 也永远等不回来（2026-10-28 实测
+# 连不上近 3 小时，直到人工重启）。这里让看门循环在「连续连不上超过 NAPCAT_HEAL_AFTER_S」
+# 时，复用 start.bat 整栈重启（先杀后启，会把本 bot 一起重启）。冷却 NAPCAT_HEAL_COOLDOWN_S
+# 防止 NapCat 需扫码登录/版本不匹配等「重启也修不好」的场景陷入无限重启循环。
+NAPCAT_HEAL_AFTER_S = 180        # 连续连不上这么久 → 判定僵尸，自愈一次
+NAPCAT_HEAL_COOLDOWN_S = 45 * 60 # 两次自愈最小间隔
+
+
+def heal_due(failing_for: float, since_last_heal: float | None,
+             after_s: float = NAPCAT_HEAL_AFTER_S,
+             cooldown_s: float = NAPCAT_HEAL_COOLDOWN_S) -> bool:
+    """僵尸自愈判定（纯函数，便于单测）：本轮连不上满 after_s，且距上次自愈
+    至少隔了 cooldown（since_last_heal=None 表示还没自愈过，直接满足）。
+    冷却的作用：NapCat 要扫码/版本不匹配这类「重启也修不好」的情况，不至于
+    变成每 3 分钟重启一次的死循环。"""
+    if failing_for < after_s:
+        return False
+    return since_last_heal is None or since_last_heal >= cooldown_s
+
+
+def heal_command(root: Path) -> list[str]:
+    """自愈用的重启命令：与面板「启动」同一条路——wscript 无窗跑
+    start_hidden.vbs 带 start.bat。start.bat 先杀后启整栈（bot 自己也在
+    被杀之列），所以本进程随后会由它拉起的全新实例接替。"""
+    return ["wscript.exe", str(root / "start_hidden.vbs"), str(root / "start.bat")]
 
 # 停机补拉：连接建立/重连后拉漫游历史，把 NapCat 无订阅期间的缺口补进同一管道
 BACKFILL_ACTIVE_DAYS = 14    # 只补最近活跃过的会话
@@ -147,6 +175,13 @@ class Bot:
         self._pending: dict[str, asyncio.Future] = {}
         self._seq = 0
         self.connect_fails = 0   # 连续「连不上」次数，连上即清零
+        # 僵尸自愈用：本轮连续连不上的起始单调时刻（连上即清 None），以及上次
+        # 自愈的单调时刻（用于冷却）。都只在看门循环里读、run() 里维护起始点。
+        self.fail_since: float | None = None
+        self._last_heal: float | None = None
+        # napcat_selfheal=false 关闭僵尸自愈（默认开）：需要盯着扫码二维码时
+        # 别让看门把整栈（含二维码窗口所属的 NapCat）反复推倒重来
+        self.selfheal_on = bool(config.get("napcat_selfheal", True))
         self._tasks: set[asyncio.Task] = set()
         # 事件消费队列：单消费者保证 md 文本时序
         self.q: asyncio.Queue = asyncio.Queue()
@@ -907,6 +942,7 @@ class Bot:
                                                headers=headers, heartbeat=30) as ws:
                 self._ws = ws
                 connected = True
+                self.fail_since = None    # 连上了，本轮「连不上计时」作废
                 if self.connect_fails:
                     logger.info("[WS RECOVERED] 断连 %d 次后重新连上", self.connect_fails)
                     self.connect_fails = 0
@@ -923,6 +959,8 @@ class Bot:
                         break
         except Exception as e:
             self.connect_fails += 1
+            if self.fail_since is None:
+                self.fail_since = time.monotonic()   # 起算僵尸判定窗口
             if self.connect_fails == 1 or self.connect_fails % CONNECT_LOG_EVERY == 0:
                 logger.error("[WS ERROR] %s（连续第 %d 次连不上）", e, self.connect_fails)
         finally:
@@ -933,6 +971,40 @@ class Bot:
                 self.down_since = int(time.time())
                 logger.warning("[WS CLOSED] connection ended")
         return connected
+
+    def _maybe_heal_napcat(self) -> None:
+        """看门循环里的僵尸自愈：本轮连不上超阈值且过了冷却，就 detach 拉起
+        start.bat 整栈重启。start.bat 先杀后启会把本进程一起杀掉，新 bot 由
+        脚本重新拉起——所以这里只管点火、不等结果；napcat_selfheal=false
+        可整体关闭（比如需要扫码登录、重启会掐掉二维码窗口的场景）。"""
+        if not self.selfheal_on or self.fail_since is None:
+            return
+        now = time.monotonic()
+        since_last = None if self._last_heal is None else now - self._last_heal
+        if not heal_due(now - self.fail_since, since_last):
+            return
+        root = Path(__file__).resolve().parent
+        cmd = heal_command(root)
+        if not all(Path(p).is_file() for p in cmd[1:]):
+            logger.error("[HEAL] 自愈脚本缺失（%s）——本次运行不再尝试自愈，僵尸端口需人工重启",
+                         " / ".join(cmd[1:]))
+            self.selfheal_on = False
+            return
+        logger.warning("[HEAL] WS 已连续连不上 %.0fs，判定 NapCat 失能（进程在/端口死"
+                       "或整体没跑），复用 start.bat 整栈重启（本 bot 一并重启）",
+                       now - self.fail_since)
+        try:
+            # DETACHED：脚本开头会杀掉本进程，点火器不能跟着我们一起被带走
+            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                     if os.name == "nt" else 0)
+            subprocess.Popen(cmd, cwd=str(root), creationflags=flags,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            self._last_heal = now   # 只在点火成功时消耗冷却
+        except OSError as e:
+            logger.error("[HEAL] 拉起 start.bat 失败：%s——僵尸端口需人工重启", e)
+            self._last_heal = now   # 点火都失败，重试也大概率失败，同样进冷却
+            self.fail_since = None
 
 
 async def async_main() -> None:
@@ -1042,6 +1114,8 @@ async def _run(config: dict) -> None:
                 # 连不上（NapCat/QQ 没在跑）：指数退避 + 抖动，恢复后自动回到 5s
                 await asyncio.sleep(min(RECONNECT_BASE * 2 ** bot.connect_fails,
                                         RECONNECT_MAX) + random.uniform(0, 3))
+                # 退避也等不回来 = 疑似僵尸端口：按阈值复用 start.bat 整栈重启
+                bot._maybe_heal_napcat()
         finally:
             worker.cancel()
             sweeper.cancel()
