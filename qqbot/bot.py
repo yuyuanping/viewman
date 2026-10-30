@@ -174,7 +174,8 @@ class Bot:
         # 全局下载限速（每秒下载数）：None/<=0 不限。配进 storage 的令牌桶
         self.storage.dl_limit = config.get("dl_limit")
         # 正在处理（排队等下载槽 + 下载中）的行 id：sweeper 每 20s 扫一遍到期行，
-        # 槽满时行要等很久才认领，没这层去重同一行会被反复 spawn 空转
+        # 槽满时行要等很久才认领，没这层去重同一行会被反复 spawn 空转。
+        # 转发明细行由父展开任务经 report(queued) 登记、终态/收尾释放
         self._dl_inflight: set[int] = set()
         logger.info("[DL GATE] 下载并发上限 %d", MAX_CONCURRENT_DL)
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -816,6 +817,9 @@ class Bot:
             # next_try 押后防 sweeper 抢占；聚合进度按明细行 id 分桶求和——
             # 块行只报累计字节，不报百分比（total 是单段大小，配平会误导）。
             seg_bytes: dict[int, int] = {}
+            # 已预登记、还没收敛终态的明细行：登记进 _dl_inflight 防 sweeper
+            # 在排队等槽期间（押后期满后）把它们当到期重试行抢走
+            queued_ids: set[int] = set()
 
             async def _agg_progress(row_mid: int, done: int,
                                     total: int | None) -> None:
@@ -834,12 +838,17 @@ class Bot:
                                     sender_nick=str(item.get("sender") or "[转发]"),
                                     ts=int(item.get("ts") or 0) or None,
                                     seg_index=None, parent=mid)
-                        # next_try 押后 5 分钟：sweeper 不会抢走排队中的行
-                        return await self.db.add_message(
+                        # next_try 押后 30 分钟：排队等下载槽期间 sweeper 不按到期
+                        # 重试抢走；_dl_inflight 是第二道锁，押后期满也 spawn 不出来
+                        rid = await self.db.add_message(
                             **base, kind=item.get("kind", ""),
                             name=item.get("file"), src=item.get("src"),
                             ref=item.get("ref"), dl="pending",
-                            next_try=time.time() + 300)
+                            next_try=time.time() + 1800)
+                        if rid is not None:
+                            self._dl_inflight.add(rid)
+                            queued_ids.add(rid)
+                        return rid
                     if rid is not None:
                         if item.get("start"):
                             await self.db.claim_dl_row(rid)
@@ -849,10 +858,14 @@ class Bot:
                                 rid, item.get("md5"), item.get("path"), nb,
                                 bool(item.get("dedup")))
                             seg_bytes[rid] = nb
+                            self._dl_inflight.discard(rid)
+                            queued_ids.discard(rid)
                         else:
                             seg_bytes.pop(rid, None)
                             await self.db.bump_dl(
                                 rid, str(item.get("err") or "download failed"))
+                            self._dl_inflight.discard(rid)
+                            queued_ids.discard(rid)
                         return rid
                     kind_i = item.get("kind", "")
                     base = dict(event_id=row.get("event_id"), msg_id="",
@@ -880,10 +893,15 @@ class Bot:
                     logger.error("[FWD ITEM] 明细落库失败 id=%s: %s", rid, e)
                 return rid
 
-            text = await render_node(data.get("messages", []), self.storage,
-                                     self.expand_forward, self.get_file_url,
-                                     scope, stats=stats, report=report,
-                                     on_progress_row=_agg_progress)
+            try:
+                text = await render_node(data.get("messages", []), self.storage,
+                                         self.expand_forward, self.get_file_url,
+                                         scope, stats=stats, report=report,
+                                         on_progress_row=_agg_progress)
+            finally:
+                # 段任务半路抛掉时终态上报不会来：把没收敛的明细行放回 sweeper
+                # 管线（正常路径终态已逐个移除，这里只兜异常底）
+                self._dl_inflight.difference_update(queued_ids)
             if not text:
                 raise RuntimeError("forward rendered empty")
             # 先记账（text/ok）后写 md：崩溃落在中间时重放会因 had_text
