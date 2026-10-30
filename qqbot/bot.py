@@ -854,9 +854,12 @@ class Bot:
                             await self.db.claim_dl_row(rid)
                         elif item.get("ok"):
                             nb = int(item.get("bytes") or 0)
-                            await self.db.mark_dl_ok(
+                            saved = await self.db.mark_dl_ok(
                                 rid, item.get("md5"), item.get("path"), nb,
                                 bool(item.get("dedup")))
+                            if saved:
+                                logger.info("[DL SAVED] id=%d 同名兄弟行救回 %d 条",
+                                            rid, saved)
                             seg_bytes[rid] = nb
                             self._dl_inflight.discard(rid)
                             queued_ids.discard(rid)
@@ -951,8 +954,10 @@ class Bot:
                         on_progress=_progress_self)
         if r is None:
             raise RuntimeError("download failed")
-        await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
-                                 r.get("dedup", False))
+        saved = await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
+                                         r.get("dedup", False))
+        if saved:
+            logger.info("[DL SAVED] id=%d 同名兄弟行救回 %d 条", mid, saved)
         # media 表登记由 storage._register 统一负责（含转发路径）
 
     # ---- WS 收发 ----
