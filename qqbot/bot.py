@@ -31,7 +31,9 @@ from storage import Storage, md5_hint
 
 logger = logging.getLogger("saver.bot")
 
-MAX_CONCURRENT_DL = 4
+# 同时最多 5 个文件在真下载（storage.dl_gate 闸门）；排不到槽位的行保持
+# pending——面板显示「排队」，不再出现几十行占着「下载中」却不传字节的假象
+MAX_CONCURRENT_DL = 5
 SWEEP_INTERVAL = 20
 REPLY_TEXT_LIMIT = 200   # 引用原文在 md 里的截断长度
 # 打 QQ 侧消息类 API（历史、单条消息）的最小间隔。QQ 对 SsoGetGroupMsg 这类
@@ -171,6 +173,10 @@ class Bot:
         self.storage = Storage(config["data_dir"], session, MAX_CONCURRENT_DL, db)
         # 全局下载限速（每秒下载数）：None/<=0 不限。配进 storage 的令牌桶
         self.storage.dl_limit = config.get("dl_limit")
+        # 正在处理（排队等下载槽 + 下载中）的行 id：sweeper 每 20s 扫一遍到期行，
+        # 槽满时行要等很久才认领，没这层去重同一行会被反复 spawn 空转
+        self._dl_inflight: set[int] = set()
+        logger.info("[DL GATE] 下载并发上限 %d", MAX_CONCURRENT_DL)
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._seq = 0
@@ -453,8 +459,8 @@ class Bot:
                 await self.db.fail_event(ev["id"], f"bad payload: {e}")
                 continue
             self._spawn(self._run_event_safe(ev["id"], data))
-        for row in await self.db.claim_pending_dl(limit=8):
-            self._spawn(self._attempt_row(row, claimed=True))
+        for row in await self.db.fetch_due_dl(limit=8):
+            self._spawn(self._attempt_row(row))
         for reg, tag in ((self.magnets, "[MAGNET]"), (self.links, "[LINK]")):
             if reg:
                 try:
@@ -757,12 +763,39 @@ class Bot:
                     return d["url"]
         return None
 
-    async def _attempt_row(self, row: dict, claimed: bool = False) -> None:
+    async def _attempt_row(self, row: dict) -> None:
         mid = row["id"]
-        # 认领失败 = sweeper 已接手这一行；两条路径同时跑会往 md 重复写一行
-        if not claimed and not await self.db.claim_dl_row(mid):
+        if mid in self._dl_inflight:
             return
+        self._dl_inflight.add(mid)
         kind = row.get("kind", "")
+        # 媒体行先排下载槽、排到才认领（pending→busy）：槽满时行留在 pending，
+        # 面板显示「排队」。forward/reply 不占槽——它们的耗时在 API 往返
+        # （展开父转发 / get_msg），占着槽会饿死真下载。
+        gate = (self.storage.dl_gate()
+                if kind in ("image", "video", "file", "record") else None)
+        acquired = False
+        try:
+            if gate is not None:
+                await gate.acquire()
+                acquired = True
+            # 认领失败 = 这行已被人接手或已收敛终态；两条路径同时跑会往 md
+            # 重复写一行。dead 复检行从这里重回 busy（见 db.claim_dl_row）。
+            if not await self.db.claim_dl_row(mid):
+                return
+            await self._process_row(row, mid, kind)
+        except Exception as e:
+            status = await self.db.bump_dl(mid, str(e))
+            logger.warning("[DL RETRY] id=%d kind=%s -> %s: %s", mid, kind, status, e)
+            if status == "dead" and kind in ("forward", "reply"):
+                label = "[合并转发] 展开失败" if kind == "forward" else "[回复]"
+                self.storage.append_text(label, row_prefix(row), ts=row.get("ts"))
+        finally:
+            if acquired:
+                gate.release()
+            self._dl_inflight.discard(mid)
+
+    async def _process_row(self, row: dict, mid: int, kind: str) -> None:
         scope = row.get("scope") or "private"
         had_text = bool((row.get("text") or "").strip())
 
@@ -770,146 +803,139 @@ class Bot:
             """顶层媒体/文件行下载中把进度报在自己行上；转发行的聚合进度见下方"""
             await self.db.set_dl_progress(mid, done, total)
 
-        try:
-            if kind == "forward":
-                fid = row.get("ref", "")
-                if not fid:
-                    raise RuntimeError("empty forward id")
-                data = await self.expand_forward(fid)
-                if not data:
-                    raise RuntimeError("get_forward_msg returned nothing")
-                stats: dict = {}
-                # 转发块两阶段上报 + 并发下载：每个媒体段先落一条 pending 明细行
-                # （面板立刻全部可见），随即认领成 busy 防 sweeper 抢占；聚合进度
-                # 按明细行 id 分桶求和——块行只报累计字节，不报百分比（total 是
-                # 单段大小，配平会误导）。
-                seg_bytes: dict[int, int] = {}
+        if kind == "forward":
+            fid = row.get("ref", "")
+            if not fid:
+                raise RuntimeError("empty forward id")
+            data = await self.expand_forward(fid)
+            if not data:
+                raise RuntimeError("get_forward_msg returned nothing")
+            stats: dict = {}
+            # 转发块两阶段上报 + 并发下载：每个媒体段先落一条 pending 明细行
+            # （面板立刻全部可见），排到下载槽才认领成 busy，排队期间靠
+            # next_try 押后防 sweeper 抢占；聚合进度按明细行 id 分桶求和——
+            # 块行只报累计字节，不报百分比（total 是单段大小，配平会误导）。
+            seg_bytes: dict[int, int] = {}
 
-                async def _agg_progress(row_mid: int, done: int,
-                                        total: int | None) -> None:
-                    seg_bytes[row_mid] = done
-                    await self.db.set_dl_progress(mid, sum(seg_bytes.values()),
-                                                  None)
+            async def _agg_progress(row_mid: int, done: int,
+                                    total: int | None) -> None:
+                seg_bytes[row_mid] = done
+                await self.db.set_dl_progress(mid, sum(seg_bytes.values()),
+                                              None)
 
-                async def report(item: dict) -> int | None:
-                    """明细行上报：queued 预登记返回行 id，start 认领，终态收敛。"""
-                    rid = item.get("row_id")
-                    try:
-                        if item.get("queued"):
-                            base = dict(event_id=row.get("event_id"), msg_id="",
-                                        scope=scope, peer_id=row.get("peer_id"),
-                                        sender_id=None,
-                                        sender_nick=str(item.get("sender") or "[转发]"),
-                                        ts=int(item.get("ts") or 0) or None,
-                                        seg_index=None, parent=mid)
-                            # next_try 押后 5 分钟：sweeper 不会抢走排队中的行
-                            return await self.db.add_message(
-                                **base, kind=item.get("kind", ""),
-                                name=item.get("file"), src=item.get("src"),
-                                ref=item.get("ref"), dl="pending",
-                                next_try=time.time() + 300)
-                        if rid is not None:
-                            if item.get("start"):
-                                await self.db.claim_dl_row(rid)
-                            elif item.get("ok"):
-                                nb = int(item.get("bytes") or 0)
-                                await self.db.mark_dl_ok(
-                                    rid, item.get("md5"), item.get("path"), nb,
-                                    bool(item.get("dedup")))
-                                seg_bytes[rid] = nb
-                            else:
-                                seg_bytes.pop(rid, None)
-                                await self.db.bump_dl(
-                                    rid, str(item.get("err") or "download failed"))
-                            return rid
-                        kind_i = item.get("kind", "")
+            async def report(item: dict) -> int | None:
+                """明细行上报：queued 预登记返回行 id，start 认领，终态收敛。"""
+                rid = item.get("row_id")
+                try:
+                    if item.get("queued"):
                         base = dict(event_id=row.get("event_id"), msg_id="",
                                     scope=scope, peer_id=row.get("peer_id"),
                                     sender_id=None,
                                     sender_nick=str(item.get("sender") or "[转发]"),
                                     ts=int(item.get("ts") or 0) or None,
                                     seg_index=None, parent=mid)
-                        if kind_i in ("text", "forward"):
-                            await self.db.add_message(**base, kind=kind_i,
-                                                      text=item.get("text", ""))
+                        # next_try 押后 5 分钟：sweeper 不会抢走排队中的行
+                        return await self.db.add_message(
+                            **base, kind=item.get("kind", ""),
+                            name=item.get("file"), src=item.get("src"),
+                            ref=item.get("ref"), dl="pending",
+                            next_try=time.time() + 300)
+                    if rid is not None:
+                        if item.get("start"):
+                            await self.db.claim_dl_row(rid)
                         elif item.get("ok"):
-                            await self.db.add_message(
-                                **base, kind=kind_i, name=item.get("file"),
-                                src=item.get("src"), ref=item.get("ref"),
-                                md5=item.get("md5"), path=item.get("path"),
-                                bytes=item.get("bytes"), dl="ok",
-                                dedup=bool(item.get("dedup")))
+                            nb = int(item.get("bytes") or 0)
+                            await self.db.mark_dl_ok(
+                                rid, item.get("md5"), item.get("path"), nb,
+                                bool(item.get("dedup")))
+                            seg_bytes[rid] = nb
                         else:
-                            await self.db.add_message(
-                                **base, kind=kind_i, name=item.get("file"),
-                                src=item.get("src"), ref=item.get("ref"),
-                                dl="pending")
-                    except Exception as e:
-                        logger.error("[FWD ITEM] 明细落库失败 id=%s: %s", rid, e)
-                    return rid
+                            seg_bytes.pop(rid, None)
+                            await self.db.bump_dl(
+                                rid, str(item.get("err") or "download failed"))
+                        return rid
+                    kind_i = item.get("kind", "")
+                    base = dict(event_id=row.get("event_id"), msg_id="",
+                                scope=scope, peer_id=row.get("peer_id"),
+                                sender_id=None,
+                                sender_nick=str(item.get("sender") or "[转发]"),
+                                ts=int(item.get("ts") or 0) or None,
+                                seg_index=None, parent=mid)
+                    if kind_i in ("text", "forward"):
+                        await self.db.add_message(**base, kind=kind_i,
+                                                  text=item.get("text", ""))
+                    elif item.get("ok"):
+                        await self.db.add_message(
+                            **base, kind=kind_i, name=item.get("file"),
+                            src=item.get("src"), ref=item.get("ref"),
+                            md5=item.get("md5"), path=item.get("path"),
+                            bytes=item.get("bytes"), dl="ok",
+                            dedup=bool(item.get("dedup")))
+                    else:
+                        await self.db.add_message(
+                            **base, kind=kind_i, name=item.get("file"),
+                            src=item.get("src"), ref=item.get("ref"),
+                            dl="pending")
+                except Exception as e:
+                    logger.error("[FWD ITEM] 明细落库失败 id=%s: %s", rid, e)
+                return rid
 
-                text = await render_node(data.get("messages", []), self.storage,
-                                         self.expand_forward, self.get_file_url,
-                                         scope, stats=stats, report=report,
-                                         on_progress_row=_agg_progress)
-                if not text:
-                    raise RuntimeError("forward rendered empty")
-                # 先记账（text/ok）后写 md：崩溃落在中间时重放会因 had_text
-                # 跳过 md，宁可日志缺一块也不要同一块写两遍
-                # dedup = 本条转发里复用现有文件（重复跳过）的媒体数
-                await self.db.set_message_text(mid, text, stats.get("dedup", 0))
-                self._kick_magnets(text, mid)
-                await self.db.mark_dl_ok(mid, None, None, None)
-                if not had_text:
-                    self.storage.append_text("[合并转发]" + chr(10) + text,
-                                             ts=row.get("ts"))
-                logger.info("[EXPAND OK] id=%d fid=%s saved=%d", mid, fid,
-                            stats.get("saved", 0))
-                return
-            if kind == "reply":
-                rid = row.get("ref", "")
-                if not rid:
-                    raise RuntimeError("empty reply id")
-                src = await self.get_message(rid)
-                if not src:
-                    raise RuntimeError("get_msg returned nothing")
-                line = reply_line(src)
-                await self.db.set_message_text(mid, line)
-                self._kick_magnets(line, mid)
-                await self.db.mark_dl_ok(mid, None, None, None)
-                self.storage.append_text(line, row_prefix(row), ts=row.get("ts"))
-                logger.info("[REPLY OK] id=%d quoted=%s", mid, rid)
-                return
-            if kind == "file":
-                arg = row.get("ref") or row.get("src") or ""
-                r = await self.storage.save_file(arg, row.get("name") or "file",
-                                                 self.get_file_url, scope,
-                                                 on_progress=_progress_self)
-            else:  # image / video
-                r = None
-                src = await self._refresh_src(row, kind, row.get("src", ""))
-                if src:
+            text = await render_node(data.get("messages", []), self.storage,
+                                     self.expand_forward, self.get_file_url,
+                                     scope, stats=stats, report=report,
+                                     on_progress_row=_agg_progress)
+            if not text:
+                raise RuntimeError("forward rendered empty")
+            # 先记账（text/ok）后写 md：崩溃落在中间时重放会因 had_text
+            # 跳过 md，宁可日志缺一块也不要同一块写两遍
+            # dedup = 本条转发里复用现有文件（重复跳过）的媒体数
+            await self.db.set_message_text(mid, text, stats.get("dedup", 0))
+            self._kick_magnets(text, mid)
+            await self.db.mark_dl_ok(mid, None, None, None)
+            if not had_text:
+                self.storage.append_text("[合并转发]" + chr(10) + text,
+                                         ts=row.get("ts"))
+            logger.info("[EXPAND OK] id=%d fid=%s saved=%d", mid, fid,
+                        stats.get("saved", 0))
+            return
+        if kind == "reply":
+            rid = row.get("ref", "")
+            if not rid:
+                raise RuntimeError("empty reply id")
+            src = await self.get_message(rid)
+            if not src:
+                raise RuntimeError("get_msg returned nothing")
+            line = reply_line(src)
+            await self.db.set_message_text(mid, line)
+            self._kick_magnets(line, mid)
+            await self.db.mark_dl_ok(mid, None, None, None)
+            self.storage.append_text(line, row_prefix(row), ts=row.get("ts"))
+            logger.info("[REPLY OK] id=%d quoted=%s", mid, rid)
+            return
+        if kind == "file":
+            arg = row.get("ref") or row.get("src") or ""
+            r = await self.storage.save_file(arg, row.get("name") or "file",
+                                             self.get_file_url, scope,
+                                             on_progress=_progress_self)
+        else:  # image / video
+            r = None
+            src = await self._refresh_src(row, kind, row.get("src", ""))
+            if src:
+                r = await self.storage.save_media(
+                    src, kind, scope, expect_md5=md5_hint(row.get("ref")),
+                    on_progress=_progress_self)
+            if r is None and row.get("ref"):
+                # CDN url 可能已过期：改经 NapCat file_id 取本地原件重试
+                p = await self.get_file_url(row["ref"])
+                if p:
                     r = await self.storage.save_media(
-                        src, kind, scope, expect_md5=md5_hint(row.get("ref")),
+                        p, kind, scope, expect_md5=md5_hint(row["ref"]),
                         on_progress=_progress_self)
-                if r is None and row.get("ref"):
-                    # CDN url 可能已过期：改经 NapCat file_id 取本地原件重试
-                    p = await self.get_file_url(row["ref"])
-                    if p:
-                        r = await self.storage.save_media(
-                            p, kind, scope, expect_md5=md5_hint(row["ref"]),
-                            on_progress=_progress_self)
-            if r is None:
-                raise RuntimeError("download failed")
-            await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
-                                     r.get("dedup", False))
-            # media 表登记由 storage._register 统一负责（含转发路径）
-        except Exception as e:
-            status = await self.db.bump_dl(mid, str(e))
-            logger.warning("[DL RETRY] id=%d kind=%s -> %s: %s", mid, kind, status, e)
-            if status == "dead" and kind in ("forward", "reply"):
-                label = "[合并转发] 展开失败" if kind == "forward" else "[回复]"
-                self.storage.append_text(label, row_prefix(row), ts=row.get("ts"))
+        if r is None:
+            raise RuntimeError("download failed")
+        await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
+                                 r.get("dedup", False))
+        # media 表登记由 storage._register 统一负责（含转发路径）
 
     # ---- WS 收发 ----
     def _on_raw(self, raw: str) -> None:

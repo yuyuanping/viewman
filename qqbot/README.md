@@ -129,7 +129,9 @@ viewman 的后端改用 **bot.lock 文件锁探针**判定：bot.py 自身用
    穷尽（6 次）转 `dead`。进程重启时遗留的 `busy` 自动回队，未处理积压自动重放。
    `done` 事件保留 30 天（`EVENT_RETENTION_DAYS`）后启动时自动清理。
 2. **顺序消费**：单 worker 按序处理文本并写 md 视图 + `messages` 表。
-3. **dl 下载重试队列**：媒体下载登记为 `pending`，即时尝试一次；失败由 sweeper 每 20s
+3. **dl 下载重试队列**：媒体下载登记为 `pending`，即起任务排下载槽（全库并发上限
+   `MAX_CONCURRENT_DL=5`，排到槽才转 `busy`——「下载中」都是真在传字节的行，其余显示
+   「排队」）；失败由 sweeper 每 20s
    扫描、指数退避自动重做，最多 `MAX_DL_TRIES=8` 次转 `dead`。图片/视频失败后还会
    自动改走 `file_id -> get_file` 取本地原件的兜底路径。重试（`tries>=1`）前还会先用
    `get_msg` 换一条新鲜的 CDN 地址——存下来的 url 带 rkey 签名，隔几天必失效，
