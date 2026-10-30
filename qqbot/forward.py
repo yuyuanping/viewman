@@ -182,18 +182,21 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             row_id = await report({"kind": kind, "sender": nickname,
                                    "ts": inner_ts, "src": src, "ref": ref,
                                    "file": name, "queued": True})
-        if row_id is not None and report:
-            await report({"row_id": row_id, "start": True})
         prog = None
         if on_progress_row is not None and row_id is not None:
             async def prog(done: int, total: int | None) -> None:
                 await on_progress_row(row_id, done, total)
-        if t in ("file", "record"):
-            r = await storage.save_file(src, name, get_file_url, scope,
-                                        on_progress=prog)
-        else:
-            r = await _save_media_segment(d, kind, storage, get_file_url,
-                                          scope, on_progress=prog)
+        # 排到下载槽才认领成 busy（start）：槽满时明细行留在 pending（排队），
+        # 大转发不再把面板刷成几十行假「下载中」。终态上报在槽外做，别占槽写库。
+        async with storage.dl_gate():
+            if row_id is not None and report:
+                await report({"row_id": row_id, "start": True})
+            if t in ("file", "record"):
+                r = await storage.save_file(src, name, get_file_url, scope,
+                                            on_progress=prog)
+            else:
+                r = await _save_media_segment(d, kind, storage, get_file_url,
+                                              scope, on_progress=prog)
         if r and stats is not None:
             stats["saved"] = stats.get("saved", 0) + 1
             if r.get("dedup"):

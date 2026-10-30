@@ -100,7 +100,10 @@ class Storage:
         # messages 日记句柄常开、按日轮换（append_text 每段消息都写）
         self._md_fh = None
         self._md_day = ""
-        # 并发下载上限：再多并发任务也只占这么多连接，慢下载靠协程挂起不占线程
+        # 下载并发闸门，全库只有这一把：save_media/save_file 不再内部加锁，
+        # 由调用方（bot._attempt_row / forward._media_job）在真正开始传输前
+        # 持有 dl_gate()——排到槽位才把行标 busy，槽满的行留在 pending
+        # （面板「排队」）。不加闸门直接调 save_* 会绕过并发上限。
         self._dl_sem = asyncio.Semaphore(max_concurrent_dl)
         # 全局限速（令牌桶）：每秒最多下载 dl_limit 个媒体，超出排队等令牌。
         # 默认 None=不限速；腾讯对短时高频资源拉取有风控熔断
@@ -340,6 +343,12 @@ class Storage:
         return {"placeholder": f"[{label}] {Path(path_s).name}",
                 "md5": digest, "path": path_s, "bytes": size, "dedup": True}
 
+    def dl_gate(self) -> asyncio.Semaphore:
+        """全局下载并发闸门（尺寸 max_concurrent_dl）。调用方在拿到新鲜 src、
+        真正开始传输前 acquire，传输完 release；排到槽位才认领行（busy）。
+        慢 API（get_file_url 兜底、转发重展开）不要在持槽时调用。"""
+        return self._dl_sem
+
     # ---- 图片/视频 ----
     async def save_media(self, url: str, kind: str, scope: str = "private",
                          expect_md5: str | None = None, on_progress=None) -> dict | None:
@@ -364,43 +373,42 @@ class Storage:
             if hit is not None:
                 return await self._dedup_result(expect_md5, kind, scope, *hit)
         await self._wait_token()
-        async with self._dl_sem:
-            # 下载/读取：流式边写边算 md5，不再把整个文件读进内存
-            tmp = None
-            if url.startswith(("http://", "https://")):
-                tmp = self._media_base(kind, scope) / f"~dl{uuid4().hex}.part"
-                got = await self._stream_to(url, kind, tmp, on_progress)
-                if got is None:
-                    return None
-                digest, size, ct = got
-                ext = _ext_from_ct(ct, url, kind)
+        # 下载/读取：流式边写边算 md5，不再把整个文件读进内存
+        tmp = None
+        if url.startswith(("http://", "https://")):
+            tmp = self._media_base(kind, scope) / f"~dl{uuid4().hex}.part"
+            got = await self._stream_to(url, kind, tmp, on_progress)
+            if got is None:
+                return None
+            digest, size, ct = got
+            ext = _ext_from_ct(ct, url, kind)
+        else:
+            p = Path(url)
+            if not p.is_file():
+                logger.error("[ERROR] local path not found for %s: %s", kind, url)
+                return None
+            digest, size = await asyncio.to_thread(_hash_file, p)
+            e = p.suffix.lstrip(".").lower()
+            ext = e if e in valid else ext
+        path = self._media_base(kind, scope) / f"{digest}.{ext}"
+        dup = path.exists()
+        if not dup:
+            if tmp is not None:
+                await asyncio.to_thread(os.replace, tmp, path)
             else:
-                p = Path(url)
-                if not p.is_file():
-                    logger.error("[ERROR] local path not found for %s: %s", kind, url)
-                    return None
-                digest, size = await asyncio.to_thread(_hash_file, p)
-                e = p.suffix.lstrip(".").lower()
-                ext = e if e in valid else ext
-            path = self._media_base(kind, scope) / f"{digest}.{ext}"
-            dup = path.exists()
-            if not dup:
-                if tmp is not None:
-                    await asyncio.to_thread(os.replace, tmp, path)
-                else:
-                    # 本地原件（NapCat 缓存）：复制进统一目录，不动原件。
-                    # 先写 .part 再 replace：中断不会留下顶着 md5 名的半文件
-                    # （会被 dup 检查复用、被 backfill_media 洗白成有效登记）
-                    part = path.parent / f"~dl{uuid4().hex}.part"
-                    try:
-                        await asyncio.to_thread(shutil.copyfile, url, part)
-                    except Exception:
-                        part.unlink(missing_ok=True)
-                        raise
-                    await asyncio.to_thread(os.replace, part, path)
-            elif tmp is not None:    # 下载完才发现内容重复：丢临时件复用现有文件
-                await asyncio.to_thread(tmp.unlink)
-            self.seen[digest] = (str(path), size)
+                # 本地原件（NapCat 缓存）：复制进统一目录，不动原件。
+                # 先写 .part 再 replace：中断不会留下顶着 md5 名的半文件
+                # （会被 dup 检查复用、被 backfill_media 洗白成有效登记）
+                part = path.parent / f"~dl{uuid4().hex}.part"
+                try:
+                    await asyncio.to_thread(shutil.copyfile, url, part)
+                except Exception:
+                    part.unlink(missing_ok=True)
+                    raise
+                await asyncio.to_thread(os.replace, part, path)
+        elif tmp is not None:    # 下载完才发现内容重复：丢临时件复用现有文件
+            await asyncio.to_thread(tmp.unlink)
+        self.seen[digest] = (str(path), size)
         await self._register(digest, kind, scope, str(path), size)
         if dup:
             logger.info("[%s DEDUP] %s (内容重复，复用现有文件)", kind.upper(), path.name)
@@ -415,8 +423,8 @@ class Storage:
                         scope: str = "private", on_progress=None) -> dict | None:
         """下载文件，按 MD5 命名去重。三种来源：http(s) 直链；本地绝对路径；
         文件 ID 经 get_url 解析（NapCat 通常给本地路径）——解析是慢 API 调用，
-        放在下载并发额度之外，NapCat 卡住时不会占死下载槽。传输流式落盘，
-        内存与文件大小无关。
+        在调用方持有的下载槽内做：NapCat 卡住时会占住槽位，但换来「排到槽位
+        才显示下载中」的诚实状态。传输流式落盘，内存与文件大小无关。
         成功返回 {"placeholder","md5","path","bytes"}，失败返回 None。
         """
         if not file_id_or_url:
@@ -436,50 +444,49 @@ class Storage:
             return None
         base = self._scope_dir(self.priv_file, self.grp_file, scope)
         await self._wait_token()
-        async with self._dl_sem:
-            tmp = None
-            ct = ""
-            try:
-                if src.startswith(("http://", "https://")):
-                    tmp = base / f"~dl{uuid4().hex}.part"
-                    got = await self._stream_to(src, "file", tmp, on_progress)
-                    if got is None:
-                        return None
-                    digest, size, ct = got
-                else:
-                    if not Path(src).is_file():
-                        logger.error("[ERROR] local file not found: %s", src)
-                        return None
-                    digest, size = await asyncio.to_thread(_hash_file, Path(src))
-                sfx = Path(filename).suffix.lstrip(".").lower()
-                if sfx in _VALID_FILE:
-                    ext = sfx
-                elif ct in _EXT_BY_CT:
-                    ext = _EXT_BY_CT[ct]
-                else:
-                    ext = "bin"
-                path = base / f"{digest}.{ext}"
-                dup = path.exists()
-                if not dup:
-                    if tmp is not None:
-                        await asyncio.to_thread(os.replace, tmp, path)
-                    else:
-                        # 本地原件：复制进来，不动 NapCat 缓存。
-                        # 先写 .part 再 replace，理由同 save_media：中断不留半文件
-                        part = base / f"~dl{uuid4().hex}.part"
-                        try:
-                            await asyncio.to_thread(shutil.copyfile, src, part)
-                        except Exception:
-                            part.unlink(missing_ok=True)
-                            raise
-                        await asyncio.to_thread(os.replace, part, path)
-                elif tmp is not None:   # 内容重复：丢临时件复用现有文件
-                    await asyncio.to_thread(tmp.unlink)
-            except Exception as e:
-                logger.error("[ERROR] Failed to save file %s: %s", filename, e)
+        tmp = None
+        ct = ""
+        try:
+            if src.startswith(("http://", "https://")):
+                tmp = base / f"~dl{uuid4().hex}.part"
+                got = await self._stream_to(src, "file", tmp, on_progress)
+                if got is None:
+                    return None
+                digest, size, ct = got
+            else:
+                if not Path(src).is_file():
+                    logger.error("[ERROR] local file not found: %s", src)
+                    return None
+                digest, size = await asyncio.to_thread(_hash_file, Path(src))
+            sfx = Path(filename).suffix.lstrip(".").lower()
+            if sfx in _VALID_FILE:
+                ext = sfx
+            elif ct in _EXT_BY_CT:
+                ext = _EXT_BY_CT[ct]
+            else:
+                ext = "bin"
+            path = base / f"{digest}.{ext}"
+            dup = path.exists()
+            if not dup:
                 if tmp is not None:
-                    tmp.unlink(missing_ok=True)
-                return None
+                    await asyncio.to_thread(os.replace, tmp, path)
+                else:
+                    # 本地原件：复制进来，不动 NapCat 缓存。
+                    # 先写 .part 再 replace，理由同 save_media：中断不留半文件
+                    part = base / f"~dl{uuid4().hex}.part"
+                    try:
+                        await asyncio.to_thread(shutil.copyfile, src, part)
+                    except Exception:
+                        part.unlink(missing_ok=True)
+                        raise
+                    await asyncio.to_thread(os.replace, part, path)
+            elif tmp is not None:   # 内容重复：丢临时件复用现有文件
+                await asyncio.to_thread(tmp.unlink)
+        except Exception as e:
+            logger.error("[ERROR] Failed to save file %s: %s", filename, e)
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+            return None
         self.seen[digest] = (str(path), size)
         await self._register(digest, "file", scope, str(path), size)
         logger.info("[FILE SAVED] %s", path)

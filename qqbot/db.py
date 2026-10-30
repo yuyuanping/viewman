@@ -221,8 +221,10 @@ class DB:
                 f"INSERT INTO messages({cols}) VALUES({marks})", vals).lastrowid
         return await self._run(_do)
 
-    async def claim_pending_dl(self, limit: int = 8) -> list[dict]:
-        """认领到期的 dl 重试行；返回认领到的完整行。
+    async def fetch_due_dl(self, limit: int = 8) -> list[dict]:
+        """拉取到期的 dl 重试行（不动状态）；认领发生在 bot._attempt_row 排到
+        下载槽之后（claim_dl_row）——行在排队等槽位期间保持 pending，面板显示
+        「排队」而不是假「下载中」。
 
         dl='dead' 且还没跑满复检轮次的行也算到期：快重试只有约 4 小时窗口，
         而 QQ 往往在那之后（用户点开播放过）才把原件下到本地。
@@ -243,19 +245,15 @@ class DB:
                 "AND ((msg_id IS NOT NULL AND msg_id<>'') OR parent IS NOT NULL) "
                 "ORDER BY id LIMIT ?",
                 (now, now, DL_LATE_TRIES, limit)).fetchall()
-            ids = [r["id"] for r in rows]
-            if ids:
-                # 认领即清零进度：上一轮尝试的残值不能冒充本轮的实时进度
-                c.execute(
-                    f"UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL WHERE id IN "
-                    f"({','.join('?' * len(ids))})", ids)
             return [dict(r) for r in rows]
         return await self._run(_do)
 
     async def claim_dl_row(self, mid: int) -> bool:
-        """按 id 认领单行（pending -> busy，进度清零）。False 表示他人已在处理。"""
+        """按 id 认领单行（pending/dead -> busy，进度清零）。False 表示他人已在
+        处理或已收敛终态。dead 也收：每日复检行由这里重回 busy。"""
         return await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL WHERE id=? AND dl='pending'",
+            "UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL "
+            "WHERE id=? AND dl IN ('pending','dead')",
             (mid,)).rowcount > 0)
 
     async def set_dl_progress(self, mid: int, done: int, total: int | None) -> None:
@@ -305,7 +303,7 @@ class DB:
         每日复检**：刷新走重新展开父转发（bot._refresh_src_by_forward），转发在
         QQ 端通常几天内有效，WS 断线期间又打不出去——复检到 tries 跑满 15 才彻底
         放手，别把本可救回的行错杀。无 msg_id 又无 parent 的孤儿行两条刷新路都
-        不通，直接推一年后不再碰（见 claim_pending_dl）。"""
+        不通，直接推一年后不再碰（见 fetch_due_dl）。"""
         def _do(c):
             row = c.execute(
                 "SELECT tries, msg_id, parent FROM messages WHERE id=?", (mid,)).fetchone()
