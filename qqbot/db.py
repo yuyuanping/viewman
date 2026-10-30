@@ -130,6 +130,12 @@ class DB:
                     "ALTER TABLE messages ADD COLUMN dl_total INTEGER")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
+            # 历史回收：复检救回的行在旧版 mark_dl_ok 里没清失败痕迹（只清了 err），
+            # 残留 dead_at/tries。dl='ok' 的行已不在任何失败口径里，这里只是把
+            # 脏值抹平——幂等，清完不再命中
+            self._conn.execute(
+                "UPDATE messages SET tries=0, dead_at=NULL, err=NULL "
+                "WHERE dl='ok' AND (dead_at IS NOT NULL OR tries>0 OR err IS NOT NULL)")
             # 转发明细行按 parent 查（viewman 面板「当日列表」靠它把今天收到的转发
             # 和它带来的明细取出来）。没这个索引那条 join 会退化成全表扫：
             # 6 万行实测 27ms vs 1.3ms，2 秒一轮的快照扛不住
@@ -265,10 +271,13 @@ class DB:
 
     async def mark_dl_ok(self, mid: int, md5: str, path: str,
                          size: int, dedup: bool = False) -> None:
-        # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值
+        # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值。
+        # 失败痕迹一并抹净（err/tries/dead_at）：复检救回的行就是成功行，
+        # 残留的 dead_at 会让它仍以「曾经失败」的身份留在面板口径里，
+        # tries 不归零则下次再排队时退避间隔从旧值起跳
         await self._run(lambda c: c.execute(
             "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL, "
-            "dl_bytes=0, dl_total=NULL WHERE id=?",
+            "tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL WHERE id=?",
             (md5, path, size, int(bool(dedup)), mid)))
 
     async def set_message_text(self, mid: int, text: str, dedup: int = 0) -> None:
