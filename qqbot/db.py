@@ -136,6 +136,22 @@ class DB:
             self._conn.execute(
                 "UPDATE messages SET tries=0, dead_at=NULL, err=NULL "
                 "WHERE dl='ok' AND (dead_at IS NOT NULL OR tries>0 OR err IS NOT NULL)")
+            # 历史回收（二）：同名兄弟行救回。旧版成功只落在自己一行上，同一
+            # 内容经另一条转发下载成功后，本行的失败记录还挂着（2026-10-30
+            # 实测 533 条）。与 mark_dl_ok 的口径一致：只救 image/video 的
+            # dead 行——pending 行由 sweeper 正常流转，不在这里抢
+            self._conn.execute(
+                "UPDATE messages SET dl='ok', "
+                "md5=(SELECT o.md5 FROM messages o WHERE o.name=messages.name "
+                " AND o.dl='ok' AND o.md5 IS NOT NULL LIMIT 1), "
+                "path=(SELECT o.path FROM messages o WHERE o.name=messages.name "
+                " AND o.dl='ok' AND o.md5 IS NOT NULL LIMIT 1), "
+                "bytes=(SELECT o.bytes FROM messages o WHERE o.name=messages.name "
+                " AND o.dl='ok' AND o.md5 IS NOT NULL LIMIT 1), "
+                "dedup=1, err=NULL, tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL "
+                "WHERE dl='dead' AND kind IN ('image','video') "
+                "AND EXISTS(SELECT 1 FROM messages o WHERE o.name=messages.name "
+                " AND o.dl='ok' AND o.md5 IS NOT NULL AND o.id<>messages.id)")
             # 转发明细行按 parent 查（viewman 面板「当日列表」靠它把今天收到的转发
             # 和它带来的明细取出来）。没这个索引那条 join 会退化成全表扫：
             # 6 万行实测 27ms vs 1.3ms，2 秒一轮的快照扛不住
@@ -270,15 +286,34 @@ class DB:
             (done, total, mid)))
 
     async def mark_dl_ok(self, mid: int, md5: str, path: str,
-                         size: int, dedup: bool = False) -> None:
-        # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值。
-        # 失败痕迹一并抹净（err/tries/dead_at）：复检救回的行就是成功行，
-        # 残留的 dead_at 会让它仍以「曾经失败」的身份留在面板口径里，
-        # tries 不归零则下次再排队时退避间隔从旧值起跳
-        await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL, "
-            "tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL WHERE id=?",
-            (md5, path, size, int(bool(dedup)), mid)))
+                         size: int, dedup: bool = False) -> int:
+        """行收敛为 ok。返回顺带救回的同名兄弟行数（见下）。"""
+        def _do(c):
+            # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值。
+            # 失败痕迹一并抹净（err/tries/dead_at）：复检救回的行就是成功行，
+            # 残留的 dead_at 会让它仍以「曾经失败」的身份留在面板口径里，
+            # tries 不归零则下次再排队时退避间隔从旧值起跳
+            c.execute(
+                "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL, "
+                "tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL WHERE id=?",
+                (md5, path, size, int(bool(dedup)), mid))
+            # 同一内容可能在多条转发里各落一行（QQ 的图片/视频文件名就是内容
+            # 哈希）：这行下成了，同名（=同内容）的 dead/pending 兄弟行就没必要
+            # 再挂着失败/继续排队——一并收敛为 ok（dedup=1，复用现有文件）。
+            # 只碰 image/video：普通文件的 name 只是原名，同名不同内容是常事。
+            # busy 行不碰：正在传字节，让它们自己收敛
+            row = c.execute(
+                "SELECT kind, name FROM messages WHERE id=?", (mid,)).fetchone()
+            if not row or row["kind"] not in ("image", "video") or not row["name"]:
+                return 0
+            cur = c.execute(
+                "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=1, "
+                "err=NULL, tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL "
+                "WHERE dl IN ('dead','pending') AND kind IN ('image','video') "
+                "AND name=? AND id<>?",
+                (md5, path, size, row["name"], mid))
+            return cur.rowcount
+        return await self._run(_do)
 
     async def set_message_text(self, mid: int, text: str, dedup: int = 0) -> None:
         await self._run(lambda c: c.execute(
