@@ -428,6 +428,27 @@ class DB:
             return "pending"
         return await self._run(_do)
 
+    async def reap_stale_busy(self, stall_s: int = DL_STALL_DEAD_S) -> int:
+        """回收丢失写回的 busy 行：认领后任务被取消（CancelledError 不走
+        except Exception）或写回前进程出岔，行就永远卡「下载中」——启动回队
+        只在重启时兜一次，运行中要靠 sweeper 自愈。判定与失败标准同一条线：
+        busy 且停滞超 DL_STALL_DEAD_S（prog_at 30 分钟没推进）= 没有活任务
+        在传（真在传的行每块推进 prog_at，storage 的 sock_read 超时也兜着，
+        到不了这条线）。孤儿行推一年；dead_at 沿用复检口径 COALESCE 保留
+        首死时刻，回收不把旧积压重计成今日失败。返回回收行数。"""
+        now = int(time.time())
+
+        def _do(c) -> int:
+            cur = c.execute(
+                "UPDATE messages SET dl='dead', tries=tries+1, "
+                "next_try=CASE WHEN (msg_id IS NULL OR msg_id='') AND parent IS NULL "
+                "THEN ? ELSE ? END, err=?, dead_at=COALESCE(dead_at, ?) "
+                "WHERE dl='busy' AND (prog_at IS NULL OR prog_at < ?)",
+                (now + 365 * 86400, now + DL_LATE_INTERVAL,
+                 "download stalled: attempt lost", now, now - stall_s))
+            return cur.rowcount
+        return await self._run(_do)
+
     async def upsert_media(self, md5: str, kind: str, scope: str,
                            path: str, size: int) -> None:
         await self._run(lambda c: c.execute(

@@ -462,6 +462,12 @@ class Bot:
             self._spawn(self._run_event_safe(ev["id"], data))
         for row in await self.db.fetch_due_dl(limit=8):
             self._spawn(self._attempt_row(row))
+        # 卡「下载中」的行 sweeper 不认领（fetch_due_dl 只收 pending/dead），
+        # 丢失写回的只能在这里按失败标准放行，别让面板的「下载中」越积越多
+        reaped = await self.db.reap_stale_busy()
+        if reaped:
+            logger.warning("[DL REAP] 回收停滞 busy 行 %d 条（尝试丢失，转 dead 走复检）",
+                           reaped)
         for reg, tag in ((self.magnets, "[MAGNET]"), (self.links, "[LINK]")):
             if reg:
                 try:
@@ -785,6 +791,15 @@ class Bot:
             if not await self.db.claim_dl_row(mid):
                 return
             await self._process_row(row, mid, kind)
+        except asyncio.CancelledError:
+            # 任务被取消（停机清算等）不走 except Exception：行已认领成 busy，
+            # 不写回就永远卡「下载中」。按失败放回队列；这里再被取消就放它走，
+            # 启动回队与 sweeper 的 reap_stale_busy 兜底。
+            try:
+                await self.db.bump_dl(mid, "attempt cancelled")
+            except Exception:
+                pass
+            raise
         except Exception as e:
             status = await self.db.bump_dl(mid, str(e))
             logger.warning("[DL RETRY] id=%d kind=%s -> %s: %s", mid, kind, status, e)
