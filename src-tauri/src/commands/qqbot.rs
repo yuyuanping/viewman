@@ -824,17 +824,33 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
         push(&mut stmt).map_err_str()?;
     }
 
-    // 四支可能重复命中同一行（今天收到/今天死/今天完成的），按 id 去重。
-    // 排序键取 COALESCE(parent, id) 倒序（新消息在前），块内按 id 正序：
-    // 父行 id 最小排最前，转发明细跟在父行下面、按转发里的先后铺开
+    // 四支可能重复命中同一行（今天收到/今天死/今天完成的），按 id 去重，
+    // 再按迅雷式排序置顶正在下载的组
     let mut seen = std::collections::HashSet::with_capacity(out.len());
     out.retain(|it| seen.insert(it.id));
-    out.sort_by(|a, b| {
-        let ka = a.parent.unwrap_or(a.id);
-        let kb = b.parent.unwrap_or(b.id);
-        kb.cmp(&ka).then(a.id.cmp(&b.id))
-    });
+    sort_dl_items(&mut out);
     Ok(out)
+}
+
+/// 列表排序（迅雷式）：**正在下载的组置顶**，其余按 COALESCE(parent,id) 倒序
+/// （新消息在前）、块内按 id 正序（父行最前，明细按转发里的先后铺开）。
+/// 「组」= 转发块：busy 明细行把整组（父行 + 全部明细）一起置顶，块不拆散；
+/// busy 顶层行（复检中的旧积压多属此类）自己置顶。下载一收敛，行自然落回
+/// 时间序的位置——列表是活的，跟迅雷的任务列表一样。
+fn sort_dl_items(items: &mut [BotDlItem]) {
+    let hot: std::collections::HashSet<i64> = items
+        .iter()
+        .filter(|it| it.dl == "busy")
+        .map(|it| it.parent.unwrap_or(it.id))
+        .collect();
+    items.sort_by(|a, b| {
+        let ga = a.parent.unwrap_or(a.id);
+        let gb = b.parent.unwrap_or(b.id);
+        hot.contains(&gb)
+            .cmp(&hot.contains(&ga))
+            .then_with(|| gb.cmp(&ga))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 /// 历史下载列表：不限当日，按需一次拉取最近的下载/归档记录（面板「历史」页签）。
@@ -842,10 +858,10 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
 /// 明细行（parent IS NOT NULL，含 dl='none' 的文本/嵌套转发明细）；纯文本直发
 /// 同样不进列表。
 ///
-/// 不做时间过滤、也不拆三支：这是用户点一下才跑一次的按需查询，不是 2 秒一轮的
+/// 不做时间过滤、也不拆四支：这是用户点一下才跑一次的按需查询，不是 2 秒一轮的
 /// 快照，单条 OR 查询扫表加排序的开销（几万行几十毫秒级）可以接受；LIMIT 让
-/// sqlite 走 top-N 排序，不用把全部行排完。排序键与当日列表同一套
-/// （COALESCE(parent,id) 倒序、块内 id 正序），转发与其明细连成一块。
+/// sqlite 走 top-N 排序，不用把全部行排完。排序与当日列表同一套（正在下载的组
+/// 置顶，其余 COALESCE(parent,id) 倒序、块内 id 正序），转发与其明细连成一块。
 /// 条数上限由调用方给——全库几十万行不可能一次端给面板。
 fn read_dl_history(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<BotDlItem>, String> {
     let cols = dl_item_cols(conn);
@@ -860,6 +876,9 @@ fn read_dl_history(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<BotDlI
     for row in rows {
         out.push(row.map_err_str()?);
     }
+    // SQL 的 LIMIT 先按时间序截窗，Rust 侧再把窗内的 busy 组顶上去；
+    // busy 行都是新行（id 大），实际不会落在窗外的
+    sort_dl_items(&mut out);
     Ok(out)
 }
 
@@ -1297,10 +1316,10 @@ mod tests {
             "连 path 都没有的行退到类型中文名，不再空标签"
         );
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // 排序键 COALESCE(parent,id) 倒序、块内 id 正序：8、5 各一组，转发 2 置顶、
-        // 明细（3/9）跟在它下面，再下面 1。10/11 是昨天那批发来的转发与它的明细，
-        // 今天没动静就不出现；4 是纯文本直发；8 两支都命中，去重后只出现一次
-        assert_eq!(ids, vec![8, 5, 2, 3, 9, 1]);
+        // 迅雷式排序：busy 行 1 置顶；其余按 COALESCE(parent,id) 倒序、块内 id 正序：
+        // 8、5 各一组，转发 2 连明细（3/9）连块。10/11 是昨天那批发来的转发与它的
+        // 明细，今天没动静就不出现；4 是纯文本直发；8 两支都命中，去重后只出现一次
+        assert_eq!(ids, vec![1, 8, 5, 2, 3, 9]);
         let detail = items.iter().find(|it| it.id == 3).unwrap();
         assert_eq!(detail.parent, Some(2));
         assert_eq!(detail.sender.as_deref(), Some("小明"));
@@ -1455,6 +1474,43 @@ mod tests {
         // 1 = 旧消息今天完成（新分支）；3 = 今天到的（原有分支）；
         // 2 = 旧消息旧完成、4 = 还在下载（无 ok_at），都不进今天的列表
         assert_eq!(ids, vec![3, 1]);
+    }
+
+    /// 迅雷式置顶：正在下载的行排最前；busy 明细把整组转发一起带上不拆块；
+    /// 其余行维持新消息在前、块内 id 正序
+    #[test]
+    fn today_items_pin_downloading_groups_to_top() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
+                                   text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
+                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER,
+                                   dl_bytes INTEGER NOT NULL DEFAULT 0, dl_total INTEGER);",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO messages(id,kind,dl,name,parent,ts) VALUES
+             (1,'image','ok','done.jpg',NULL,?1),
+             (2,'forward','ok',NULL,NULL,?1),
+             (3,'image','busy','hot.jpg',2,?1),
+             (4,'video','busy','also-hot.mp4',NULL,?1),
+             (5,'image','ok','later.jpg',NULL,?1)",
+            [now],
+        )
+        .unwrap();
+        let ids: Vec<i64> = read_today_items(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|it| it.id)
+            .collect();
+        // 置顶两个 hot 组：顶层 busy 4（组键 4）在转发组（组键 2：父行 2 连 busy
+        // 明细 3）之前；其余按时间序 5、1
+        assert_eq!(ids, vec![4, 2, 3, 5, 1]);
     }
 
     /// 今日起点是本地 00:00，且不晚于现在——否则「今日」会恒为 0
