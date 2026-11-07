@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { logger } from "../logger";
 import { copyToClipboard } from "../utils";
@@ -78,7 +79,10 @@ export function ContextMenu({ x, y, items, onClose, label }: {
   const estH = items.length * ROW_H + 16;
   const left = Math.max(8, Math.min(x, window.innerWidth - MENU_W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - estH - 8));
-  return (
+  // portal 到 body：菜单常挂在带 transform 的卡片里（悬浮推近的 translateY/scale），
+  // position:fixed 会被祖先 transform 劫持成相对卡片定位，再被卡片的 overflow:hidden
+  // 裁掉——右键菜单直接「消失」。挂到 body 后 fixed 恒以视口定位，z-index 也只和顶层比。
+  return createPortal(
     <div
       className="media-context-menu"
       role="menu"
@@ -98,6 +102,7 @@ export function ContextMenu({ x, y, items, onClose, label }: {
           {item.label}
         </button>
       ))}
-    </div>
+    </div>,
+    document.body,
   );
 }
