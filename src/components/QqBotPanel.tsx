@@ -113,12 +113,25 @@ function FilterChip({
 
 /** QQ 存档 Bot 面板：仅下载列表（启停控制与 NapCat 配置卡已移到侧栏 QqBotControls） */
 /** 表格一行：转发明细缩进挂在父行下面；行组件 memo 后，2 秒一轮快照只重渲变化行 */
-const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
+const DlRow = memo(function DlRow({ item, onRetried }: { item: BotDlItem; onRetried: () => void }) {
   const kindLabel = KIND_LABEL[item.kind] ?? item.kind;
   const label = dlItemLabel(item);
   const dedupSuffix = item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
   // 明细行缩进挂在所属转发行下面（后端已按 COALESCE(parent,id) 排好序）
   const isDetail = item.parent != null;
+  // 失败行的手动重试：重置回队列后轮询会自动刷出新状态，这里只管发起
+  const [retryState, setRetryState] = useState<"idle" | "busy" | "error">("idle");
+  const retry = () => {
+    if (retryState === "busy") return;
+    setRetryState("busy");
+    api
+      .retryBotDl([item.id])
+      .then(() => {
+        setRetryState("idle");
+        onRetried();
+      })
+      .catch(() => setRetryState("error"));
+  };
   return (
     <tr
       className="border-t border-white/5 hover:bg-white/5 transition-colors duration-75"
@@ -139,6 +152,22 @@ const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
         <span className={STATUS_CLASS[dlStatusOf(item)]}>
           {statusLabel(item)}{progressPct(item)}{dedupSuffix}
         </span>
+        {dlStatusOf(item) === "dead" && (
+          <button
+            onClick={retry}
+            disabled={retryState === "busy"}
+            title={
+              retryState === "error"
+                ? "重置失败（bot 可能在忙），再点一次重试"
+                : "重置回下载队列，bot 约 20 秒内接手重下"
+            }
+            className={`ml-1.5 text-[11px] hover:underline ${
+              retryState === "error" ? "text-red-400" : "text-blue-400"
+            }`}
+          >
+            {retryState === "busy" ? "重试中…" : "重试"}
+          </button>
+        )}
       </td>
     </tr>
   );
@@ -181,6 +210,11 @@ export function QqBotPanel({
   const scopeItems = scope === "today" ? todayItems : history.items;
   const statusCounts = useMemo(() => countByDlStatus(scopeItems), [scopeItems]);
   const visibleItems = useMemo(() => filterByDlStatus(scopeItems, dlFilter), [scopeItems, dlFilter]);
+
+  // 行重试成功后的刷新：今日页签轮询会自动带出新状态；历史页签是静态快照，得重拉
+  const handleRowRetried = useCallback(() => {
+    if (scope === "history") loadHistory();
+  }, [scope, loadHistory]);
 
   // 端口不通且 bot 也没在跑时提示冷启动等待；NapCat 侧的扫码引导由下方
   // NapCat 状态卡的二维码+summary 负责，这里不再重复说
@@ -304,7 +338,7 @@ export function QqBotPanel({
                 </thead>
                 <tbody>
                   {visibleItems.map((item) => (
-                    <DlRow key={item.id} item={item} />
+                    <DlRow key={item.id} item={item} onRetried={handleRowRetried} />
                   ))}
                 </tbody>
               </table>

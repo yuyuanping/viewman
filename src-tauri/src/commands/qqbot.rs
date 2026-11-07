@@ -892,6 +892,54 @@ pub async fn bot_dl_history(app: tauri::AppHandle, limit: Option<i64>) -> Result
     .map_err_str()?
 }
 
+/// 手动重试：把失败行重置回队列头（dl='pending'、tries=0、next_try=0、清
+/// err/dead_at），与 `replay.py --retry` 同一口径——等于给那个命令一个按钮版。
+/// 不必惊动 bot 进程：运行中的 bot 由 sweeper 在 SWEEP_INTERVAL（20s）内扫到
+/// next_try 到期的 pending 行，经 dl_gate 认领重下（claim_dl_row 收 pending）。
+/// 直接写 bot.db 是安全的：bot 以 WAL 模式并发写，短事务 + busy_timeout 足够。
+/// ids 为空/缺省 = 重置全部失败行（含历史积压，与 replay.py --retry 一致）。
+fn reset_dl_rows(conn: &rusqlite::Connection, ids: Option<&[i64]>) -> Result<usize, String> {
+    const RESET: &str = "UPDATE messages SET dl='pending', tries=0, next_try=0, \
+                         err=NULL, dead_at=NULL WHERE dl='dead'";
+    match ids {
+        Some(ids) if !ids.is_empty() => {
+            let placeholders = std::iter::repeat("?")
+                .take(ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            conn.execute(
+                &format!("{RESET} AND id IN ({placeholders})"),
+                rusqlite::params_from_iter(ids.iter()),
+            )
+            .map_err_str()
+        }
+        _ => conn.execute(RESET, []).map_err_str(),
+    }
+}
+
+/// 面板「失败」行的重试按钮：重置后约 20 秒内被 bot 领走重下，返回重置条数
+#[tauri::command]
+pub async fn bot_dl_retry(app: tauri::AppHandle, ids: Option<Vec<i64>>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let settings = get_settings(&state)?;
+        let path = bot_db_path(&settings.root);
+        if !path.is_file() {
+            return Err(format!("数据库不存在: {}", path.display()));
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .map_err_str()?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))
+            .map_err_str()?;
+        reset_dl_rows(&conn, ids.as_deref())
+    })
+    .await
+    .map_err_str()?
+}
+
 #[tauri::command]
 pub async fn get_bot_status(app: tauri::AppHandle) -> Result<BotStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1223,6 +1271,47 @@ mod tests {
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
         // LIMIT 按行截断、可能切在组中间：转发父行 2 入选而明细 3 被截掉，预览可接受
         assert_eq!(ids, vec![5, 2]);
+    }
+
+    /// 手动重试只动 dead 行：pending/busy/ok 不受影响；指定 ids 只重置那些；
+    /// 重置后 tries/next_try/err/dead_at 全清——bot 的认领与重试计数从零起
+    #[test]
+    fn reset_dl_rows_requeues_only_dead() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT,
+                                   tries INTEGER NOT NULL DEFAULT 0,
+                                   next_try REAL NOT NULL DEFAULT 0,
+                                   err TEXT, dead_at INTEGER);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages(id, dl, tries, next_try, err, dead_at) VALUES
+             (1,'dead',15,999,'boom',123), (2,'dead',15,999,'boom',123),
+             (3,'pending',1,50,NULL,NULL), (4,'ok',0,0,NULL,NULL), (5,'busy',2,10,NULL,NULL);",
+        )
+        .unwrap();
+        // 全量：只有两条 dead 被重置
+        assert_eq!(reset_dl_rows(&conn, None).unwrap(), 2);
+        let row = |id: i64| -> (String, i64, f64, Option<String>, Option<i64>) {
+            conn.query_row(
+                "SELECT dl, tries, next_try, err, dead_at FROM messages WHERE id=?",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap()
+        };
+        // 重置后回队列头：pending / tries=0 / next_try=0 / 失败痕迹清空
+        assert_eq!(row(1), ("pending".into(), 0, 0.0, None, None));
+        // 非 dead 行原样：面板正在排队/下载/已成功的行不受重试影响
+        assert_eq!(row(3).0, "pending");
+        assert_eq!(row(3).1, 1);
+        assert_eq!(row(4).0, "ok");
+        assert_eq!(row(5).0, "busy");
+        // 指定 ids：只重置点名的行，不存在的不计
+        conn.execute("UPDATE messages SET dl='dead' WHERE id=1", []).unwrap();
+        assert_eq!(reset_dl_rows(&conn, Some(&[1, 99])).unwrap(), 1);
+        assert_eq!(row(1).0, "pending");
     }
 
     /// 老库没有 dead_at 列时列表不能整块报错，退化成「只按消息时间归日」

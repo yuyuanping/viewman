@@ -125,6 +125,9 @@ export const api = {
   getBotDlSnapshot: () => invoke<BotDlSnapshot>("get_bot_dl_snapshot"),
   /** 历史下载记录（不限当日）：面板「历史」页签按需一次拉最近 limit 条，后端缺省 500 */
   getBotDlHistory: (limit?: number) => invoke<BotDlItem[]>("bot_dl_history", { limit }),
+  /** 手动重试失败行：重置回下载队列（replay.py --retry 的按钮版），返回重置条数。
+   * 传 ids 只重置指定行，省略 = 全部失败行。bot 约 20 秒内（SWEEP_INTERVAL）接手重下 */
+  retryBotDl: (ids?: number[]) => invoke<number>("bot_dl_retry", { ids }),
   startBot: () => invoke<void>("start_bot"),
   /** 只停 bot.py 与 riskwatch，QQ/NapCat 不动；返回逐条结果说明 */
   stopBot: () => invoke<string>("stop_bot"),
