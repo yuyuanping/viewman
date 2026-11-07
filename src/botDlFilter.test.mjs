@@ -6,6 +6,8 @@ import {
   filterByDlStatus,
   dlItemLabel,
   dlSpeedOf,
+  dlForwardTaskText,
+  forwardGroupStats,
   DL_STATUS_ORDER,
   DL_STATUS_LABEL,
 } from './botDlFilter.ts';
@@ -62,4 +64,22 @@ test('下载速度：8 秒窗口差分，停滞 15 秒归零，收敛与重传�
   assert.equal(dlSpeedOf(busyRow(0), 1000 + 8_000 + 16_000 + 1_000), 0, '进度清零=重传，重开窗口');
   assert.equal(dlSpeedOf({ id: 9001, dl: 'ok', dl_bytes: 99 }, 9e9), 0, '收敛清状态');
   assert.equal(dlSpeedOf(busyRow(5_000_000), 9e9 + 1_000), 0, '清状态后再 busy 从头起窗');
+});
+
+test('转发任务态：busy 壳显 解析中/下载中 N/M 个；排队壳与普通行走常规标签', () => {
+  assert.equal(dlForwardTaskText({ kind: 'forward', dl: 'busy' }), '解析中', '明细未登记=展开中');
+  assert.equal(dlForwardTaskText({ kind: 'forward', dl: 'busy' }, { total: 3, done: 1 }), '下载中 1/3 个');
+  assert.equal(dlForwardTaskText({ kind: 'reply', dl: 'busy' }), '解析中', '引用壳取原文也是解析');
+  assert.equal(dlForwardTaskText({ kind: 'forward', dl: 'pending' }, { total: 3, done: 0 }), null, '排队的壳走常规「下载中」');
+  assert.equal(dlForwardTaskText({ kind: 'image', dl: 'busy' }, { total: 1, done: 0 }), null, '普通行不受影响');
+
+  const stats = forwardGroupStats([
+    { id: 1, parent: null, dl: 'busy', kind: 'forward', dedup: 0 },
+    { id: 2, parent: 1, dl: 'ok', kind: 'image', dedup: 0 },
+    { id: 3, parent: 1, dl: 'pending', kind: 'image', dedup: 0 },
+    { id: 4, parent: 1, dl: 'none', kind: 'text', dedup: 0 },
+    { id: 5, parent: 1, dl: 'ok', kind: 'image', dedup: 1 },
+  ]);
+  assert.deepEqual(stats.get(1), { total: 4, done: 3 }, 'ok/重复跳过/归档都算完成，pending 不算');
+  assert.equal(stats.get(2), undefined, '明细不再聚合');
 });

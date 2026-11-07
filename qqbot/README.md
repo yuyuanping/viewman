@@ -261,7 +261,10 @@ Rust 侧 `today_start_ts()` 用 chrono 算，与 sqlite 的 `localtime` 同一�
 
 纯文本直发消息（`dl='none'` 且无 `parent`）不进列表——面板是下载/归档视角。排序是
 **迅雷式**：正在下载的组置顶（busy 明细把整组转发一起带上、不拆块），下载一收敛
-行就落回时间序的位置；其余按 `COALESCE(parent, id)` 倒序，同一转发的明细聚在父行
+行就落回时间序的位置；正在处理中的行（busy 壳/明细，含旧积压的复检）恒可见，不落
+任何归日分支也不会隐身。busy 的转发/引用壳按**任务视角**显状态：明细未登记=「解析中」
+（展开/取原文的 API 往返），明细在册=「下载中 N/M 个」（聚合进度按个数，壳行没有
+字节总量）；其余按 `COALESCE(parent, id)` 倒序，同一转发的明细聚在父行
 下面连成一块；明细行缩进显示，
 标签前缀是内层发送者昵称（`sender_nick`），转发里不同人发的同名文件才分得清。
 列表列：内容 / 接收时间 / 完成 / 大小 / 类型 / 状态。「完成」= `messages.ok_at`
@@ -300,10 +303,11 @@ LIMIT 让 sqlite 走 top-N，不值得为它复制三支索引查询；切回「
 按自己的 ts 归日会让今天收到的转发在面板里只剩孤零零一个父行、里面几百张图一条都不显示
 （实测某天 19 个转发、705 条明细全部漏掉）。它是被哪条转发带进来的，就记在哪天。
 
-> 取数拆成四条查询，各自命中索引后在内存里按 id 去重、内存排序：
+> 取数拆成六条查询，各自命中索引后在内存里按 id 去重、内存排序：
 > `ts >= 今天` 走 `messages_ts`；`JOIN messages p ON p.id = m.parent` 走 `messages_ts` +
 > `messages_parent`；`dl='dead' AND dead_at >= 今天` 走 `messages_due`；
-> `dl='ok' AND ok_at >= 今天` 走 `messages_ok_at`。写成一条带
+> `dl='ok' AND ok_at >= 今天` 走 `messages_ok_at`；`dl='busy'` 与 `p.dl='busy'`
+> 走 `messages_due` 的 dl 前缀（正在处理恒可见）。写成一条带
 > `ORDER BY id DESC` 的 OR 查询，sqlite 会判成「倒着扫表更便宜」而丢掉索引——6 万行实测
 > 25ms/次，2 秒一轮的快照纯浪费；拆开后 1.5ms。
 > `messages_parent` / `messages_ok_at` 索引由 `db.py` 启动时建（老库补列之后，

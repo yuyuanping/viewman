@@ -58,6 +58,38 @@ export function filterByDlStatus<T extends BotDlItem>(items: readonly T[], statu
   return items.filter((item) => dlStatusOf(item) === status);
 }
 
+/** 转发块聚合：parent 行 id → 明细总数与已收敛数（ok/重复跳过/归档都算完成）。
+ * 面板据此给 busy 的转发壳显示「下载中 N/M 个」——壳行自己没有字节总量，
+ * 聚合进度按个数计，这是迅雷式任务视角的「排序-下载」段 */
+export function forwardGroupStats(
+  items: readonly BotDlItem[],
+): Map<number, { total: number; done: number }> {
+  const m = new Map<number, { total: number; done: number }>();
+  for (const it of items) {
+    if (it.parent == null) continue;
+    const g = m.get(it.parent) ?? { total: 0, done: 0 };
+    g.total += 1;
+    const st = dlStatusOf(it);
+    if (st === "ok" || st === "dedup" || st === "archived") g.done += 1;
+    m.set(it.parent, g);
+  }
+  return m;
+}
+
+/** 转发/引用任务行的状态文本：壳行 busy 时——明细还没登记显「解析中」（展开
+ * get_forward_msg / 取原文 get_msg 的往返）；明细在册显「下载中 N/M 个」。
+ * 非 busy（排队中的壳）返回 null，走常规「下载中」标签 */
+export function dlForwardTaskText(
+  item: Pick<BotDlItem, "kind" | "dl">,
+  group?: { total: number; done: number },
+): string | null {
+  if (item.dl !== "busy") return null;
+  if (item.kind === "reply") return "解析中";
+  if (item.kind !== "forward") return null;
+  if (!group || group.total === 0) return "解析中";
+  return `下载中 ${group.done}/${group.total} 个`;
+}
+
 /** 下载速度估算（字节/秒，0 = 不显示；面板负责格式化成「 · 1.5 MB/s」）。
  *
  * 进度按 1MB 块跳变（db.set_dl_progress 每块写回一次），逐秒差分全是锯齿：

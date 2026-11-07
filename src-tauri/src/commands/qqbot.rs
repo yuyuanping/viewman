@@ -695,10 +695,11 @@ fn today_start_ts() -> i64 {
 /// 不设条数上限：列表每日自然清零，单日行数与人手能扫的量级相当。
 /// 纯文本直发消息（dl='none' 且无 parent）不进列表——这里只列下载/归档动作。
 ///
-/// 拆成四条查询而不是一条 OR，是为了让索引用得上：带 `ORDER BY id DESC` 的单查询
+/// 拆成六条查询而不是一条 OR，是为了让索引用得上：带 `ORDER BY id DESC` 的单查询
 /// 会被 sqlite 判成「倒着扫表更便宜」，6 万行实测 25ms/次，2 秒一轮的快照纯浪费。
-/// 四支各自命中索引（顶层走 messages_ts，明细走父行的 ts，死信走 messages_due，
-/// 完成走 messages_ok_at），结果在内存里合并去重。
+/// 六支各自命中索引（顶层走 messages_ts，明细走父行的 ts，死信/在传走 messages_due
+/// 的 dl 前缀，完成走 messages_ok_at，busy 父行的明细再叠 messages_parent），
+/// 结果在内存里合并去重。
 /// 列表「内容」列的取值链：文件名 → 文本前 80 字 → 落盘文件名（path 基名）→
 /// 类型中文名。QQ 的图片/视频事件多数不带原始文件名（name 空、落盘以 md5 为名），
 /// path 基名就是最具体的内容；展开中的转发壳、取不到原文的引用连 path 都没有，
@@ -824,7 +825,25 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
         push(&mut stmt).map_err_str()?;
     }
 
-    // 四支可能重复命中同一行（今天收到/今天死/今天完成的），按 id 去重，
+    // 正在处理中的行恒可见（迅雷式任务视角）：复检中的旧积压/旧转发 ts 都是旧的，
+    // 任何归日分支都罩不住——正在下载却从列表里消失就本末倒置了。m.dl='busy' 走
+    // messages_due 的 dl 前缀（在传行 ≤ 并发上限 + 正在展开的转发壳，个位数级）；
+    // p.dl='busy' 把 busy 转发壳的全部明细带上（明细哪怕还在排队），任务整块可见。
+    // 两支不占参数，绕过 push 闭包固定的 ?1 绑定
+    let mut stmt = conn
+        .prepare(&format!("{cols} WHERE m.dl = 'busy'"))
+        .map_err_str()?;
+    for row in stmt.query_map([], map_dl_item).map_err_str()? {
+        out.push(row.map_err_str()?);
+    }
+    let mut stmt = conn
+        .prepare(&format!("{cols} WHERE p.dl = 'busy'"))
+        .map_err_str()?;
+    for row in stmt.query_map([], map_dl_item).map_err_str()? {
+        out.push(row.map_err_str()?);
+    }
+
+    // 六支可能重复命中同一行（今天收到/今天死/今天完成/正在处理），按 id 去重，
     // 再按迅雷式排序置顶正在下载的组
     let mut seen = std::collections::HashSet::with_capacity(out.len());
     out.retain(|it| seen.insert(it.id));
@@ -1471,9 +1490,9 @@ mod tests {
             .into_iter()
             .map(|it| it.id)
             .collect();
-        // 1 = 旧消息今天完成（新分支）；3 = 今天到的（原有分支）；
-        // 2 = 旧消息旧完成、4 = 还在下载（无 ok_at），都不进今天的列表
-        assert_eq!(ids, vec![3, 1]);
+        // 4 = 旧消息还在下载（busy 恒可见分支，置顶）；1 = 旧消息今天完成（ok_at
+        // 分支）；3 = 今天到的（原有分支）；2 = 旧消息旧完成，不进今天的列表
+        assert_eq!(ids, vec![4, 3, 1]);
     }
 
     /// 迅雷式置顶：正在下载的行排最前；busy 明细把整组转发一起带上不拆块；
@@ -1511,6 +1530,43 @@ mod tests {
         // 置顶两个 hot 组：顶层 busy 4（组键 4）在转发组（组键 2：父行 2 连 busy
         // 明细 3）之前；其余按时间序 5、1
         assert_eq!(ids, vec![4, 2, 3, 5, 1]);
+    }
+
+    /// 正在处理中的行恒可见：旧 ts 的 busy 行、busy 转发壳连它的明细（哪怕明细
+    /// 还在排队）都进今日列表——复检中的旧转发整块看得见，任务不隐身
+    #[test]
+    fn today_items_show_rows_in_flight_even_when_old() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
+                                   text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
+                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER,
+                                   dl_bytes INTEGER NOT NULL DEFAULT 0, dl_total INTEGER);",
+        )
+        .unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - 3 * 86400;
+        conn.execute(
+            "INSERT INTO messages(id,kind,dl,name,parent,ts,ok_at) VALUES
+             (1,'image','busy','hot.jpg',NULL,?1,NULL),
+             (2,'forward','busy',NULL,NULL,?1,NULL),
+             (3,'image','pending','queued.jpg',2,?1,NULL),
+             (4,'image','ok','old-done.jpg',NULL,?1,?1)",
+            [old],
+        )
+        .unwrap();
+        let ids: Vec<i64> = read_today_items(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|it| it.id)
+            .collect();
+        // busy 顶层 1 与 busy 转发壳 2（连排队中的明细 3）置顶可见；
+        // 旧完成且 ts 旧的 4 无任何归日分支命中，不出现
+        assert_eq!(ids, vec![2, 3, 1]);
     }
 
     /// 今日起点是本地 00:00，且不晚于现在——否则「今日」会恒为 0

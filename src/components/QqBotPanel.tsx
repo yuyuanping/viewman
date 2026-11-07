@@ -5,9 +5,11 @@ import { formatDlSize } from "../utils";
 import {
   countByDlStatus,
   filterByDlStatus,
+  dlForwardTaskText,
   dlItemLabel,
   dlSpeedOf,
   dlStatusOf,
+  forwardGroupStats,
   DL_STATUS_LABEL,
   DL_STATUS_ORDER,
   type DlStatus,
@@ -72,6 +74,14 @@ function speedText(item: BotDlItem): string {
   return s > 0 ? ` · ${formatDlSize(s)}/s` : "";
 }
 
+/** 转发/引用壳行 busy 时的任务态文本（解析中 / 下载中 N/M 个），普通行返回 null */
+function taskText(
+  item: BotDlItem,
+  group: { total: number; done: number } | undefined,
+): string | null {
+  return dlForwardTaskText(item, group);
+}
+
 /** 接收时间串：今天收到的只显 HH:MM 省宽度；跨日的（昨日消息今天复检转死等）补 MM-DD。
  * 转发明细行后端已折算成父转发收到的时刻，不是内层消息的原始发送时间 */
 function recvText(item: BotDlItem): string {
@@ -123,9 +133,19 @@ function FilterChip({
 
 /** QQ 存档 Bot 面板：仅下载列表（启停控制与 NapCat 配置卡已移到侧栏 QqBotControls） */
 /** 表格一行：转发明细缩进挂在父行下面；行组件 memo 后，2 秒一轮快照只重渲变化行 */
-const DlRow = memo(function DlRow({ item, onRetried }: { item: BotDlItem; onRetried: () => void }) {
+const DlRow = memo(function DlRow({
+  item,
+  group,
+  onRetried,
+}: {
+  item: BotDlItem;
+  /** 所属转发块的聚合进度（仅父行会拿到），busy 壳行据此显示 解析中/下载中 N/M 个 */
+  group?: { total: number; done: number };
+  onRetried: () => void;
+}) {
   const kindLabel = KIND_LABEL[item.kind] ?? item.kind;
   const label = dlItemLabel(item);
+  const task = taskText(item, group);
   const dedupSuffix = item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
   // 明细行缩进挂在所属转发行下面（后端已按 COALESCE(parent,id) 排好序）
   const isDetail = item.parent != null;
@@ -160,7 +180,7 @@ const DlRow = memo(function DlRow({ item, onRetried }: { item: BotDlItem; onRetr
       <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
       <td className="py-1.5 px-2">
         <span className={STATUS_CLASS[dlStatusOf(item)]}>
-          {statusLabel(item)}{progressPct(item)}{speedText(item)}{dedupSuffix}
+          {(task ?? statusLabel(item))}{!task && progressPct(item)}{speedText(item)}{dedupSuffix}
         </span>
         {dlStatusOf(item) === "dead" && (
           <button
@@ -220,6 +240,8 @@ export function QqBotPanel({
   const scopeItems = scope === "today" ? todayItems : history.items;
   const statusCounts = useMemo(() => countByDlStatus(scopeItems), [scopeItems]);
   const visibleItems = useMemo(() => filterByDlStatus(scopeItems, dlFilter), [scopeItems, dlFilter]);
+  // 转发块聚合（迅雷式任务视角）：busy 壳行显示 解析中/下载中 N/M 个
+  const groupStats = useMemo(() => forwardGroupStats(scopeItems), [scopeItems]);
 
   // 行重试成功后的刷新：今日页签轮询会自动带出新状态；历史页签是静态快照，得重拉
   const handleRowRetried = useCallback(() => {
@@ -348,7 +370,12 @@ export function QqBotPanel({
                 </thead>
                 <tbody>
                   {visibleItems.map((item) => (
-                    <DlRow key={item.id} item={item} onRetried={handleRowRetried} />
+                    <DlRow
+                      key={item.id}
+                      item={item}
+                      group={item.parent == null ? groupStats.get(item.id) : undefined}
+                      onRetried={handleRowRetried}
+                    />
                   ))}
                 </tbody>
               </table>
