@@ -158,6 +158,12 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
     _PH = {"image": "[图片]", "video": "[视频]", "file": "[文件]",
            "record": "[语音]", "mface": "[表情]"}
 
+    # 登记互斥锁：段任务是并发的，登记走线程池完成顺序不定——不加锁的话
+    # 谁的 DB 写先回来谁先到下载闸门，转发块内下载顺序就乱了。锁住登记这一步，
+    # 「先解析→先落库→先排闸门」严格成立（Lock 与 Semaphore 同为 FIFO 唤醒，
+    # 释放后当前任务同步走到 gate.acquire，不等出队者插队）
+    reg_lock = asyncio.Lock()
+
     async def _media_job(t: str, d: dict, nickname: str, inner_ts: int) -> str:
         """单个媒体段：预登记 pending 行，下载，收敛终态，返回 md 占位文本。"""
         kind = {"mface": "image", "record": "file"}.get(t, t)
@@ -186,9 +192,10 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
             fail_label = name or _PH[t].strip("[]")
         row_id = None
         if report:
-            row_id = await report({"kind": kind, "sender": nickname,
-                                   "ts": inner_ts, "src": src, "ref": ref,
-                                   "file": name, "size": size, "queued": True})
+            async with reg_lock:
+                row_id = await report({"kind": kind, "sender": nickname,
+                                       "ts": inner_ts, "src": src, "ref": ref,
+                                       "file": name, "size": size, "queued": True})
         prog = None
         if on_progress_row is not None and row_id is not None:
             async def prog(done: int, total: int | None) -> None:
