@@ -126,7 +126,7 @@ async def _save_media_segment(data: dict, kind: str, storage,
         url, kind, scope, expect_md5=expect_md5, on_progress=on_progress
     ) if url else None
     if result is None and file_id:
-        fallback_url = await get_file_url(file_id)
+        fallback_url = await get_file_url(file_id, kind)
         if fallback_url:
             result = await storage.save_media(
                 fallback_url, kind, scope, expect_md5=expect_md5,

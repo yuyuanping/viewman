@@ -261,21 +261,27 @@ class Bot:
                      json.dumps(full, ensure_ascii=False)[:300])
         return None
 
-    async def get_file_url(self, file_id: str) -> str | None:
+    async def get_file_url(self, file_id: str, kind: str = "file") -> str | None:
         """通过 NapCat HTTP API (get_file) 取文件本地路径。
 
         NapCat 把本地绝对路径放在 data.file 还是 data.url 并不统一（另一字段留空
         字符串），两个都要认；storage 侧本地路径和 http url 都能处理。
+
+        预算分档：这条调用发生在下载槽内（认领后才走兜底）。image/video 的
+        get_file 只是 CDN 直链失效后的碰运气路径——NapCat 现场拉原件一次
+        90s、三连试能把槽位 0 字节空占近 5 分钟（实测一张失效图片占槽 4.6
+        分钟，四槽全灭就是面板「下载中却没速度」），只给 1 次 30s，失败走
+        退避重试。file/record 的 get_file 是唯一取件路径，保留 90s×3
+        （旧 15s 曾大面积超时，[FILE SKIP] cannot resolve file source）。
         """
+        attempts, budget = (1, 30) if kind in ("image", "video") else (3, 90)
         api_url = self.config.get("api_url", "http://127.0.0.1:9502").rstrip("/") + "/get_file"
         headers = {"Authorization": f"Bearer {self.config.get('ws_token', '')}"}
-        # 私聊文件常需 NapCat 现场从 QQ 服务器拉取，旧 15s 曾大面积超时
-        # （[FILE SKIP] cannot resolve file source）。改为 90s + 3 次尝试。
-        for attempt in (1, 2, 3):
+        for attempt in range(1, attempts + 1):
             try:
                 async with self.session.post(
                         api_url, headers=headers, json={"file_id": file_id},
-                        timeout=aiohttp.ClientTimeout(total=90)) as resp:
+                        timeout=aiohttp.ClientTimeout(total=budget)) as resp:
                     d = await resp.json()
                 data = d.get("data") or {}
                 loc = data.get("file") or data.get("url")
@@ -286,8 +292,9 @@ class Bot:
                 logger.error("[get_file_url] bad response: %s",
                              json.dumps(d, ensure_ascii=False)[:300])
             except Exception as e:
-                logger.error("[get_file_url] attempt %d/3 failed: %s", attempt, e)
-            if attempt < 3:
+                logger.error("[get_file_url] attempt %d/%d failed: %s",
+                             attempt, attempts, e)
+            if attempt < attempts:
                 await asyncio.sleep(2)
         return None
 
@@ -446,7 +453,8 @@ class Bot:
                 await self._sweep_once()
             except Exception as e:
                 logger.error("[SWEEP] %s", e)
-            # 定时班车之外，收到磁力/网址链接会被 _kick_magnets 提前叫醒。
+            # 定时班车之外，磁力/网址链接（_kick_magnets）与任一下载尝试结束
+            # （_attempt_row，槽位空了立刻补位）都会提前叫醒。
             # clear 放在 wait 之后：唤醒期间到达的链接不会丢，最坏是多跑一轮。
             try:
                 await asyncio.wait_for(self.registry_kick.wait(), SWEEP_INTERVAL)
@@ -816,6 +824,10 @@ class Bot:
             if acquired:
                 gate.release()
             self._dl_inflight.discard(mid)
+            # 尝试一结束就立刻叫醒 sweeper 补位喂新行，不等 20s 班车——
+            # 槽位空着的时候排队的行越早 spawn 越早开始传
+            # （磁力/网址链接的 _kick_magnets 用的是同一个事件）
+            self.registry_kick.set()
 
     async def _process_row(self, row: dict, mid: int, kind: str) -> None:
         scope = row.get("scope") or "private"
@@ -969,7 +981,7 @@ class Bot:
                     on_progress=_progress_self)
             if r is None and row.get("ref"):
                 # CDN url 可能已过期：改经 NapCat file_id 取本地原件重试
-                p = await self.get_file_url(row["ref"])
+                p = await self.get_file_url(row["ref"], kind)
                 if p:
                     r = await self.storage.save_media(
                         p, kind, scope, expect_md5=md5_hint(row["ref"]),
