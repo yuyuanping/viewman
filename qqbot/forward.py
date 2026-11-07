@@ -161,6 +161,13 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
     async def _media_job(t: str, d: dict, nickname: str, inner_ts: int) -> str:
         """单个媒体段：预登记 pending 行，下载，收敛终态，返回 md 占位文本。"""
         kind = {"mface": "image", "record": "file"}.get(t, t)
+        # 段里的 file_size 是登记期就能拿到的预估大小（实测 NapCat 转发段必带），
+        # 登记时落 messages.bytes——面板「大小」列排队就有数，下载中做总量兜底；
+        # 各版本偶发字符串数字，容错转 int
+        try:
+            size = int(d.get("file_size") or d.get("size") or 0) or None
+        except (TypeError, ValueError):
+            size = None
         if t in ("file", "record"):
             src = d.get("file_id") or d.get("url") or ""
             ref = d.get("file_id") or ""
@@ -181,7 +188,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
         if report:
             row_id = await report({"kind": kind, "sender": nickname,
                                    "ts": inner_ts, "src": src, "ref": ref,
-                                   "file": name, "queued": True})
+                                   "file": name, "size": size, "queued": True})
         prog = None
         if on_progress_row is not None and row_id is not None:
             async def prog(done: int, total: int | None) -> None:
@@ -203,7 +210,7 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                 stats["dedup"] = stats.get("dedup", 0) + 1
         if report:
             done_item = {"kind": kind, "sender": nickname, "ts": inner_ts,
-                         "src": src, "ref": ref, "file": name,
+                         "src": src, "ref": ref, "file": name, "size": size,
                          "ok": r is not None,
                          "dedup": (r or {}).get("dedup"),
                          "md5": (r or {}).get("md5"),

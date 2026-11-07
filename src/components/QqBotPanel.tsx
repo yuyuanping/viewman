@@ -56,12 +56,13 @@ function progressPct(item: BotDlItem): string {
   return ` ${Math.min(100, Math.round((done / total) * 100))}%`;
 }
 
-/** 在传行的尺寸串：总量已知显示「已下 / 总量」（迅雷式），未知只显已落盘字节
- * （转发父行=块内累计）；其余行（含排队）直接显最终大小 */
+/** 在传行的尺寸串：总量已知显示「已下 / 总量」（迅雷式）——Content-Length 优先，
+ * 解析期拿到的预估大小（登记时落的 messages.bytes）兜底；都没有只显已落盘字节
+ * （转发父行=块内累计）。其余行（含排队）直接显大小 */
 function sizeText(item: BotDlItem): string {
   if (item.dl === "busy") {
     const done = item.dl_bytes ?? 0;
-    const total = item.dl_total;
+    const total = item.dl_total ?? (item.size != null && item.size > 0 ? item.size : null);
     if (total != null && total > 0) return `${formatDlSize(done)} / ${formatDlSize(total)}`;
     return done > 0 ? formatDlSize(done) : "…";
   }

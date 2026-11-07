@@ -865,6 +865,7 @@ class Bot:
                             **base, kind=item.get("kind", ""),
                             name=item.get("file"), src=item.get("src"),
                             ref=item.get("ref"), dl="pending",
+                            bytes=item.get("size"),
                             next_try=time.time() + 1800)
                         if rid is not None:
                             self._dl_inflight.add(rid)
@@ -912,7 +913,7 @@ class Bot:
                         await self.db.add_message(
                             **base, kind=kind_i, name=item.get("file"),
                             src=item.get("src"), ref=item.get("ref"),
-                            dl="pending")
+                            bytes=item.get("size"), dl="pending")
                 except Exception as e:
                     logger.error("[FWD ITEM] 明细落库失败 id=%s: %s", rid, e)
                 return rid
