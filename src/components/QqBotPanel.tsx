@@ -14,8 +14,7 @@ import {
 
 /** 状态文字的配色：行内标签与筛选条共用一套，深浅不同但语义一致 */
 const STATUS_CLASS: Record<DlStatus, string> = {
-  busy: "text-blue-300",
-  pending: "text-yellow-300",
+  downloading: "text-blue-300",
   dead: "text-red-300",
   dedup: "text-gray-400",
   ok: "text-emerald-300",
@@ -43,7 +42,8 @@ function statusLabel(item: BotDlItem): string {
   return status === "archived" && item.kind === "text" ? "已存档" : DL_STATUS_LABEL[status];
 }
 
-/** 下载中行的实时进度串：总量已知给「42%」，未知只显「下载中」 */
+/** 在传行（dl=busy，「下载中」里真在传字节的那部分）的实时进度串：
+ * 总量已知给「42%」，排队行没有进度显示，状态就是纯「下载中」 */
 function progressPct(item: BotDlItem): string {
   if (item.dl !== "busy") return "";
   const done = item.dl_bytes ?? 0;
@@ -53,7 +53,8 @@ function progressPct(item: BotDlItem): string {
   return ` ${Math.min(100, Math.round((done / total) * 100))}%`;
 }
 
-/** 下载中行的尺寸串：显示已落盘字节（转发父行=块内累计），下完翻回最终大小 */
+/** 在传行的尺寸串：显示已落盘字节（转发父行=块内累计），下完翻回最终大小；
+ * 其余行（含排队）直接显最终大小 */
 function sizeText(item: BotDlItem): string {
   if (item.dl === "busy") {
     const done = item.dl_bytes ?? 0;

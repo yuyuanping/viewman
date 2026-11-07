@@ -8,14 +8,13 @@
  */
 import type { BotDlItem } from "./types";
 
-export type DlStatus = "busy" | "pending" | "dead" | "dedup" | "ok" | "archived";
+export type DlStatus = "downloading" | "dead" | "dedup" | "ok" | "archived";
 
 /** 筛选条的展示顺序：进行中 → 出问题的 → 结果。跟人的关注顺序一致 */
-export const DL_STATUS_ORDER: readonly DlStatus[] = ["busy", "pending", "dead", "dedup", "ok", "archived"] as const;
+export const DL_STATUS_ORDER: readonly DlStatus[] = ["downloading", "dead", "dedup", "ok", "archived"] as const;
 
 export const DL_STATUS_LABEL: Record<DlStatus, string> = {
-  busy: "下载中",
-  pending: "排队",
+  downloading: "下载中",
   dead: "失败",
   dedup: "重复跳过",
   ok: "已下载",
@@ -25,15 +24,17 @@ export const DL_STATUS_LABEL: Record<DlStatus, string> = {
 /**
  * 一行归到哪个状态。顺序有讲究：
  * - dl 状态机优先，pending/busy/dead 压过一切（哪怕这行同时带 dedup 标记）；
+ * - busy（在传）与 pending（排队）合并为一个「下载中」——迅雷式的任务视角：
+ *   面板只关心「这一批在下载」，在传的行另带实时百分比（progressPct），
+ *   排队等槽是同一件事的等待段，不值得单独一个状态；
  * - dl='ok' 且 kind='forward' 归「已归档」——转发父行只是展开的壳，
  *   它的 dedup 记的是内部跳过的媒体数，跟「这条被去重了」不是一回事；
  * - 剩下的 ok 行才看 dedup 区分「重复跳过」与「已下载」；
  * - dl='none' 的纯文本直发与转发明细都只是入档，没有下载动作，归「已归档」。
  */
 export function dlStatusOf(item: Pick<BotDlItem, "dl" | "kind" | "dedup">): DlStatus {
-  if (item.dl === "busy") return "busy";
+  if (item.dl === "busy" || item.dl === "pending") return "downloading";
   if (item.dl === "dead") return "dead";
-  if (item.dl === "pending") return "pending";
   if (item.dl === "none" || item.kind === "forward") return "archived";
   return item.dedup > 0 ? "dedup" : "ok";
 }
@@ -44,9 +45,9 @@ export function dlItemLabel(item: BotDlItem): string {
   return item.parent != null && item.sender ? `${item.sender}：${name}` : name;
 }
 
-/** 当日各状态的条数，供筛选条上的角标。六个键恒在，没出现的状态为 0 */
+/** 当日各状态的条数，供筛选条上的角标。五个键恒在，没出现的状态为 0 */
 export function countByDlStatus(items: readonly BotDlItem[]): Record<DlStatus, number> {
-  const counts = { busy: 0, pending: 0, dead: 0, dedup: 0, ok: 0, archived: 0 } as Record<DlStatus, number>;
+  const counts = { downloading: 0, dead: 0, dedup: 0, ok: 0, archived: 0 } as Record<DlStatus, number>;
   for (const item of items) counts[dlStatusOf(item)] += 1;
   return counts;
 }

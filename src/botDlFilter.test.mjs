@@ -13,9 +13,9 @@ const row = (id, dl, kind = 'image', dedup = 0, parent = null, sender = null) =>
   id, dl, kind, dedup, parent, sender, label: `#${id}`, size: null, err: null,
 });
 
-test('下载队列状态压过一切其它标记', () => {
-  assert.equal(dlStatusOf(row(1, 'busy')), 'busy');
-  assert.equal(dlStatusOf(row(2, 'pending', 'image', 1)), 'pending');
+test('下载队列状态压过一切其它标记；排队与在传合并为「下载中」', () => {
+  assert.equal(dlStatusOf(row(1, 'busy')), 'downloading');
+  assert.equal(dlStatusOf(row(2, 'pending', 'image', 1)), 'downloading', '排队也归下载中，dedup 不改变归类');
   assert.equal(dlStatusOf(row(3, 'dead')), 'dead');
 });
 
@@ -30,9 +30,9 @@ test('ok 行按 dedup 分成重复跳过与已下载', () => {
   assert.equal(dlStatusOf(row(8, 'ok', 'video', 1)), 'dedup');
 });
 
-test('计数覆盖六个状态，未出现的状态为 0', () => {
-  const counts = countByDlStatus([row(1, 'busy'), row(2, 'busy'), row(3, 'dead'), row(4, 'ok')]);
-  assert.deepEqual(counts, { busy: 2, pending: 0, dead: 1, dedup: 0, ok: 1, archived: 0 });
+test('计数覆盖五个状态，未出现的状态为 0', () => {
+  const counts = countByDlStatus([row(1, 'busy'), row(2, 'pending'), row(3, 'dead'), row(4, 'ok')]);
+  assert.deepEqual(counts, { downloading: 2, dead: 1, dedup: 0, ok: 1, archived: 0 });
   assert.equal(Object.keys(counts).length, DL_STATUS_ORDER.length);
   for (const s of DL_STATUS_ORDER) assert.ok(DL_STATUS_LABEL[s], `${s} 缺标签`);
 });
