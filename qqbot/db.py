@@ -183,6 +183,10 @@ class DB:
             # 6 万行实测 27ms vs 1.3ms，2 秒一轮的快照扛不住
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_parent ON messages(parent)")
+            # viewman 当日列表第 4 支（dl='ok' AND ok_at >= 今天，复检救回的旧积压
+            # 按完成时刻归日）走 messages_ok_at；没它 2 秒一轮的快照退化成全表扫
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS messages_ok_at ON messages(ok_at)")
             # 崩溃恢复：上一次进程遗留的 busy 一律回队。只有 bot 主进程
             # （recover=True，已先抢到单实例锁）能做——search/replay 等命令行
             # 工具若也做恢复，会把运行中 bot 正在处理的事件打回队列造成重复处理

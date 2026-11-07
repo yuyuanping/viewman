@@ -688,15 +688,17 @@ fn today_start_ts() -> i64 {
 /// `ts >= 今天 00:00`（顶层消息今天到的，含今早排队、下午才下完的）；
 /// 或 `dl='dead' 且 dead_at >= 今天 00:00`（今天才转死的——几天前的消息在今日复检中
 /// 失败时也能看见，与 dead_today 对得上；每日复检再次失败不刷新 dead_at，
-/// 见 db.bump_dl，所以旧积压不会被天天重计）。
+/// 见 db.bump_dl，所以旧积压不会被天天重计）；
+/// 或 `dl='ok' 且 ok_at >= 今天 00:00`（今天才下载完成的——复检救回的旧积压按
+/// 完成时刻归日，救回一行不再从列表里消失）。
 ///
 /// 不设条数上限：列表每日自然清零，单日行数与人手能扫的量级相当。
 /// 纯文本直发消息（dl='none' 且无 parent）不进列表——这里只列下载/归档动作。
 ///
-/// 拆成三条查询而不是一条 OR，是为了让索引用得上：带 `ORDER BY id DESC` 的单查询
+/// 拆成四条查询而不是一条 OR，是为了让索引用得上：带 `ORDER BY id DESC` 的单查询
 /// 会被 sqlite 判成「倒着扫表更便宜」，6 万行实测 25ms/次，2 秒一轮的快照纯浪费。
-/// 三支各自命中索引（顶层走 messages_ts，明细走父行的 ts，死信走 messages_due），
-/// 结果在内存里合并去重。
+/// 四支各自命中索引（顶层走 messages_ts，明细走父行的 ts，死信走 messages_due，
+/// 完成走 messages_ok_at），结果在内存里合并去重。
 /// 列表「内容」列的取值链：文件名 → 文本前 80 字 → 落盘文件名（path 基名）→
 /// 类型中文名。QQ 的图片/视频事件多数不带原始文件名（name 空、落盘以 md5 为名），
 /// path 基名就是最具体的内容；展开中的转发壳、取不到原文的引用连 path 都没有，
@@ -812,7 +814,17 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
         push(&mut stmt).map_err_str()?;
     }
 
-    // 三支可能重复命中同一行（今天收到的、今天死的），按 id 去重。
+    // 几天前收到、今天才下载完成的行（复检救回的旧积压、补录的老消息）按「完成」
+    // 时刻归日。没这支的话旧积压每救回一行，列表里就悄悄消失一条——面板只出不进。
+    // ok_at 由 db.py 侧迁移（mark_dl_ok 收敛时落），老库可能没有这列；缺列略过这支
+    if has_messages_col(conn, "ok_at") {
+        let mut stmt = conn
+            .prepare(&format!("{cols} WHERE m.dl = 'ok' AND m.ok_at >= ?1"))
+            .map_err_str()?;
+        push(&mut stmt).map_err_str()?;
+    }
+
+    // 四支可能重复命中同一行（今天收到/今天死/今天完成的），按 id 去重。
     // 排序键取 COALESCE(parent, id) 倒序（新消息在前），块内按 id 正序：
     // 父行 id 最小排最前，转发明细跟在父行下面、按转发里的先后铺开
     let mut seen = std::collections::HashSet::with_capacity(out.len());
@@ -852,17 +864,24 @@ fn read_dl_history(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<BotDlI
 }
 
 /// 下载汇总：一次聚合出累计/今日完成量与今日重复跳过数。
-/// 今日口径同 today_start_ts（消息时间 ts，本地自然日）
+/// 今日口径同 today_start_ts（本地自然日）：今天到的（ts）或今天才下载完成的
+/// （ok_at，复检救回的旧积压）都计——与当日列表的归日分支同源。老库没有
+/// ok_at 列就退回只按 ts
 fn read_summary(conn: &rusqlite::Connection) -> Result<BotDlSummary, String> {
     let mut s = BotDlSummary::default();
     let today = today_start_ts();
+    let today_when = if has_messages_col(conn, "ok_at") {
+        "ts >= ?1 OR ok_at >= ?1"
+    } else {
+        "ts >= ?1"
+    };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT COUNT(*), COALESCE(SUM(bytes),0),
-                    COALESCE(SUM(CASE WHEN ts >= ?1 THEN 1 END),0),
-                    COALESCE(SUM(CASE WHEN ts >= ?1 THEN COALESCE(bytes,0) END),0)
-             FROM messages WHERE dl='ok' AND kind IN ('image','video','file')",
-        )
+                    COALESCE(SUM(CASE WHEN {today_when} THEN 1 END),0),
+                    COALESCE(SUM(CASE WHEN {today_when} THEN COALESCE(bytes,0) END),0)
+             FROM messages WHERE dl='ok' AND kind IN ('image','video','file')"
+        ))
         .map_err_str()?;
     let row = stmt
         .query_row([today], |r| {
@@ -1400,6 +1419,42 @@ mod tests {
             .collect();
         // 3 是昨天的转发带进来的明细，跟着父行走，不出现
         assert_eq!(ids, vec![1]);
+    }
+
+    /// 几天前收到、今天才下载完成的行（复检救回的旧积压）按「完成」时刻归日；
+    /// 没这支的话积压每救回一行，列表里就悄悄消失一条
+    #[test]
+    fn today_items_include_rows_completed_today() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
+                                   text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
+                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER);",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let old = now - 3 * 86400;
+        conn.execute(
+            "INSERT INTO messages(id,kind,dl,name,bytes,dedup,parent,sender_nick,ts,ok_at) VALUES
+             (1,'image','ok','rescued.jpg',10,0,NULL,NULL,?1,?2),
+             (2,'image','ok','old-done.jpg',10,0,NULL,NULL,?1,?1),
+             (3,'image','ok','fresh.jpg',10,0,NULL,NULL,?2,NULL),
+             (4,'image','busy','downloading.jpg',10,0,NULL,NULL,?1,NULL)",
+            rusqlite::params![old, now],
+        )
+        .unwrap();
+        let ids: Vec<i64> = read_today_items(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|it| it.id)
+            .collect();
+        // 1 = 旧消息今天完成（新分支）；3 = 今天到的（原有分支）；
+        // 2 = 旧消息旧完成、4 = 还在下载（无 ok_at），都不进今天的列表
+        assert_eq!(ids, vec![3, 1]);
     }
 
     /// 今日起点是本地 00:00，且不晚于现在——否则「今日」会恒为 0
