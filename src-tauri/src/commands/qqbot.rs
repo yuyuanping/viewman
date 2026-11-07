@@ -843,11 +843,13 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
         out.push(row.map_err_str()?);
     }
 
-    // 六支可能重复命中同一行（今天收到/今天死/今天完成/正在处理），按 id 去重，
-    // 再按迅雷式排序置顶正在下载的组
+    // 六支可能重复命中同一行（今天收到/今天死/今天完成/正在处理），按 id 去重。
+    // 排序**先于**滤壳：busy 转发壳要把它的明细组顶上去，壳自己随后退场——
+    // 先滤壳再排序会让壳的 busy 状态进不了 hot 集，明细失去置顶
     let mut seen = std::collections::HashSet::with_capacity(out.len());
     out.retain(|it| seen.insert(it.id));
     sort_dl_items(&mut out);
+    out.retain(|it| it.kind != "forward");
     Ok(out)
 }
 
@@ -884,9 +886,12 @@ fn sort_dl_items(items: &mut [BotDlItem]) {
 /// 条数上限由调用方给——全库几十万行不可能一次端给面板。
 fn read_dl_history(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<BotDlItem>, String> {
     let cols = dl_item_cols(conn);
+    // 壳行过滤下推进 WHERE：LIMIT 窗口要作用在最终行集上，否则壳占一个窗位、
+    // 滤壳后同组的明细就被截掉了
     let mut stmt = conn
         .prepare(&format!(
-            "{cols} WHERE m.dl != 'none' OR m.parent IS NOT NULL \
+            "{cols} WHERE (m.dl != 'none' OR m.parent IS NOT NULL) \
+             AND m.kind != 'forward' \
              ORDER BY COALESCE(m.parent, m.id) DESC, m.id ASC LIMIT ?1"
         ))
         .map_err_str()?;
@@ -895,9 +900,10 @@ fn read_dl_history(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<BotDlI
     for row in rows {
         out.push(row.map_err_str()?);
     }
-    // SQL 的 LIMIT 先按时间序截窗，Rust 侧再把窗内的 busy 组顶上去；
-    // busy 行都是新行（id 大），实际不会落在窗外的
+    // SQL 的 LIMIT 先按时间序截窗，Rust 侧再把窗内的 busy 组顶上去（busy 行都是
+    // 新行，实际不会落在窗外；排序先于滤壳，busy 壳的 hot 才带得动它的明细组）
     sort_dl_items(&mut out);
+    out.retain(|it| it.kind != "forward");
     Ok(out)
 }
 
@@ -1315,15 +1321,16 @@ mod tests {
         assert_eq!(items.iter().find(|it| it.id == 5).unwrap().ts, Some(old), "昨日转死行保留原始时间");
         // 非进度行取建表默认值（0/NULL），面板按 busy 才读它们
         assert_eq!(items.iter().find(|it| it.id == 8).unwrap().dl_bytes, Some(0));
-        assert_eq!(items.iter().find(|it| it.id == 2).unwrap().dl_total, None);
+        assert_eq!(items.iter().find(|it| it.id == 8).unwrap().dl_total, None);
         // 完成时刻按列透传：有值带出去，没有（未完成/历史行）为 NULL，面板显 "-"
         assert_eq!(it1.ok_at, Some(now - 600));
         assert_eq!(items.iter().find(|it| it.id == 3).unwrap().ok_at, None);
         assert_eq!(items.iter().find(|it| it.id == 8).unwrap().ok_at, None);
         // 标签链：文件名 > 文本前 80 字 > 落盘文件名基名 > 类型中文名，
-        // QQ 图片/视频多数没文件名，落盘 md5 名就是最具体的内容
+        // QQ 图片/视频多数没文件名，落盘 md5 名就是最具体的内容；
+        // 壳行 2 已不进列表，文本回退由无 name 有 text 的明细 3 验证
         assert_eq!(it1.label, "a.jpg");
-        assert_eq!(items.iter().find(|it| it.id == 2).unwrap().label, "聊天记录");
+        assert_eq!(items.iter().find(|it| it.id == 3).unwrap().label, "转发里的图");
         assert_eq!(
             items.iter().find(|it| it.id == 8).unwrap().label,
             "abc123.jpg",
@@ -1336,9 +1343,10 @@ mod tests {
         );
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
         // 迅雷式排序：busy 行 1 置顶；其余按 COALESCE(parent,id) 倒序、块内 id 正序：
-        // 8、5 各一组，转发 2 连明细（3/9）连块。10/11 是昨天那批发来的转发与它的
-        // 明细，今天没动静就不出现；4 是纯文本直发；8 两支都命中，去重后只出现一次
-        assert_eq!(ids, vec![1, 8, 5, 2, 3, 9]);
+        // 8、5 各一组，转发壳 2 不进列表但其明细（3/9）按组键 2 连块。10/11 是
+        // 昨天那批发来的转发与它的明细，今天没动静就不出现；4 是纯文本直发；
+        // 8 两支都命中，去重后只出现一次
+        assert_eq!(ids, vec![1, 8, 5, 3, 9]);
         let detail = items.iter().find(|it| it.id == 3).unwrap();
         assert_eq!(detail.parent, Some(2));
         assert_eq!(detail.sender.as_deref(), Some("小明"));
@@ -1366,7 +1374,7 @@ mod tests {
         let old = now - 3 * 86400;
         conn.execute(
             "INSERT INTO messages(id,kind,dl,name,text,bytes,dedup,err,parent,sender_nick,ts,dead_at,ok_at) VALUES
-             (1,'image','ok','a.jpg',NULL,10,0,NULL,NULL,NULL,?1,NULL,?1),
+             (1,'image','ok','a.jpg',NULL,10,0,NULL,NULL,NULL,?2,NULL,?2),
              (2,'forward','ok',NULL,'聊天记录',NULL,0,NULL,NULL,NULL,?2,NULL,?2),
              (3,'image','none',NULL,'转发里的图',20,0,NULL,2,'小明',?2,NULL,NULL),
              (4,'text','none',NULL,'纯文本',NULL,0,NULL,NULL,NULL,?2,NULL,NULL),
@@ -1376,15 +1384,15 @@ mod tests {
         .unwrap();
         let items = read_dl_history(&conn, 100).unwrap();
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // 组键 COALESCE(parent,id) 倒序（与当日列表同键）：死信 5 独占键 5，
-        // 排在转发组（键 2：父行 2 连明细 3 连块）之前，最后 1；纯文本 4 不进列表
-        assert_eq!(ids, vec![5, 2, 3, 1]);
+        // 组键 COALESCE(parent,id) 倒序（与当日列表同键）：死信 5 独占键 5，排在
+        // 转发组（键 2：明细 3 连块，壳 2 不进列表）之前，最后 1；纯文本 4 不进列表
+        assert_eq!(ids, vec![5, 3, 1]);
         // 完成时刻按列透传：昨天的行带出三天前的 ok_at，历史行不再全是 "-"
-        assert_eq!(items.iter().find(|it| it.id == 2).unwrap().ok_at, Some(old));
+        assert_eq!(items.iter().find(|it| it.id == 1).unwrap().ok_at, Some(old));
         let items = read_dl_history(&conn, 2).unwrap();
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // LIMIT 按行截断、可能切在组中间：转发父行 2 入选而明细 3 被截掉，预览可接受
-        assert_eq!(ids, vec![5, 2]);
+        // LIMIT 按行截断、可能切在组中间：明细 3 入选，预览可接受
+        assert_eq!(ids, vec![5, 3]);
     }
 
     /// 手动重试只动 dead 行：pending/busy/ok 不受影响；指定 ids 只重置那些；
@@ -1527,9 +1535,9 @@ mod tests {
             .into_iter()
             .map(|it| it.id)
             .collect();
-        // 置顶两个 hot 组：顶层 busy 4（组键 4）在转发组（组键 2：父行 2 连 busy
-        // 明细 3）之前；其余按时间序 5、1
-        assert_eq!(ids, vec![4, 2, 3, 5, 1]);
+        // 置顶两个 hot 组：顶层 busy 4（组键 4）在 busy 明细 3（组键 2）之前，
+        // 转发壳 2 不进列表；其余按时间序 5、1
+        assert_eq!(ids, vec![4, 3, 5, 1]);
     }
 
     /// 正在处理中的行恒可见：旧 ts 的 busy 行、busy 转发壳连它的明细（哪怕明细
@@ -1564,9 +1572,9 @@ mod tests {
             .into_iter()
             .map(|it| it.id)
             .collect();
-        // busy 顶层 1 与 busy 转发壳 2（连排队中的明细 3）置顶可见；
+        // busy 顶层 1 与 busy 转发壳 2 的排队明细 3 置顶可见（壳 2 本身不进列表）；
         // 旧完成且 ts 旧的 4 无任何归日分支命中，不出现
-        assert_eq!(ids, vec![2, 3, 1]);
+        assert_eq!(ids, vec![3, 1]);
     }
 
     /// 今日起点是本地 00:00，且不晚于现在——否则「今日」会恒为 0
