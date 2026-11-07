@@ -97,6 +97,8 @@ export interface BotDlItem {
   dl_total: number | null;
   /** 接收时间（Unix 秒）。转发明细行取父转发收到的时刻，不是内层消息的原始发送时间 */
   ts: number | null;
+  /** 下载完成时刻（Unix 秒）。mark_dl_ok 落值；未完成/历史行（当时没记）为 null */
+  ok_at: number | null;
 }
 
 /** 下载汇总：媒体文件（image/video/file，dl='ok'）的累计与今日完成量 */

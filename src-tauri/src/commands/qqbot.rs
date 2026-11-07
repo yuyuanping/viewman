@@ -93,6 +93,9 @@ pub struct BotDlItem {
     /// 消息时间（Unix 秒）。顶层行=收到的时刻；转发明细行=内层消息的原始
     /// 发送时间，可能早于今天（面板据此对跨日的补显日期）
     pub ts: Option<i64>,
+    /// 下载完成时刻（Unix 秒），mark_dl_ok 落值。老库未迁移/历史 ok 行无值
+    /// （当时没记）为 NULL，面板「完成」列显示 "-"
+    pub ok_at: Option<i64>,
 }
 
 /// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数与最近下载列表。
@@ -699,6 +702,9 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     // 实时进度两列是老库可能没有的（db.py 启动时才迁移）；缺列补 NULL，
     // 面板只在 busy 行读它们，拿不到就当没有进度
     let has_prog = has_messages_col(conn, "dl_bytes");
+    // 完成时刻同为老库可能没有的列（db.py 启动时才迁移）；缺列补 NULL，
+    // 面板「完成」列显示 "-"
+    let has_ok_at = has_messages_col(conn, "ok_at");
     // 接收时间统一走 LEFT JOIN 取 COALESCE(p.ts, m.ts)：顶层行父为空、落回自身 ts；
     // 转发明细行显示的是**父转发收到的时刻**（明细自身 ts 是内层消息的原始发送时间，
     // 可能是几个月前——那不是这条内容进入本机的时间）。LEFT JOIN 对驱动表扫描无影响
@@ -706,9 +712,10 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     let cols = format!(
         "SELECT m.id, m.kind, COALESCE(NULLIF(m.name, ''), \
          substr(COALESCE(m.text, ''), 1, 80), ''), m.bytes, m.dedup, \
-         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts) \
+         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts){} \
          FROM messages m LEFT JOIN messages p ON p.id = m.parent",
-        if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" }
+        if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" },
+        if has_ok_at { ", m.ok_at" } else { ", NULL" }
     );
     let cols = cols.as_str();
     let mut out = Vec::new();
@@ -728,6 +735,7 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
                     dl_bytes: r.get(9)?,
                     dl_total: r.get(10)?,
                     ts: r.get(11)?,
+                    ok_at: r.get(12)?,
                 })
             })
             .map_err_str()?;
@@ -1064,7 +1072,8 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
-                                   dead_at INTEGER, dl_bytes INTEGER NOT NULL DEFAULT 0,
+                                   dead_at INTEGER, ok_at INTEGER,
+                                   dl_bytes INTEGER NOT NULL DEFAULT 0,
                                    dl_total INTEGER);",
         )
         .unwrap();
@@ -1074,19 +1083,19 @@ mod tests {
             .as_secs() as i64;
         let old = now - 3 * 86400;
         conn.execute(
-            "INSERT INTO messages(id,kind,dl,name,text,bytes,dedup,err,parent,sender_nick,ts,dead_at) VALUES
-             (1,'image','ok','a.jpg',NULL,10,0,NULL,NULL,NULL,?1,NULL),
-             (2,'forward','ok',NULL,'聊天记录',NULL,2,NULL,NULL,NULL,?1,NULL),
-             (3,'image','none',NULL,'转发里的图',20,0,NULL,2,'小明',?1,NULL),
-             (4,'text','none',NULL,'纯文本',NULL,0,NULL,NULL,NULL,?1,NULL),
-             (5,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?2,?3),
-             (6,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?2,?4),
-             (7,'image','ok','y.jpg',NULL,30,0,NULL,NULL,NULL,?2,NULL),
-             (8,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?1,?3),
-             (9,'image','ok','old.jpg',NULL,40,0,NULL,2,'小红',?2,NULL),
-             (10,'image','ok','x.jpg',NULL,50,0,NULL,11,NULL,?2,NULL),
-             (11,'forward','ok',NULL,'昨天的转发',NULL,0,NULL,NULL,NULL,?2,NULL)",
-            rusqlite::params![now, old, now, old],
+            "INSERT INTO messages(id,kind,dl,name,text,bytes,dedup,err,parent,sender_nick,ts,dead_at,ok_at) VALUES
+             (1,'image','ok','a.jpg',NULL,10,0,NULL,NULL,NULL,?1,NULL,?3),
+             (2,'forward','ok',NULL,'聊天记录',NULL,2,NULL,NULL,NULL,?1,NULL,?3),
+             (3,'image','none',NULL,'转发里的图',20,0,NULL,2,'小明',?1,NULL,NULL),
+             (4,'text','none',NULL,'纯文本',NULL,0,NULL,NULL,NULL,?1,NULL,NULL),
+             (5,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?2,?3,NULL),
+             (6,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?2,?4,NULL),
+             (7,'image','ok','y.jpg',NULL,30,0,NULL,NULL,NULL,?2,NULL,NULL),
+             (8,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?1,?3,NULL),
+             (9,'image','ok','old.jpg',NULL,40,0,NULL,2,'小红',?2,NULL,NULL),
+             (10,'image','ok','x.jpg',NULL,50,0,NULL,11,NULL,?2,NULL,NULL),
+             (11,'forward','ok',NULL,'昨天的转发',NULL,0,NULL,NULL,NULL,?2,NULL,NULL)",
+            rusqlite::params![now, old, now - 600, old],
         )
         .unwrap();
         // 1 改成下载中并带实时进度：busy 行要把 dl_bytes/dl_total 透出给面板
@@ -1108,6 +1117,10 @@ mod tests {
         // 非进度行取建表默认值（0/NULL），面板按 busy 才读它们
         assert_eq!(items.iter().find(|it| it.id == 8).unwrap().dl_bytes, Some(0));
         assert_eq!(items.iter().find(|it| it.id == 2).unwrap().dl_total, None);
+        // 完成时刻按列透传：有值带出去，没有（未完成/历史行）为 NULL，面板显 "-"
+        assert_eq!(it1.ok_at, Some(now - 600));
+        assert_eq!(items.iter().find(|it| it.id == 3).unwrap().ok_at, None);
+        assert_eq!(items.iter().find(|it| it.id == 8).unwrap().ok_at, None);
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
         // 排序键 COALESCE(parent,id) 倒序、块内 id 正序：8、5 各一组，转发 2 置顶、
         // 明细（3/9）跟在它下面，再下面 1。10/11 是昨天那批发来的转发与它的明细，

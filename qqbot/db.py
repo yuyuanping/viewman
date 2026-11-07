@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS messages(
   tries       INTEGER NOT NULL DEFAULT 0,
   next_try    REAL NOT NULL DEFAULT 0,
   dead_at     INTEGER,       -- 本轮转死时刻（Unix 秒），面板「今日失败」按它归日
+  ok_at       INTEGER,       -- 下载完成时刻（Unix 秒），面板「完成」列；mark_dl_ok 落，历史行无值
   dl_bytes    INTEGER NOT NULL DEFAULT 0,  -- 本次尝试已落盘字节（下载中实时进度）
   dl_total    INTEGER,                     -- Content-Length（未知为 NULL）
   err         TEXT
@@ -128,6 +129,11 @@ class DB:
             if "dl_total" not in cols:
                 self._conn.execute(
                     "ALTER TABLE messages ADD COLUMN dl_total INTEGER")
+            # 下载完成时刻：mark_dl_ok 落值。存量 ok 行没有可回填的历史时刻
+            # （当时没记），留 NULL，面板「完成」列显示 "-"
+            if "ok_at" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN ok_at INTEGER")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
             # 历史回收：复检救回的行在旧版 mark_dl_ok 里没清失败痕迹（只清了 err），
@@ -289,14 +295,15 @@ class DB:
                          size: int, dedup: bool = False) -> int:
         """行收敛为 ok。返回顺带救回的同名兄弟行数（见下）。"""
         def _do(c):
+            now = int(time.time())
             # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值。
             # 失败痕迹一并抹净（err/tries/dead_at）：复检救回的行就是成功行，
             # 残留的 dead_at 会让它仍以「曾经失败」的身份留在面板口径里，
             # tries 不归零则下次再排队时退避间隔从旧值起跳
             c.execute(
                 "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL, "
-                "tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL WHERE id=?",
-                (md5, path, size, int(bool(dedup)), mid))
+                "tries=0, dead_at=NULL, ok_at=?, dl_bytes=0, dl_total=NULL WHERE id=?",
+                (md5, path, size, int(bool(dedup)), now, mid))
             # 同一内容可能在多条转发里各落一行（QQ 的图片/视频文件名就是内容
             # 哈希）：这行下成了，同名（=同内容）的 dead/pending 兄弟行就没必要
             # 再挂着失败/继续排队——一并收敛为 ok（dedup=1，复用现有文件）。
@@ -308,10 +315,10 @@ class DB:
                 return 0
             cur = c.execute(
                 "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=1, "
-                "err=NULL, tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL "
+                "err=NULL, tries=0, dead_at=NULL, ok_at=?, dl_bytes=0, dl_total=NULL "
                 "WHERE dl IN ('dead','pending') AND kind IN ('image','video') "
                 "AND name=? AND id<>?",
-                (md5, path, size, row["name"], mid))
+                (md5, path, size, now, row["name"], mid))
             return cur.rowcount
         return await self._run(_do)
 

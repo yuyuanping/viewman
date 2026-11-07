@@ -61,8 +61,18 @@ function sizeText(item: BotDlItem): string {
 /** 接收时间串：今天收到的只显 HH:MM 省宽度；跨日的（昨日消息今天复检转死等）补 MM-DD。
  * 转发明细行后端已折算成父转发收到的时刻，不是内层消息的原始发送时间 */
 function recvText(item: BotDlItem): string {
-  if (item.ts == null) return "-";
-  const d = new Date(item.ts * 1000);
+  return clockText(item.ts);
+}
+
+/** 完成时间串：与接收时间同一套格式。未完成/历史行（当时没记）显示 "-" */
+function doneText(item: BotDlItem): string {
+  return clockText(item.ok_at);
+}
+
+/** 时间戳 → 「今天 HH:MM / 跨日 MM-DD HH:MM」；无值显 "-" */
+function clockText(sec: number | null): string {
+  if (sec == null) return "-";
+  const d = new Date(sec * 1000);
   const now = new Date();
   const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const sameDay =
@@ -118,6 +128,7 @@ const DlRow = memo(function DlRow({ item }: { item: BotDlItem }) {
         {label}
       </td>
       <td className="py-1.5 px-2 whitespace-nowrap tabular-nums text-gray-500">{recvText(item)}</td>
+      <td className="py-1.5 px-2 whitespace-nowrap tabular-nums text-gray-500">{doneText(item)}</td>
       <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{sizeText(item)}</td>
       <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
       <td className="py-1.5 px-2">
@@ -216,6 +227,7 @@ export function QqBotPanel({
                   <tr>
                     <th className="text-left font-medium py-1.5 px-2">内容</th>
                     <th className="text-left font-medium py-1.5 px-2">接收时间</th>
+                    <th className="text-left font-medium py-1.5 px-2">完成</th>
                     <th className="text-right font-medium py-1.5 px-2">大小</th>
                     <th className="text-left font-medium py-1.5 px-2">类型</th>
                     <th className="text-left font-medium py-1.5 px-2">状态</th>
