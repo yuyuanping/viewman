@@ -31,9 +31,11 @@ from storage import Storage, md5_hint
 
 logger = logging.getLogger("saver.bot")
 
-# 同时最多 5 个文件在真下载（storage.dl_gate 闸门）；排不到槽位的行保持
-# pending——面板显示「排队」，不再出现几十行占着「下载中」却不传字节的假象
-MAX_CONCURRENT_DL = 5
+# 同时最多 4 个文件在真下载（storage.dl_gate 闸门）= 建议值 5 − 1（5 是 README
+# 旧值，与迅雷/aria2 等下载器的常见默认一致；本地与 NapCat 文档均无更权威的
+# 建议并发，给 QQ 侧留一档余量）。排不到槽位的行保持 pending，面板与在传的行
+# 同显「下载中」，在传的行另带实时进度
+MAX_CONCURRENT_DL = 4
 SWEEP_INTERVAL = 20
 REPLY_TEXT_LIMIT = 200   # 引用原文在 md 里的截断长度
 # 打 QQ 侧消息类 API（历史、单条消息）的最小间隔。QQ 对 SsoGetGroupMsg 这类
@@ -460,7 +462,11 @@ class Bot:
                 await self.db.fail_event(ev["id"], f"bad payload: {e}")
                 continue
             self._spawn(self._run_event_safe(ev["id"], data))
-        for row in await self.db.fetch_due_dl(limit=8):
+        # 每轮喂够管道：并发上限只由 dl_gate 把守，这里若只放几行，死链行几秒
+        # 就跑完一轮，槽位要空等下一轮班车——「同时下载 N 个」永远跑不满。
+        # 50 个等待任务挤 4 个槽位，槽一空立刻有人补上；_dl_inflight 挡住
+        # 下一轮班车对未认领行的重复 spawn
+        for row in await self.db.fetch_due_dl(limit=50):
             self._spawn(self._attempt_row(row))
         # 卡「下载中」的行 sweeper 不认领（fetch_due_dl 只收 pending/dead），
         # 丢失写回的只能在这里按失败标准放行，别让面板的「下载中」越积越多
