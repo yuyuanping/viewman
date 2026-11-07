@@ -16,7 +16,7 @@ import type { BotDlSnapshot, BotStatus } from "./types";
 export function dlSnapshotChanged(prev: BotStatus, next: BotDlSnapshot): boolean {
   const a = prev.dl;
   const b = next.dl;
-  if (a.pending !== b.pending || a.busy !== b.busy || a.dead !== b.dead || a.dead_today !== b.dead_today) return true;
+  if (a.pending !== b.pending || a.busy !== b.busy || a.dead !== b.dead || a.failed !== b.failed) return true;
   const s = prev.summary;
   const t = next.summary;
   if (s.ok !== t.ok || s.ok_bytes !== t.ok_bytes || s.today !== t.today

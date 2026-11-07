@@ -39,17 +39,24 @@ pub struct BotSettings {
     pub python: String,
 }
 
+/// 失败行退场线：每日复检计满这个次数 bot 才彻底放手（python 侧 db.py 的
+/// DL_LATE_TRIES），列表与失败计数同步退场——历史页签仍可查，「重试」唤回后
+/// 重新入列
+const DL_GIVE_UP_TRIES: i64 = 15;
+
 /// messages 表按 dl 状态计数，即下载队列进度口径。侧栏徽标取 pending+busy+dead
 /// 作为积压数；none 是纯文本消息不占下载槽，ok 是已完成（面板已不展示明细，
 /// 只留徽标用的三项）。dead 是累计死信 backlog（复检跑满前不删），面板不展示它——
-/// 展示 dead_today，累计值天天挂着毫无意义
+/// 展示 failed（未放弃的失败行），累计值天天挂着毫无意义
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct BotDlStats {
     pub pending: i64,
     pub busy: i64,
     pub dead: i64,
-    /// 今天才转死的条数（按 messages.dead_at 归自然日，旧积压不计）
-    pub dead_today: i64,
+    /// 失败未放弃（复检未穷尽，tries < DL_GIVE_UP_TRIES）的条数，与列表失败行
+    /// 同口径——救回或复检穷尽才减，不按自然日清零：失败是待处理的任务，
+    /// 午夜清零只会让人以为问题没了
+    pub failed: i64,
 }
 
 /// 下载汇总：媒体文件（image/video/file，dl='ok'）的累计与今日完成量。
@@ -639,17 +646,15 @@ fn read_stats(conn: &rusqlite::Connection) -> Result<BotDlStats, String> {
             _ => {}
         }
     }
-    // bot.db 由 python 侧写，老库可能还没升 dead_at 列；缺列就当 0，
-    // 别让整块面板跟着 read_stats 一起报错。口径与当日列表里「今天转死」那一支同源
-    if has_messages_col(conn, "dead_at") {
-        dl.dead_today = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE dl='dead' AND dead_at >= ?1",
-                [today_start_ts()],
-                |r| r.get(0),
-            )
-            .map_err_str()?;
-    }
+    // 失败计数与当日列表的失败行同源：bot 没放弃（tries 未计满）的 dead 行就是
+    // 「还没处理完的失败」。tries 是 dl 队列的原始列，无需按列探测
+    dl.failed = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE dl='dead' AND COALESCE(tries,0) < ?1",
+            [DL_GIVE_UP_TRIES],
+            |r| r.get(0),
+        )
+        .map_err_str()?;
     Ok(dl)
 }
 
@@ -806,15 +811,6 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
         .map_err_str()?;
     push(&mut stmt).map_err_str()?;
 
-    // 昨天到的消息在今日复检中转死，也要出现在今天的列表里（与 dead_today 同口径）。
-    // bot.db 由 python 侧建，老库可能还没有 dead_at 列；缺列就只按消息时间归日
-    if has_messages_col(conn, "dead_at") {
-        let mut stmt = conn
-            .prepare(&format!("{cols} WHERE m.dl = 'dead' AND m.dead_at >= ?1"))
-            .map_err_str()?;
-        push(&mut stmt).map_err_str()?;
-    }
-
     // 几天前收到、今天才下载完成的行（复检救回的旧积压、补录的老消息）按「完成」
     // 时刻归日。没这支的话旧积压每救回一行，列表里就悄悄消失一条——面板只出不进。
     // ok_at 由 db.py 侧迁移（mark_dl_ok 收敛时落），老库可能没有这列；缺列略过这支
@@ -823,6 +819,20 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
             .prepare(&format!("{cols} WHERE m.dl = 'ok' AND m.ok_at >= ?1"))
             .map_err_str()?;
         push(&mut stmt).map_err_str()?;
+    }
+
+    // 失败行是迅雷式任务，不按归日退场：bot 没放弃（每日复检未穷尽）就一直挂在
+    // 列表里，救回转 ok 走 ok_at 支；复检穷尽（tries 计满 DL_GIVE_UP_TRIES）才
+    // 退场——历史页签仍可查，「重试」唤回后重新入列。旧口径「今天才转死」会在
+    // 午夜把还没处理完的失败整批清出列表，看起来就像问题凭空消失了。
+    // 无参数内联查询（与下方 busy 两支同理，绕过 push 闭包固定的 ?1 绑定）
+    let mut stmt = conn
+        .prepare(&format!(
+            "{cols} WHERE m.dl = 'dead' AND COALESCE(m.tries, 0) < {DL_GIVE_UP_TRIES}"
+        ))
+        .map_err_str()?;
+    for row in stmt.query_map([], map_dl_item).map_err_str()? {
+        out.push(row.map_err_str()?);
     }
 
     // 正在处理中的行恒可见（迅雷式任务视角）：复检中的旧积压/旧转发 ts 都是旧的，
@@ -1198,13 +1208,14 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         conn.execute_batch(
-            "CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT, dead_at INTEGER);",
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT, dead_at INTEGER,
+                                   tries INTEGER);",
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages(id, dl, dead_at) VALUES
-             (1,'pending',NULL), (2,'busy',NULL), (3,'dead',?1), (4,'ok',NULL),
-             (5,'none',NULL), (6,'dead',?2), (7,'dead',NULL)",
+            "INSERT INTO messages(id, dl, dead_at, tries) VALUES
+             (1,'pending',NULL,NULL), (2,'busy',NULL,NULL), (3,'dead',?1,1), (4,'ok',NULL,NULL),
+             (5,'none',NULL,NULL), (6,'dead',?2,15), (7,'dead',NULL,NULL)",
             rusqlite::params![now, now - 3 * 86400],
         )
         .unwrap();
@@ -1218,25 +1229,31 @@ mod tests {
         assert_eq!((dl.pending, dl.busy, dl.dead), (1, 1, 3));
     }
 
-    /// 今日失败只数「今天转死」的行：三天前死的和没有 dead_at 的旧积压都不算
+    /// 失败计数只数「bot 还没放弃」的行：复检穷尽（tries 计满 15）的不算，
+    /// 死了几天但还在复检的照算——不按自然日清零
     #[test]
-    fn dead_today_counts_rows_that_died_today_only() {
+    fn failed_counts_rows_not_yet_abandoned() {
         let conn = test_db();
         let dl = read_stats(&conn).unwrap();
-        assert_eq!(dl.dead_today, 1);
+        assert_eq!(dl.failed, 2);
     }
 
-    /// bot.db 由 python 侧建，老库可能还没有 dead_at 列。缺列时 dead_today 退成 0，
-    /// 不能让整个 read_stats 报错、连累整块面板
+    /// 老库没有 dead_at 列也能统计：失败口径走 tries（dl 队列的原始列），
+    /// 不依赖后来加的列，别让整个 read_stats 报错、连累整块面板
     #[test]
-    fn stats_tolerates_db_without_dead_at_column() {
+    fn stats_counts_failed_without_dead_at_column() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT);")
-            .unwrap();
-        conn.execute("INSERT INTO messages(id, dl) VALUES (1,'dead')", [])
-            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT, tries INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages(id, dl, tries) VALUES (1,'dead',1), (2,'dead',15)",
+            [],
+        )
+        .unwrap();
         let dl = read_stats(&conn).unwrap();
-        assert_eq!((dl.dead, dl.dead_today), (1, 0));
+        assert_eq!((dl.dead, dl.failed), (2, 1));
     }
 
     /// 汇总只数媒体文件（dl='ok' 的 image/video/file）；转发父行不算 bytes，
@@ -1274,9 +1291,9 @@ mod tests {
         assert_eq!(s.dedup_today, 1, "昨日那条重复跳过不计入今日");
     }
 
-/// 当日列表：今日消息一条不落，昨日的行只在「今天才转死」时回来；纯文本直发
-    /// （dl='none' 且无 parent）不进列表；**转发明细行按父行归日**——它 ts 是内层
-    /// 消息的旧时间，跟着父行才看得见今天转发里下到的图
+/// 当日列表：今日消息一条不落；失败行不按日退场（复检未穷尽就在，穷尽才走）；
+    /// 纯文本直发（dl='none' 且无 parent）不进列表；**转发明细行按父行归日**——
+    /// 它 ts 是内层消息的旧时间，跟着父行才看得见今天转发里下到的图
     #[test]
     fn today_items_cover_the_whole_day_and_recent_deaths() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1284,7 +1301,7 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
-                                   dead_at INTEGER, ok_at INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER, tries INTEGER,
                                    dl_bytes INTEGER NOT NULL DEFAULT 0,
                                    dl_total INTEGER, path TEXT);",
         )
@@ -1322,6 +1339,9 @@ mod tests {
             [],
         )
         .unwrap();
+        // 6 复检穷尽（tries 计满 15）= bot 已放弃：失败行退场线，不进列表；
+        // 5/8 死于昨天、还在复检，照旧挂列表（失败不按日清零）
+        conn.execute("UPDATE messages SET tries=15 WHERE id=6", []).unwrap();
         let items = read_today_items(&conn).unwrap();
         let it1 = items.iter().find(|it| it.id == 1).unwrap();
         assert_eq!(it1.dl_bytes, Some(12345));
@@ -1357,8 +1377,9 @@ mod tests {
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
         // 迅雷式排序：busy 行 1 置顶；其余按完成时间倒序——转发块（明细 3/9）的
         // 组完成时刻取壳行 2 的 ok_at（=now-600，排序时壳还在、随后退场），紧跟
-        // 置顶区；8、5 没完成时刻沉底按组键倒序。10/11 是昨天那批发来的转发与它
-        // 的明细，今天没动静就不出现；4 是纯文本直发；8 两支都命中去重只出现一次
+        // 置顶区；8、5、6 是失败行沉底按组键倒序（6 复检穷尽已退场）。10/11 是
+        // 昨天那批发来的转发与它的明细，今天没动静就不出现；4 是纯文本直发；
+        // 8 两支都命中去重只出现一次
         assert_eq!(ids, vec![1, 3, 9, 8, 5]);
         let detail = items.iter().find(|it| it.id == 3).unwrap();
         assert_eq!(detail.parent, Some(2));
@@ -1450,14 +1471,16 @@ mod tests {
         assert_eq!(row(1).0, "pending");
     }
 
-    /// 老库没有 dead_at 列时列表不能整块报错，退化成「只按消息时间归日」
+    /// 老库没有 dead_at/ok_at 列时列表不能整块报错：失败分支走 tries（原始列），
+    /// 完成分支按列探测，缺哪列就少哪支
     #[test]
     fn today_items_tolerate_db_without_dead_at_column() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
-                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER);",
+                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
+                                   tries INTEGER);",
         )
         .unwrap();
         let now = std::time::SystemTime::now()
@@ -1490,7 +1513,7 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
-                                   dead_at INTEGER, ok_at INTEGER);",
+                                   dead_at INTEGER, ok_at INTEGER, tries INTEGER);",
         )
         .unwrap();
         let now = std::time::SystemTime::now()
@@ -1527,7 +1550,7 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
-                                   dead_at INTEGER, ok_at INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER, tries INTEGER,
                                    dl_bytes INTEGER NOT NULL DEFAULT 0, dl_total INTEGER);",
         )
         .unwrap();
@@ -1564,7 +1587,7 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
                                    text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
-                                   dead_at INTEGER, ok_at INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER, tries INTEGER,
                                    dl_bytes INTEGER NOT NULL DEFAULT 0, dl_total INTEGER);",
         )
         .unwrap();

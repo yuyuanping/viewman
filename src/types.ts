@@ -67,13 +67,13 @@ export interface BotSettings {
 }
 
 /** 下载积压口径：messages 表按 dl 状态计数，侧栏徽标取 pending+busy+dead。
- * dead 是累计死信 backlog（复检跑满前不删），面板展示的是 dead_today */
+ * dead 是累计死信 backlog（复检跑满前不删），面板展示的是 failed（未放弃的失败行） */
 export interface BotDlStats {
   pending: number;
   busy: number;
   dead: number;
-  /** 今天才转死的条数，按自然日归零 */
-  dead_today: number;
+  /** 失败未放弃（复检未穷尽）的条数——救回或放弃才减，不按日清零 */
+  failed: number;
 }
 
 /** 下载列表一行：当日有下载动作的消息（含转发归档行与其转发明细行） */
