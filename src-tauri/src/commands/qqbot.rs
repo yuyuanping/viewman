@@ -697,42 +697,79 @@ fn today_start_ts() -> i64 {
 /// 会被 sqlite 判成「倒着扫表更便宜」，6 万行实测 25ms/次，2 秒一轮的快照纯浪费。
 /// 三支各自命中索引（顶层走 messages_ts，明细走父行的 ts，死信走 messages_due），
 /// 结果在内存里合并去重。
+/// 列表「内容」列的取值链：文件名 → 文本前 80 字 → 落盘文件名（path 基名）→
+/// 类型中文名。QQ 的图片/视频事件多数不带原始文件名（name 空、落盘以 md5 为名），
+/// path 基名就是最具体的内容；展开中的转发壳、取不到原文的引用连 path 都没有，
+/// 退到类型中文名——总之不再落到前端那个 #id 兜底。
+fn dl_label(
+    name: Option<String>,
+    text: Option<String>,
+    path: Option<String>,
+    kind: &str,
+) -> String {
+    if let Some(n) = name.filter(|s| !s.trim().is_empty()) {
+        return n;
+    }
+    if let Some(t) = text.filter(|s| !s.trim().is_empty()) {
+        return t.chars().take(80).collect();
+    }
+    if let Some(p) = path.filter(|s| !s.trim().is_empty()) {
+        let base = p.rsplit(['\\', '/']).next().unwrap_or_default();
+        if !base.trim().is_empty() {
+            return base.to_string();
+        }
+    }
+    match kind {
+        "forward" => "合并转发",
+        "reply" => "引用回复",
+        "image" => "图片",
+        "video" => "视频",
+        "file" => "文件",
+        "record" => "语音",
+        _ => "消息",
+    }
+    .to_string()
+}
+
 /// 下载列表（当日/历史）共用的 SELECT 列清单，含父行 LEFT JOIN。
-/// 实时进度与完成时刻两列是 db.py 启动时才迁移的，老库缺列补 NULL：
-/// 面板只在 busy 行读进度，「完成」列拿不到显示 "-"
+/// name/text/path 三列分开取，label 由 map_dl_item 里的 dl_label 组装；
+/// 实时进度与完成时刻是 db.py 启动时才迁移的列、path 是极老库可能没有的列，
+/// 缺列一律补 NULL，面板拿不到就走标签链的下一级
 fn dl_item_cols(conn: &rusqlite::Connection) -> String {
     let has_prog = has_messages_col(conn, "dl_bytes");
     let has_ok_at = has_messages_col(conn, "ok_at");
+    let has_path = has_messages_col(conn, "path");
     // 接收时间统一走 LEFT JOIN 取 COALESCE(p.ts, m.ts)：顶层行父为空、落回自身 ts；
     // 转发明细行显示的是**父转发收到的时刻**（明细自身 ts 是内层消息的原始发送时间，
     // 可能是几个月前——那不是这条内容进入本机的时间）。LEFT JOIN 对驱动表扫描无影响
     // （顶层仍走 messages_ts，父行按 rowid 点查），老库也都有这两列，无需缺列兜底
     format!(
-        "SELECT m.id, m.kind, COALESCE(NULLIF(m.name, ''), \
-         substr(COALESCE(m.text, ''), 1, 80), ''), m.bytes, m.dedup, \
-         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts){} \
+        "SELECT m.id, m.kind, m.name, m.text, m.bytes, m.dedup, \
+         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts){}{} \
          FROM messages m LEFT JOIN messages p ON p.id = m.parent",
         if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" },
-        if has_ok_at { ", m.ok_at" } else { ", NULL" }
+        if has_ok_at { ", m.ok_at" } else { ", NULL" },
+        if has_path { ", m.path" } else { ", NULL" }
     )
 }
 
 /// 列清单（dl_item_cols）→ BotDlItem 的行映射，当日/历史两条查询共用，列序必须一致
 fn map_dl_item(r: &rusqlite::Row) -> rusqlite::Result<BotDlItem> {
+    let kind: String = r.get(1)?;
     Ok(BotDlItem {
+        label: dl_label(r.get(2)?, r.get(3)?, r.get(14)?, &kind),
         id: r.get(0)?,
-        kind: r.get(1)?,
-        label: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        size: r.get(3)?,
-        dedup: r.get(4)?,
-        err: r.get(5)?,
-        dl: r.get(6)?,
-        parent: r.get(7)?,
-        sender: r.get(8)?,
-        dl_bytes: r.get(9)?,
-        dl_total: r.get(10)?,
-        ts: r.get(11)?,
-        ok_at: r.get(12)?,
+        kind,
+        size: r.get(4)?,
+        dedup: r.get(5)?,
+        err: r.get(6)?,
+        dl: r.get(7)?,
+        parent: r.get(8)?,
+        sender: r.get(9)?,
+        dl_bytes: r.get(10)?,
+        dl_total: r.get(11)?,
+        ts: r.get(12)?,
+        ok_at: r.get(13)?,
     })
 }
 
@@ -1173,7 +1210,7 @@ mod tests {
                                    err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
                                    dead_at INTEGER, ok_at INTEGER,
                                    dl_bytes INTEGER NOT NULL DEFAULT 0,
-                                   dl_total INTEGER);",
+                                   dl_total INTEGER, path TEXT);",
         )
         .unwrap();
         let now = std::time::SystemTime::now()
@@ -1203,6 +1240,12 @@ mod tests {
             [],
         )
         .unwrap();
+        // 8 挂上落盘路径：name/text 都空的行显示落盘文件名（md5 基名），不再空标签
+        conn.execute(
+            "UPDATE messages SET path='D:\\QQBot_Data\\group\\images\\abc123.jpg' WHERE id=8",
+            [],
+        )
+        .unwrap();
         let items = read_today_items(&conn).unwrap();
         let it1 = items.iter().find(|it| it.id == 1).unwrap();
         assert_eq!(it1.dl_bytes, Some(12345));
@@ -1220,6 +1263,20 @@ mod tests {
         assert_eq!(it1.ok_at, Some(now - 600));
         assert_eq!(items.iter().find(|it| it.id == 3).unwrap().ok_at, None);
         assert_eq!(items.iter().find(|it| it.id == 8).unwrap().ok_at, None);
+        // 标签链：文件名 > 文本前 80 字 > 落盘文件名基名 > 类型中文名，
+        // QQ 图片/视频多数没文件名，落盘 md5 名就是最具体的内容
+        assert_eq!(it1.label, "a.jpg");
+        assert_eq!(items.iter().find(|it| it.id == 2).unwrap().label, "聊天记录");
+        assert_eq!(
+            items.iter().find(|it| it.id == 8).unwrap().label,
+            "abc123.jpg",
+            "无文件名无文本的行显示落盘文件名"
+        );
+        assert_eq!(
+            items.iter().find(|it| it.id == 5).unwrap().label,
+            "图片",
+            "连 path 都没有的行退到类型中文名，不再空标签"
+        );
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
         // 排序键 COALESCE(parent,id) 倒序、块内 id 正序：8、5 各一组，转发 2 置顶、
         // 明细（3/9）跟在它下面，再下面 1。10/11 是昨天那批发来的转发与它的明细，
