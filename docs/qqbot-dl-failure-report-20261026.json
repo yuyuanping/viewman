@@ -1,0 +1,75 @@
+{
+  "report": "qqbot 下载失败原因分析",
+  "date": "2026-10-26",
+  "scope": "D:/QQBot_Data/bot.log 当日日志统计 + bot.db 只读查询 + NapCat console 日志 + curl 复测失效直链",
+  "tldr": "下载功能没有整体故障：全天 674 次成功保存，NapCat/QQ/bot/viewman 进程与 WS 链路正常。今日判死 90 条中 85 条是有 parent 的转发明细视频行——CDN 直链(rkey 失效)、QQ 本地缓存(已被清空)、NapCat get_file(超时/找不到)三条取件路径同时失效。今日唯一恶化指标是本地路径缺失(PATHNF=110，逐日上升)。",
+  "environment": {
+    "bot": "D:/opencword/viewman/qqbot (pythonw 运行 bot.py)",
+    "napcat": "D:/tool/NapCat.Shell.Windows.OneKey/NapCat.44498.Shell (9.9.26-44498，QQ.exe 2026-01-08 未变更，排除 QQ 自动更新)",
+    "data_dir": "D:/QQBot_Data",
+    "processes_alive": ["NapCatWinBootMain", "QQ", "pythonw(bot)", "viewman"],
+    "restarts_today": ["07:35:12 启动(NapCat 冷启)", "19:02:52 NapCat 未运行→隐藏重启，bot 19:03:11 跟随"],
+    "backfill_enabled": false
+  },
+  "metrics_2026_10_26": {
+    "log_lines": 3415,
+    "error_lines": 1096,
+    "saved_downloads": 674,
+    "dl_retry_events": 175,
+    "dl_retry_outcomes": {"pending": 86, "dead_download_failed": 84, "dead_get_msg_empty": 5},
+    "dl_retry_by_kind": {"video": 167, "reply": 5, "image": 3},
+    "dead_rows_marked_today": 90,
+    "errors_by_hour": {"07": 104, "08": 178, "09": 37, "12": 71, "13": 35, "14": 3, "15": 5, "16": 31, "17": 1, "19": 745, "20": 41, "21": 15}
+  },
+  "failure_breakdown": [
+    {"error": "get_file_url 超时(日志异常文本为空)", "attempt_lines": 567, "unique_calls": 189, "cause": "NapCat /get_file 90s×3 无响应；aiohttp TimeoutError 的 str() 为空"},
+    {"error": "本地路径不存在(PATHNF)", "count": 110, "cause": "QQ 自动清理 nt_data/Video 缓存：2026-08/09 月目录不存在，2026-10/Ori 仅剩 1 个文件"},
+    {"error": "get_file 返回 file not found", "count": 75, "cause": "本地缓存已清+服务器不可取；NapCat console 同步报 Error: file not found(今日 1180 行)"},
+    {"error": "CDN 直链 400 Bad Request", "count": 52, "cause": "存量 URL 带 rkey(分钟级轮换)已失效；失败 URL 形如 appid=1413&orgfmt=t264 无 fileid；curl 复测仍 400"},
+    {"error": "get_forward_msg retcode=1200", "count": 32, "cause": "转发已过期或为内层消息，明细行刷新路径失效"},
+    {"error": "127.0.0.1:9502 连接拒绝", "count": 39, "cause": "19:03 前后 NapCat 重启窗口"}
+  ],
+  "dead_rows_today": {
+    "video_forward_detail_rows": {"count": 85, "shape": "无 msg_id、有 parent(更正：并非无父孤儿)", "mechanism": "刷新靠重展开父转发，但父转发过期(1200)/新直链仍 400/本地缓存已空；tries>=3 判 dead，每日复检至 15 才彻底放手"},
+    "reply_rows": {"count": 5, "shape": "有 msg_id、无 parent", "mechanism": "get_msg 返回空(消息过旧)"}
+  },
+  "cross_day": [
+    {"date": "2026-10-20", "errors": 248, "r400": 98, "pathnf": 0},
+    {"date": "2026-10-21", "errors": 250, "r400": 96, "pathnf": 0},
+    {"date": "2026-10-22", "errors": 0, "pathnf": 0, "r400": 0, "note": "bot 全天未运行"},
+    {"date": "2026-10-23", "errors": 4311, "r400": 940, "pathnf": 24, "saved": 935, "note": "异常高峰"},
+    {"date": "2026-10-24", "errors": 1151, "r400": 182, "pathnf": 21, "saved": 85},
+    {"date": "2026-10-25", "errors": 976, "r400": 42, "pathnf": 57, "saved": 681},
+    {"date": "2026-10-26", "errors": 1096, "r400": 52, "pathnf": 110, "saved": 674, "note": "19 点 745 条错误系重启后重试队列集中轰炸 NapCat"}
+  ],
+  "root_causes": [
+    {"rank": 1, "cause": "QQ 自动清理本地媒体缓存", "evidence": "nt_data/Video 2026-08/09 目录不存在、2026-10/Ori 仅 1 文件；PATHNF 24→21→57→110 逐日上升", "impact": "本地兜底与 get_file 兜底双双失效"},
+    {"rank": 2, "cause": "rkey 轮换使存量直链必死", "evidence": "失败 URL 均为 appid=1413&orgfmt=t264 无 fileid 形态且 curl 复测持久 400；成功 URL 均为 appid=1406&fileid=... 形态", "impact": "隔天重试的直链 100% 失败"},
+    {"rank": 3, "cause": "NapCat /get_file 阻塞", "evidence": "189 组 90s×3 超时；19:03 重启后 19 点时段 745 条错误(重试队列自我轰炸)；同期 19:48:58 仍有成功保存，链路本身是活的", "impact": "get_file 兜底不可用且拖慢整条队列"},
+    {"rank": 4, "cause": "转发过期(1200)", "evidence": "今日 32 次 retcode=1200「消息已过期或者为内层消息」", "impact": "明细行唯一刷新路径失效"}
+  ],
+  "case_study": {
+    "id_77144": ["21:13:14 直链 400(attempt 2/2)", "21:13:14-18 get_file_url 三连 file not found", "21:13:18 判 dead"],
+    "id_79685": ["19:49:01 pending", "19:55:49 pending", "20:03:39 dead"]
+  },
+  "code_refs": [
+    {"file": "qqbot/storage.py", "line": 38, "note": "_TIMEOUT_BY_KIND：video 总超时 30s 偏短；TimeoutError str() 为空导致日志空错误文本"},
+    {"file": "qqbot/bot.py", "line": 220, "note": "get_file_url：90s×3 次尝试"},
+    {"file": "qqbot/bot.py", "line": 634, "note": "_refresh_src：重试前按 msg_id/parent 分流刷新"},
+    {"file": "qqbot/bot.py", "line": 826, "note": "下载主管线：直链失败→get_file_url(ref) 兜底→RuntimeError→bump_dl"},
+    {"file": "qqbot/db.py", "line": 298, "note": "bump_dl：无 msg_id tries>=3 判死；有 parent 每日复检至 15；孤儿推 1 年"}
+  ],
+  "recommendations": [
+    {"priority": "P1", "action": "QQ 设置关闭/放宽自动清理缓存，保住本地原件", "targets": "PATHNF 上升 + get_file not found"},
+    {"priority": "P1", "action": "video 总超时 30s→120s；错误日志补 type(e).__name__", "targets": "大视频误判超时 + 空错误文本"},
+    {"priority": "P2", "action": "对 /get_file 加并发限流或短 TTL 缓存，防重启后队列自我轰炸", "targets": "19 点时段 745 条错误"},
+    {"priority": "P2", "action": "明细行兜底跳过「用文件名当 file_id」的 get_file_url(必 file not found)", "targets": "无效 API 调用"},
+    {"priority": "P3", "action": "父转发 retcode=1200 时提前终止该行每日复检", "targets": "无效复检开销"}
+  ],
+  "verification": {
+    "log_source": "D:/QQBot_Data/bot.log 当日 3415 行逐条统计",
+    "db_source": "file:D:/QQBot_Data/bot.db?mode=ro 只读查询 messages(dead_at/tries/parent/msg_id)",
+    "napcat_log": "D:/QQBot_Data/napcat_console.log 今日 1180 行含 file not found",
+    "url_retest": "curl 对今日 400 直链复测 → HTTP 400(SIZE=70)，持久失效非瞬时抖动"
+  }
+}
