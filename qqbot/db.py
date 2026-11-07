@@ -20,9 +20,11 @@ import time
 from pathlib import Path
 
 MAX_EVENT_TRIES = 6   # 事件重试上限，穷尽转 dead
-MAX_DL_TRIES = 8     # 单条媒体/转发下载的快重试上限（约 4 小时窗口）
-DL_LATE_TRIES = 15   # 之后每天复检一次，跑满这个总次数才不再碰（约 7 天）
+MAX_DL_TRIES = 8     # （不再参与判死）仅老库 dead_at 反推迁移还在引用
+DL_LATE_TRIES = 15   # dead 行每日复检，失败计满这个总次数才不再碰
 DL_LATE_INTERVAL = 24 * 3600
+DL_STALL_DEAD_S = 30 * 60  # 失败标准：下载进度停滞 30 分钟 = 失败（转 dead）
+DL_PROG_RETRY_S = 60       # 有字节进账的失败不算失败：60 秒后快试重续
 EVENT_RETENTION_DAYS = 30   # done 事件的 payload 只服务重试/回填，30 天后清掉
 
 _SCHEMA = """
@@ -62,6 +64,7 @@ CREATE TABLE IF NOT EXISTS messages(
   next_try    REAL NOT NULL DEFAULT 0,
   dead_at     INTEGER,       -- 本轮转死时刻（Unix 秒），面板「今日失败」按它归日
   ok_at       INTEGER,       -- 下载完成时刻（Unix 秒），面板「完成」列；mark_dl_ok 落，历史行无值
+  prog_at     INTEGER,       -- 最近一次字节进账时刻（停滞钟）；失败判定 30 分钟停滞线用
   dl_bytes    INTEGER NOT NULL DEFAULT 0,  -- 本次尝试已落盘字节（下载中实时进度）
   dl_total    INTEGER,                     -- Content-Length（未知为 NULL）
   err         TEXT
@@ -134,13 +137,29 @@ class DB:
             if "ok_at" not in cols:
                 self._conn.execute(
                     "ALTER TABLE messages ADD COLUMN ok_at INTEGER")
+            # 进度时刻：失败判定的停滞钟——最近一次字节进账的时刻。
+            # 在途行（pending/busy 且有 dl_bytes）给个当下起点，别一上线就被判停滞；
+            # 从未进度的行留 NULL，由认领（claim_dl_row）起算
+            if "prog_at" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN prog_at INTEGER")
+                self._conn.execute(
+                    "UPDATE messages SET prog_at=? "
+                    "WHERE dl IN ('pending','busy') AND dl_bytes>0",
+                    (int(time.time()),))
+                # 遗留脏值：pending/busy 行不该背着 dead_at（旧版转死后手工重置没清）。
+                # bump_dl 用「dead_at 在身」识别每日复检行，背着它会把普通重试
+                # 的下一次失败误判成复检失败
+                self._conn.execute(
+                    "UPDATE messages SET dead_at=NULL "
+                    "WHERE dl IN ('pending','busy') AND dead_at IS NOT NULL")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS messages_msgid ON messages(msg_id)")
             # 历史回收：复检救回的行在旧版 mark_dl_ok 里没清失败痕迹（只清了 err），
             # 残留 dead_at/tries。dl='ok' 的行已不在任何失败口径里，这里只是把
             # 脏值抹平——幂等，清完不再命中
             self._conn.execute(
-                "UPDATE messages SET tries=0, dead_at=NULL, err=NULL "
+                "UPDATE messages SET tries=0, dead_at=NULL, err=NULL, prog_at=NULL "
                 "WHERE dl='ok' AND (dead_at IS NOT NULL OR tries>0 OR err IS NOT NULL)")
             # 历史回收（二）：同名兄弟行救回。旧版成功只落在自己一行上，同一
             # 内容经另一条转发下载成功后，本行的失败记录还挂着（2026-10-30
@@ -154,7 +173,8 @@ class DB:
                 " AND o.dl='ok' AND o.md5 IS NOT NULL LIMIT 1), "
                 "bytes=(SELECT o.bytes FROM messages o WHERE o.name=messages.name "
                 " AND o.dl='ok' AND o.md5 IS NOT NULL LIMIT 1), "
-                "dedup=1, err=NULL, tries=0, dead_at=NULL, dl_bytes=0, dl_total=NULL "
+                "dedup=1, err=NULL, tries=0, dead_at=NULL, prog_at=NULL, "
+                "dl_bytes=0, dl_total=NULL "
                 "WHERE dl='dead' AND kind IN ('image','video') "
                 "AND EXISTS(SELECT 1 FROM messages o WHERE o.name=messages.name "
                 " AND o.dl='ok' AND o.md5 IS NOT NULL AND o.id<>messages.id)")
@@ -278,18 +298,22 @@ class DB:
 
     async def claim_dl_row(self, mid: int) -> bool:
         """按 id 认领单行（pending/dead -> busy，进度清零）。False 表示他人已在
-        处理或已收敛终态。dead 也收：每日复检行由这里重回 busy。"""
+        处理或已收敛终态。dead 也收：每日复检行由这里重回 busy。
+        停滞钟起算：从未有过字节进账（prog_at NULL）的行在首次认领时落当下——
+        排队等槽、等退避不计时，只有真正开跑才有 30 分钟停滞线。"""
         return await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL "
-            "WHERE id=? AND dl IN ('pending','dead')",
-            (mid,)).rowcount > 0)
+            "UPDATE messages SET dl='busy', dl_bytes=0, dl_total=NULL, "
+            "prog_at=COALESCE(prog_at, ?) WHERE id=? AND dl IN ('pending','dead')",
+            (int(time.time()), mid)).rowcount > 0)
 
     async def set_dl_progress(self, mid: int, done: int, total: int | None) -> None:
         """下载中实时进度写回：只更 busy 行，行被回收/转终态后晚到的回调不会
-        把残值写进 ok/dead。调用方节流（256KB/0.3s 其一），写库在单锁 to_thread 里。"""
+        把残值写进 ok/dead。每块字节都推进停滞钟（prog_at）——进度即活证据。
+        调用方节流（256KB/0.3s 其一），写库在单锁 to_thread 里。"""
         await self._run(lambda c: c.execute(
-            "UPDATE messages SET dl_bytes=?, dl_total=? WHERE id=? AND dl='busy'",
-            (done, total, mid)))
+            "UPDATE messages SET dl_bytes=?, dl_total=?, prog_at=? "
+            "WHERE id=? AND dl='busy'",
+            (done, total, int(time.time()), mid)))
 
     async def mark_dl_ok(self, mid: int, md5: str, path: str,
                          size: int, dedup: bool = False) -> int:
@@ -297,12 +321,13 @@ class DB:
         def _do(c):
             now = int(time.time())
             # 终态行清掉进度列：面板只在 busy 行读它们，别给历史留脏值。
-            # 失败痕迹一并抹净（err/tries/dead_at）：复检救回的行就是成功行，
+            # 失败痕迹一并抹净（err/tries/dead_at/prog_at）：复检救回的行就是成功行，
             # 残留的 dead_at 会让它仍以「曾经失败」的身份留在面板口径里，
             # tries 不归零则下次再排队时退避间隔从旧值起跳
             c.execute(
                 "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=?, err=NULL, "
-                "tries=0, dead_at=NULL, ok_at=?, dl_bytes=0, dl_total=NULL WHERE id=?",
+                "tries=0, dead_at=NULL, prog_at=NULL, ok_at=?, dl_bytes=0, dl_total=NULL "
+                "WHERE id=?",
                 (md5, path, size, int(bool(dedup)), now, mid))
             # 同一内容可能在多条转发里各落一行（QQ 的图片/视频文件名就是内容
             # 哈希）：这行下成了，同名（=同内容）的 dead/pending 兄弟行就没必要
@@ -315,7 +340,8 @@ class DB:
                 return 0
             cur = c.execute(
                 "UPDATE messages SET dl='ok', md5=?, path=?, bytes=?, dedup=1, "
-                "err=NULL, tries=0, dead_at=NULL, ok_at=?, dl_bytes=0, dl_total=NULL "
+                "err=NULL, tries=0, dead_at=NULL, prog_at=NULL, ok_at=?, "
+                "dl_bytes=0, dl_total=NULL "
                 "WHERE dl IN ('dead','pending') AND kind IN ('image','video') "
                 "AND name=? AND id<>?",
                 (md5, path, size, now, row["name"], mid))
@@ -345,38 +371,61 @@ class DB:
             "DELETE FROM messages WHERE event_id=?", (eid,)))
 
     async def bump_dl(self, mid: int, err: str) -> str:
-        """失败退避 30*2^tries 秒（封顶 30 分钟），跑满 MAX_DL_TRIES 后转 dead
-        并改成每天复检一次；复检满 DL_LATE_TRIES-MAX_DL_TRIES 轮才真正不再碰。
+        """失败处理，生死以**进度**为准（2026-11-07 起的标准，替代按次数判死）：
 
-        转发死链（无 msg_id）快转死：明细行的 src 是旧 rkey 直链、几天必失效
-        （必 400），get_file 又拿文件名当 file_id（必 file not found）——tries>=3
-        即转 dead，不再跑满 8 次快重试白刷一屏 400。但**有 parent 的明细行保留
-        每日复检**：刷新走重新展开父转发（bot._refresh_src_by_forward），转发在
-        QQ 端通常几天内有效，WS 断线期间又打不出去——复检到 tries 跑满 15 才彻底
-        放手，别把本可救回的行错杀。无 msg_id 又无 parent 的孤儿行两条刷新路都
-        不通，直接推一年后不再碰（见 fetch_due_dl）。"""
+        - 本次尝试有任何字节进账（dl_bytes>0）：**不算失败**——链路是活的，只是
+          断了。重置计数、60 秒后快试（DL_PROG_RETRY_S），停滞钟推到当下。
+        - 无字节进账且停滞超 DL_STALL_DEAD_S（30 分钟）：转 dead。停滞钟 =
+          距最近一次字节进账（prog_at，set_dl_progress 每块推进）；从未进过度的
+          行由认领（claim_dl_row）起算——排队等槽、等退避不计时。
+        - dead 行复检失败：维持 dead、明天再来，dead_at 不刷新（旧积压不天天重计）；
+          复检中有字节进账即复活回 pending（半下载的行离成功只差几次重试）。
+          「复检中」的标记是 dead_at 在身（认领已把 dl 翻成 busy，dl 认不出），
+          复活时清掉，别让普通重试被误判成复检。
+
+        转发死链（无 msg_id）的明细行 src 是旧 rkey 直链、几天必失效（必 400），
+        get_file 又拿文件名当 file_id（必 file not found）——新标准下这类行从未
+        有过进度，认领起算 30 分钟后自然转死，不再按 3 次快死。有 parent 的行
+        复检到 tries 计满 DL_LATE_TRIES 才彻底放手（fetch_due_dl 的 tries<? 门，
+        进度会清零重计）；孤儿行两条刷新路都不通，转死后推一年不再复检。"""
         def _do(c):
             row = c.execute(
-                "SELECT tries, msg_id, parent FROM messages WHERE id=?", (mid,)).fetchone()
+                "SELECT tries, msg_id, parent, dl, dl_bytes, prog_at, dead_at "
+                "FROM messages WHERE id=?", (mid,)).fetchone()
+            now = int(time.time())
+            # 进度即活证据：有字节进账的失败不是失败——快试重续并清失败标记
+            # （dead_at 一并清：死过一次的行复检中进了字节，就是活回来了）
+            if row and (row["dl_bytes"] or 0) > 0:
+                c.execute(
+                    "UPDATE messages SET dl='pending', tries=0, next_try=?, "
+                    "err=?, prog_at=?, dead_at=NULL WHERE id=?",
+                    (now + DL_PROG_RETRY_S, err[:500], now, mid))
+                return "pending"
             tries = (row["tries"] if row else 0) + 1
-            no_mid = not (row["msg_id"] if row else "")
-            # 无 msg_id 3 次足矣：CDN 与本地兜底都必失败；能否得救看父转发还在不在
-            late = (no_mid and tries >= 3) or tries >= MAX_DL_TRIES
-            dl = "dead" if late else "pending"
-            orphan = no_mid and not (row["parent"] if row else None)
-            if late and orphan:
-                nxt = time.time() + 365 * 86400   # 远未来：孤儿行无刷新路径，不再复检
-            elif late:
-                nxt = time.time() + DL_LATE_INTERVAL
-            else:
-                nxt = time.time() + min(30 * 2 ** tries, 1800)
-            # dead_at = 本轮转死时刻：首次转死（含 fast_dead 与跑满 MAX_DL_TRIES）时刷新，
-            # 之后的每日复检失败不动它。面板的「今日失败」按它归日，才不会把旧积压天天重计
-            c.execute("UPDATE messages SET dl=?, tries=?, next_try=?, err=?, "
-                      "dead_at=COALESCE(?, dead_at) WHERE id=?",
-                      (dl, tries, nxt, err[:500],
-                       int(time.time()) if late else None, mid))
-            return dl
+            # 复检失败（dead_at 在身 = 曾转死，认领后 dl 已是 busy 认不出）：
+            # 写回 dead、明天再来；dead_at 不动，旧积压不被天天重计。
+            # 必须显式落 dl——认领把它翻成了 busy，漏写会让行卡死在「下载中」
+            if row and row["dead_at"] is not None:
+                c.execute(
+                    "UPDATE messages SET dl='dead', tries=?, next_try=?, err=? WHERE id=?",
+                    (tries, now + DL_LATE_INTERVAL, err[:500], mid))
+                return "dead"
+            # 停滞转死：只有走到失败分支才看钟——排队等槽、等退避的行不算停滞
+            prog_at = row["prog_at"] if row else None
+            if prog_at is not None and now - prog_at >= DL_STALL_DEAD_S:
+                orphan = not (row["msg_id"] if row else "") \
+                    and not (row["parent"] if row else None)
+                nxt = now + (365 * 86400 if orphan else DL_LATE_INTERVAL)
+                c.execute(
+                    "UPDATE messages SET dl='dead', tries=?, next_try=?, err=?, "
+                    "dead_at=? WHERE id=?",
+                    (tries, nxt, err[:500], now, mid))
+                return "dead"
+            # 未停滞：指数退避排下一次（60s 起步、封顶 30 分钟）
+            c.execute(
+                "UPDATE messages SET dl='pending', tries=?, next_try=?, err=? WHERE id=?",
+                (tries, now + min(30 * 2 ** tries, 1800), err[:500], mid))
+            return "pending"
         return await self._run(_do)
 
     async def upsert_media(self, md5: str, kind: str, scope: str,
