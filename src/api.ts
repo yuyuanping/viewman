@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BotDlItem,
   BotDlSnapshot,
   BotSettings,
   BotStatus,
@@ -122,6 +123,8 @@ export const api = {
   getBotStatus: () => invoke<BotStatus>("get_bot_status"),
   /** 轻量快照：只读 bot.db，bot-dl-changed 推送防抖后拉取，让列表近实时 */
   getBotDlSnapshot: () => invoke<BotDlSnapshot>("get_bot_dl_snapshot"),
+  /** 历史下载记录（不限当日）：面板「历史」页签按需一次拉最近 limit 条，后端缺省 500 */
+  getBotDlHistory: (limit?: number) => invoke<BotDlItem[]>("bot_dl_history", { limit }),
   startBot: () => invoke<void>("start_bot"),
   /** 只停 bot.py 与 riskwatch，QQ/NapCat 不动；返回逐条结果说明 */
   stopBot: () => invoke<string>("stop_bot"),

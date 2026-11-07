@@ -697,48 +697,52 @@ fn today_start_ts() -> i64 {
 /// 会被 sqlite 判成「倒着扫表更便宜」，6 万行实测 25ms/次，2 秒一轮的快照纯浪费。
 /// 三支各自命中索引（顶层走 messages_ts，明细走父行的 ts，死信走 messages_due），
 /// 结果在内存里合并去重。
-fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, String> {
-    let today = today_start_ts();
-    // 实时进度两列是老库可能没有的（db.py 启动时才迁移）；缺列补 NULL，
-    // 面板只在 busy 行读它们，拿不到就当没有进度
+/// 下载列表（当日/历史）共用的 SELECT 列清单，含父行 LEFT JOIN。
+/// 实时进度与完成时刻两列是 db.py 启动时才迁移的，老库缺列补 NULL：
+/// 面板只在 busy 行读进度，「完成」列拿不到显示 "-"
+fn dl_item_cols(conn: &rusqlite::Connection) -> String {
     let has_prog = has_messages_col(conn, "dl_bytes");
-    // 完成时刻同为老库可能没有的列（db.py 启动时才迁移）；缺列补 NULL，
-    // 面板「完成」列显示 "-"
     let has_ok_at = has_messages_col(conn, "ok_at");
     // 接收时间统一走 LEFT JOIN 取 COALESCE(p.ts, m.ts)：顶层行父为空、落回自身 ts；
     // 转发明细行显示的是**父转发收到的时刻**（明细自身 ts 是内层消息的原始发送时间，
     // 可能是几个月前——那不是这条内容进入本机的时间）。LEFT JOIN 对驱动表扫描无影响
     // （顶层仍走 messages_ts，父行按 rowid 点查），老库也都有这两列，无需缺列兜底
-    let cols = format!(
+    format!(
         "SELECT m.id, m.kind, COALESCE(NULLIF(m.name, ''), \
          substr(COALESCE(m.text, ''), 1, 80), ''), m.bytes, m.dedup, \
          m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts){} \
          FROM messages m LEFT JOIN messages p ON p.id = m.parent",
         if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" },
         if has_ok_at { ", m.ok_at" } else { ", NULL" }
-    );
+    )
+}
+
+/// 列清单（dl_item_cols）→ BotDlItem 的行映射，当日/历史两条查询共用，列序必须一致
+fn map_dl_item(r: &rusqlite::Row) -> rusqlite::Result<BotDlItem> {
+    Ok(BotDlItem {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        label: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        size: r.get(3)?,
+        dedup: r.get(4)?,
+        err: r.get(5)?,
+        dl: r.get(6)?,
+        parent: r.get(7)?,
+        sender: r.get(8)?,
+        dl_bytes: r.get(9)?,
+        dl_total: r.get(10)?,
+        ts: r.get(11)?,
+        ok_at: r.get(12)?,
+    })
+}
+
+fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, String> {
+    let today = today_start_ts();
+    let cols = dl_item_cols(conn);
     let cols = cols.as_str();
     let mut out = Vec::new();
     let mut push = |stmt: &mut rusqlite::Statement| -> Result<(), String> {
-        let rows = stmt
-            .query_map([today], |r: &rusqlite::Row| {
-                Ok(BotDlItem {
-                    id: r.get(0)?,
-                    kind: r.get(1)?,
-                    label: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    size: r.get(3)?,
-                    dedup: r.get(4)?,
-                    err: r.get(5)?,
-                    dl: r.get(6)?,
-                    parent: r.get(7)?,
-                    sender: r.get(8)?,
-                    dl_bytes: r.get(9)?,
-                    dl_total: r.get(10)?,
-                    ts: r.get(11)?,
-                    ok_at: r.get(12)?,
-                })
-            })
-            .map_err_str()?;
+        let rows = stmt.query_map([today], map_dl_item).map_err_str()?;
         for row in rows {
             out.push(row.map_err_str()?);
         }
@@ -784,6 +788,32 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     Ok(out)
 }
 
+/// 历史下载列表：不限当日，按需一次拉取最近的下载/归档记录（面板「历史」页签）。
+/// 入选条件与当日列表同源——有下载/归档动作（dl != 'none'），或被转发带进来的
+/// 明细行（parent IS NOT NULL，含 dl='none' 的文本/嵌套转发明细）；纯文本直发
+/// 同样不进列表。
+///
+/// 不做时间过滤、也不拆三支：这是用户点一下才跑一次的按需查询，不是 2 秒一轮的
+/// 快照，单条 OR 查询扫表加排序的开销（几万行几十毫秒级）可以接受；LIMIT 让
+/// sqlite 走 top-N 排序，不用把全部行排完。排序键与当日列表同一套
+/// （COALESCE(parent,id) 倒序、块内 id 正序），转发与其明细连成一块。
+/// 条数上限由调用方给——全库几十万行不可能一次端给面板。
+fn read_dl_history(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<BotDlItem>, String> {
+    let cols = dl_item_cols(conn);
+    let mut stmt = conn
+        .prepare(&format!(
+            "{cols} WHERE m.dl != 'none' OR m.parent IS NOT NULL \
+             ORDER BY COALESCE(m.parent, m.id) DESC, m.id ASC LIMIT ?1"
+        ))
+        .map_err_str()?;
+    let rows = stmt.query_map([limit], map_dl_item).map_err_str()?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err_str()?);
+    }
+    Ok(out)
+}
+
 /// 下载汇总：一次聚合出累计/今日完成量与今日重复跳过数。
 /// 今日口径同 today_start_ts（消息时间 ts，本地自然日）
 fn read_summary(conn: &rusqlite::Connection) -> Result<BotDlSummary, String> {
@@ -818,12 +848,18 @@ fn read_summary(conn: &rusqlite::Connection) -> Result<BotDlSummary, String> {
     Ok(s)
 }
 
-/// 只读打开 bot.db（WAL 库，bot 运行中也在写）拿积压计数、汇总与当日列表；读连接短轮询 5s 等锁，不自持
-fn read_bot_db(db_path: &str) -> Result<(BotDlStats, BotDlSummary, Vec<BotDlItem>), String> {
+/// 只读打开 bot.db（WAL 库，bot 运行中也在写）；读连接短轮询 5s 等锁，不自持
+fn open_bot_db_ro(db_path: &str) -> Result<rusqlite::Connection, String> {
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let conn = rusqlite::Connection::open_with_flags(db_path, flags).map_err_str()?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err_str()?;
+    Ok(conn)
+}
+
+/// 拿积压计数、汇总与当日列表
+fn read_bot_db(db_path: &str) -> Result<(BotDlStats, BotDlSummary, Vec<BotDlItem>), String> {
+    let conn = open_bot_db_ro(db_path)?;
     Ok((read_stats(&conn)?, read_summary(&conn)?, read_today_items(&conn)?))
 }
 
@@ -836,6 +872,21 @@ pub async fn get_bot_dl_snapshot(app: tauri::AppHandle) -> Result<BotDlSnapshot,
         let db_path = bot_db_path(&settings.root);
         let (dl, summary, today_items) = read_bot_db(&db_path.to_string_lossy())?;
         Ok(BotDlSnapshot { dl, summary, today_items })
+    })
+    .await
+    .map_err_str()?
+}
+
+/// 历史下载记录：面板「历史」页签按需拉取（不进快照轮询）。
+/// limit 缺省 500、夹在 1..=2000，防止一次把几十万行全端出来冻住前端
+#[tauri::command]
+pub async fn bot_dl_history(app: tauri::AppHandle, limit: Option<i64>) -> Result<Vec<BotDlItem>, String> {
+    let limit = limit.unwrap_or(500).clamp(1, 2000);
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let settings = get_settings(&state)?;
+        let conn = open_bot_db_ro(&bot_db_path(&settings.root).to_string_lossy())?;
+        read_dl_history(&conn, limit)
     })
     .await
     .map_err_str()?
@@ -1130,6 +1181,48 @@ mod tests {
         assert_eq!(detail.parent, Some(2));
         assert_eq!(detail.sender.as_deref(), Some("小明"));
         assert_eq!(items.iter().find(|it| it.id == 1).unwrap().parent, None);
+    }
+
+    /// 历史列表：不限当日——昨天的行也在（今日列表里只有今天转死的旧行回来）；
+    /// 纯文本直发仍不进列表；LIMIT 生效且组序不乱（父行带明细连块，从组头截起）
+    #[test]
+    fn history_lists_rows_beyond_today_respecting_limit() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
+                                   text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
+                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER,
+                                   dl_bytes INTEGER NOT NULL DEFAULT 0,
+                                   dl_total INTEGER);",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let old = now - 3 * 86400;
+        conn.execute(
+            "INSERT INTO messages(id,kind,dl,name,text,bytes,dedup,err,parent,sender_nick,ts,dead_at,ok_at) VALUES
+             (1,'image','ok','a.jpg',NULL,10,0,NULL,NULL,NULL,?1,NULL,?1),
+             (2,'forward','ok',NULL,'聊天记录',NULL,0,NULL,NULL,NULL,?2,NULL,?2),
+             (3,'image','none',NULL,'转发里的图',20,0,NULL,2,'小明',?2,NULL,NULL),
+             (4,'text','none',NULL,'纯文本',NULL,0,NULL,NULL,NULL,?2,NULL,NULL),
+             (5,'image','dead',NULL,NULL,NULL,0,'boom',NULL,NULL,?2,?2,NULL)",
+            rusqlite::params![now, old],
+        )
+        .unwrap();
+        let items = read_dl_history(&conn, 100).unwrap();
+        let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
+        // 组键 COALESCE(parent,id) 倒序（与当日列表同键）：死信 5 独占键 5，
+        // 排在转发组（键 2：父行 2 连明细 3 连块）之前，最后 1；纯文本 4 不进列表
+        assert_eq!(ids, vec![5, 2, 3, 1]);
+        // 完成时刻按列透传：昨天的行带出三天前的 ok_at，历史行不再全是 "-"
+        assert_eq!(items.iter().find(|it| it.id == 2).unwrap().ok_at, Some(old));
+        let items = read_dl_history(&conn, 2).unwrap();
+        let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
+        // LIMIT 按行截断、可能切在组中间：转发父行 2 入选而明细 3 被截掉，预览可接受
+        assert_eq!(ids, vec![5, 2]);
     }
 
     /// 老库没有 dead_at 列时列表不能整块报错，退化成「只按消息时间归日」

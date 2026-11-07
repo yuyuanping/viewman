@@ -1,5 +1,6 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import type { BotDlItem, BotStatus } from "../types";
+import { api } from "../api";
 import { formatDlSize } from "../utils";
 import {
   countByDlStatus,
@@ -23,6 +24,9 @@ const STATUS_CLASS: Record<DlStatus, string> = {
 
 /** 没有状态时的稳定空数组：每次渲染新建 [] 会让下面的 memo 全部失效 */
 const EMPTY_ITEMS: BotDlItem[] = [];
+
+/** 历史页签一次拉取的条数（与后端 bot_dl_history 的缺省一致；更早的记录不列出） */
+const HISTORY_LIMIT = 500;
 
 const KIND_LABEL: Record<string, string> = {
   image: "图片",
@@ -149,12 +153,34 @@ export function QqBotPanel({
   loadError: string | null;
 }) {
   const [dlFilter, setDlFilter] = useState<DlStatus | "all">("all");
+  // 「今日 / 历史」页签：今日走快照轮询近实时；历史不限日期，按需一次拉取、不进轮询
+  const [scope, setScope] = useState<"today" | "history">("today");
+  const [history, setHistory] = useState<{
+    loading: boolean;
+    error: string | null;
+    items: BotDlItem[];
+  }>({ loading: false, error: null, items: EMPTY_ITEMS });
+
+  const loadHistory = useCallback(() => {
+    setHistory((h) => ({ ...h, loading: true, error: null }));
+    api
+      .getBotDlHistory(HISTORY_LIMIT)
+      .then((items) => setHistory({ loading: false, error: null, items }))
+      .catch((e) => setHistory({ loading: false, error: String(e), items: [] }));
+  }, []);
+  const switchScope = (next: "today" | "history") => {
+    setScope(next);
+    // 每次切进历史都重拉：快照在背后一直在跑，缓存的历史早已落后
+    if (next === "history") loadHistory();
+  };
 
   // 当日列表：后端已按自然日取全量，这里只做前端筛选，切换状态不用回后端。
-  // 计数与筛选都走 memo：下载活跃期每 2 秒换一次列表，没必要每轮再全量遍历两遍
+  // 计数与筛选都走 memo：下载活跃期每 2 秒换一次列表，没必要每轮再全量遍历两遍；
+  // 历史页签下列表是静态快照，status 轮询换新不会引发这里的重算
   const todayItems = status?.today_items ?? EMPTY_ITEMS;
-  const statusCounts = useMemo(() => countByDlStatus(todayItems), [todayItems]);
-  const visibleItems = useMemo(() => filterByDlStatus(todayItems, dlFilter), [todayItems, dlFilter]);
+  const scopeItems = scope === "today" ? todayItems : history.items;
+  const statusCounts = useMemo(() => countByDlStatus(scopeItems), [scopeItems]);
+  const visibleItems = useMemo(() => filterByDlStatus(scopeItems, dlFilter), [scopeItems, dlFilter]);
 
   // 端口不通且 bot 也没在跑时提示冷启动等待；NapCat 侧的扫码引导由下方
   // NapCat 状态卡的二维码+summary 负责，这里不再重复说
@@ -182,13 +208,43 @@ export function QqBotPanel({
         </div>
       )}
 
-      {status && (todayItems.length > 0 || status.summary.ok > 0) && (
+      {status && (scope === "history" || todayItems.length > 0 || status.summary.ok > 0) && (
         <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-2 min-h-0" style={{ flex: "1 1 260px" }}>
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">下载列表（今日 {todayItems.length} 条）</span>
-            <span className="text-xs text-gray-400">
-              {status.dl.busy + status.dl.pending > 0 ? "实时刷新中（约 1 秒）" : "每 10 秒自动刷新"}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">
+                下载列表（{scope === "today" ? "今日" : "历史"} {scopeItems.length} 条）
+              </span>
+              <div className="flex rounded-full border border-white/10 text-[11px] overflow-hidden">
+                {(["today", "history"] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => switchScope(s)}
+                    aria-pressed={scope === s}
+                    className={`px-2 py-0.5 transition-colors ${
+                      scope === s ? "bg-blue-600/70 text-white" : "text-gray-400 hover:bg-white/10"
+                    }`}
+                  >
+                    {s === "today" ? "今日" : "历史"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {scope === "today" ? (
+              <span className="text-xs text-gray-400">
+                {status.dl.busy + status.dl.pending > 0 ? "实时刷新中（约 1 秒）" : "每 10 秒自动刷新"}
+              </span>
+            ) : (
+              <span className="text-xs text-gray-400">
+                {history.loading ? (
+                  "加载中…"
+                ) : (
+                  <button onClick={loadHistory} className="text-blue-400 hover:underline">
+                    刷新
+                  </button>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             <FilterChip
@@ -215,10 +271,23 @@ export function QqBotPanel({
               </button>
             )}
           </div>
+          {scope === "history" && history.error && (
+            <div role="alert" className="bg-red-900/80 text-red-100 px-3 py-1.5 rounded-lg text-xs">
+              历史记录读取失败：{history.error}
+            </div>
+          )}
           <div className="overflow-y-auto" style={{ maxHeight: "42vh" }}>
             {visibleItems.length === 0 ? (
               <p className="py-6 text-center text-xs text-gray-500">
-                {todayItems.length === 0 ? "今天还没有下载记录" : "今日没有该状态的记录"}
+                {scope === "today"
+                  ? todayItems.length === 0
+                    ? "今天还没有下载记录"
+                    : "今日没有该状态的记录"
+                  : history.loading
+                    ? "加载中…"
+                    : history.items.length === 0
+                      ? "还没有下载记录"
+                      : "没有该状态的记录"}
               </p>
             ) : (
               <table className="w-full text-xs">
@@ -241,6 +310,9 @@ export function QqBotPanel({
               </table>
             )}
           </div>
+          {scope === "history" && !history.loading && history.items.length >= HISTORY_LIMIT && (
+            <p className="text-[11px] text-gray-500">只显示最近 {HISTORY_LIMIT} 条，更早的记录未列出</p>
+          )}
         </section>
       )}
 
