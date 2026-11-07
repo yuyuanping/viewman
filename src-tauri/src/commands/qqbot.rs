@@ -853,22 +853,35 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
     Ok(out)
 }
 
-/// 列表排序（迅雷式）：**正在下载的组置顶**，其余按 COALESCE(parent,id) 倒序
-/// （新消息在前）、块内按 id 正序（父行最前，明细按转发里的先后铺开）。
-/// 「组」= 转发块：busy 明细行把整组（父行 + 全部明细）一起置顶，块不拆散；
-/// busy 顶层行（复检中的旧积压多属此类）自己置顶。下载一收敛，行自然落回
-/// 时间序的位置——列表是活的，跟迅雷的任务列表一样。
+/// 列表排序（迅雷式）：**正在下载的组置顶**；其余按**完成时间**倒序——刚下完的
+/// 紧跟置顶区，救回的旧积压按完成时刻排队（不再按消息新旧散开）；没有完成时刻的
+/// 行（排队/失败）沉底、按消息序。「组」= 转发块，组完成时刻取组内最大 ok_at
+/// （看最后一块完成），块不拆散、块内按 id 正序铺开；busy 顶层行（复检中的旧
+/// 积压多属此类）自己置顶。下载一收敛，行按完成时刻落位——列表是活的。
 fn sort_dl_items(items: &mut [BotDlItem]) {
     let hot: std::collections::HashSet<i64> = items
         .iter()
         .filter(|it| it.dl == "busy")
         .map(|it| it.parent.unwrap_or(it.id))
         .collect();
+    let mut done_at: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for it in items.iter() {
+        if let Some(ok) = it.ok_at {
+            let g = it.parent.unwrap_or(it.id);
+            let e = done_at.entry(g).or_insert(ok);
+            if ok > *e {
+                *e = ok;
+            }
+        }
+    }
     items.sort_by(|a, b| {
         let ga = a.parent.unwrap_or(a.id);
         let gb = b.parent.unwrap_or(b.id);
+        let da = done_at.get(&ga).copied().unwrap_or(0);
+        let db = done_at.get(&gb).copied().unwrap_or(0);
         hot.contains(&gb)
             .cmp(&hot.contains(&ga))
+            .then_with(|| db.cmp(&da))
             .then_with(|| gb.cmp(&ga))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -1342,11 +1355,11 @@ mod tests {
             "连 path 都没有的行退到类型中文名，不再空标签"
         );
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // 迅雷式排序：busy 行 1 置顶；其余按 COALESCE(parent,id) 倒序、块内 id 正序：
-        // 8、5 各一组，转发壳 2 不进列表但其明细（3/9）按组键 2 连块。10/11 是
-        // 昨天那批发来的转发与它的明细，今天没动静就不出现；4 是纯文本直发；
-        // 8 两支都命中，去重后只出现一次
-        assert_eq!(ids, vec![1, 8, 5, 3, 9]);
+        // 迅雷式排序：busy 行 1 置顶；其余按完成时间倒序——转发块（明细 3/9）的
+        // 组完成时刻取壳行 2 的 ok_at（=now-600，排序时壳还在、随后退场），紧跟
+        // 置顶区；8、5 没完成时刻沉底按组键倒序。10/11 是昨天那批发来的转发与它
+        // 的明细，今天没动静就不出现；4 是纯文本直发；8 两支都命中去重只出现一次
+        assert_eq!(ids, vec![1, 3, 9, 8, 5]);
         let detail = items.iter().find(|it| it.id == 3).unwrap();
         assert_eq!(detail.parent, Some(2));
         assert_eq!(detail.sender.as_deref(), Some("小明"));
@@ -1384,14 +1397,15 @@ mod tests {
         .unwrap();
         let items = read_dl_history(&conn, 100).unwrap();
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // 组键 COALESCE(parent,id) 倒序（与当日列表同键）：死信 5 独占键 5，排在
-        // 转发组（键 2：明细 3 连块，壳 2 不进列表）之前，最后 1；纯文本 4 不进列表
-        assert_eq!(ids, vec![5, 3, 1]);
+        // 完成时间倒序：完成的 1（ok_at=old）在最前；没完成时刻的死信 5 与转发
+        // 明细 3（壳 2 不进列表）沉底、按组键倒序；纯文本 4 不进列表
+        assert_eq!(ids, vec![1, 5, 3]);
         // 完成时刻按列透传：昨天的行带出三天前的 ok_at，历史行不再全是 "-"
         assert_eq!(items.iter().find(|it| it.id == 1).unwrap().ok_at, Some(old));
         let items = read_dl_history(&conn, 2).unwrap();
         let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
-        // LIMIT 按行截断、可能切在组中间：明细 3 入选，预览可接受
+        // LIMIT 按消息序截窗（截窗在 SQL 层、完成时间排序只在窗内生效）：
+        // 窗口取最近的 [5,3]，完成行 1 在窗外
         assert_eq!(ids, vec![5, 3]);
     }
 
@@ -1499,8 +1513,9 @@ mod tests {
             .map(|it| it.id)
             .collect();
         // 4 = 旧消息还在下载（busy 恒可见分支，置顶）；1 = 旧消息今天完成（ok_at
-        // 分支）；3 = 今天到的（原有分支）；2 = 旧消息旧完成，不进今天的列表
-        assert_eq!(ids, vec![4, 3, 1]);
+        // 分支，按完成时刻排在未完成的 3 前面）；3 = 今天到的（还没 ok_at，沉底）；
+        // 2 = 旧消息旧完成，不进今天的列表
+        assert_eq!(ids, vec![4, 1, 3]);
     }
 
     /// 迅雷式置顶：正在下载的行排最前；busy 明细把整组转发一起带上不拆块；
