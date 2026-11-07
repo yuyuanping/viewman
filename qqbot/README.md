@@ -130,7 +130,7 @@ viewman 的后端改用 **bot.lock 文件锁探针**判定：bot.py 自身用
    `done` 事件保留 30 天（`EVENT_RETENTION_DAYS`）后启动时自动清理。
 2. **顺序消费**：单 worker 按序处理文本并写 md 视图 + `messages` 表。
 3. **dl 下载重试队列**：媒体下载登记为 `pending`，即起任务排下载槽（全库并发上限
-   `MAX_CONCURRENT_DL=4`，= 建议值 5 − 1，给 QQ 侧留余量；排到槽才转 `busy`，
+   `MAX_CONCURRENT_DL=5`；排到槽才转 `busy`，
    其余保持 `pending`，面板与在传的行同显「下载中」）。sweeper 每 20s 一轮、每轮
    放 50 行进管道——只喂几行的话死链秒败后槽位空等到下一轮，并发永远跑不满；
    班车之外**任一下载尝试结束都会立刻叫醒 sweeper 补位**（槽位即空即喂，新到的
@@ -142,7 +142,8 @@ viewman 的后端改用 **bot.lock 文件锁探针**判定：bot.py 自身用
    丢掉（`CancelledError` 不走 `except Exception` 等路径）会卡成假「下载中」：
    `_attempt_row` 对取消也补写回失败，sweeper 每轮再把停滞超线的 busy 行按同一条
    标准回收转 dead（`reap_stale_busy`，真在传的行 prog_at 每块推进、storage 的
-   sock_read 超时兜底，到不了这条线）——「下载中」恒等于真在传的 ≤5 行。
+   sock_read 超时兜底，到不了这条线）——「下载中」恒等于真在传的 ≤6 行
+   （5 个占槽媒体 + 不占槽的转发壳/引用展开行）。
    图片/视频失败后还会自动改走
    `file_id -> get_file` 取本地原件的兜底路径——这条调用在**下载槽内**执行，预算
    分档：image/video 只给 1 次 30s（只是直链失效后的碰运气路径，NapCat 现场拉

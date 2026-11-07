@@ -31,11 +31,10 @@ from storage import Storage, md5_hint
 
 logger = logging.getLogger("saver.bot")
 
-# 同时最多 4 个文件在真下载（storage.dl_gate 闸门）= 建议值 5 − 1（5 是 README
-# 旧值，与迅雷/aria2 等下载器的常见默认一致；本地与 NapCat 文档均无更权威的
-# 建议并发，给 QQ 侧留一档余量）。排不到槽位的行保持 pending，面板与在传的行
-# 同显「下载中」，在传的行另带实时进度
-MAX_CONCURRENT_DL = 4
+# 同时最多 5 个文件在真下载（storage.dl_gate 闸门；2026-11-07 用户拍板从 4 提到
+# 5——4 是此前「建议值−1」的保守档，槽位省出来后并发重新成为上限）。排不到
+# 槽位的行保持 pending，面板与在传的行同显「下载中」，在传的行另带实时进度
+MAX_CONCURRENT_DL = 5
 SWEEP_INTERVAL = 20
 REPLY_TEXT_LIMIT = 200   # 引用原文在 md 里的截断长度
 # 打 QQ 侧消息类 API（历史、单条消息）的最小间隔。QQ 对 SsoGetGroupMsg 这类
