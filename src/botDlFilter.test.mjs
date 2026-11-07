@@ -5,6 +5,7 @@ import {
   countByDlStatus,
   filterByDlStatus,
   dlItemLabel,
+  dlSpeedOf,
   DL_STATUS_ORDER,
   DL_STATUS_LABEL,
 } from './botDlFilter.ts';
@@ -50,4 +51,15 @@ test('转发明细行带发送者前缀，顶层行不带', () => {
   assert.equal(dlItemLabel(row(1, 'ok')), '#1');
   assert.equal(dlItemLabel(row(2, 'ok', 'image', 0, 7, '小明')), '小明：#2');
   assert.equal(dlItemLabel(row(3, 'ok', 'image', 0, 7, null)), '#3', '明细行缺昵称时不加前缀');
+});
+
+test('下载速度：8 秒窗口差分，停滞 15 秒归零，收敛与重传重开窗口', () => {
+  const busyRow = bytes => ({ id: 9001, dl: 'busy', dl_bytes: bytes });
+  assert.equal(dlSpeedOf(busyRow(0), 1000), 0, '首见无速度');
+  assert.equal(dlSpeedOf(busyRow(4_000_000), 1000 + 5_000), 0, '窗口未满无速度');
+  assert.equal(dlSpeedOf(busyRow(12_000_000), 1000 + 8_000), 1_500_000, '窗口满：12MB/8s');
+  assert.equal(dlSpeedOf(busyRow(12_000_000), 1000 + 8_000 + 16_000), 0, '停滞 15s 归零');
+  assert.equal(dlSpeedOf(busyRow(0), 1000 + 8_000 + 16_000 + 1_000), 0, '进度清零=重传，重开窗口');
+  assert.equal(dlSpeedOf({ id: 9001, dl: 'ok', dl_bytes: 99 }, 9e9), 0, '收敛清状态');
+  assert.equal(dlSpeedOf(busyRow(5_000_000), 9e9 + 1_000), 0, '清状态后再 busy 从头起窗');
 });

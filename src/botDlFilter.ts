@@ -57,3 +57,43 @@ export function filterByDlStatus<T extends BotDlItem>(items: readonly T[], statu
   if (status === "all") return items.slice();
   return items.filter((item) => dlStatusOf(item) === status);
 }
+
+/** 下载速度估算（字节/秒，0 = 不显示；面板负责格式化成「 · 1.5 MB/s」）。
+ *
+ * 进度按 1MB 块跳变（db.set_dl_progress 每块写回一次），逐秒差分全是锯齿：
+ * 慢速行大半时间读 0、偶尔蹦一格。按 ≥8s 的窗口差分，窗口期内沿用上一次读数；
+ * 15 秒没有进账（等 src 刷新 / 连接挂死）归零；行收敛（非 busy）清状态。
+ * 窗口表按行 id 存模块级，由行组件渲染驱动推进（行每轮快照都重渲）；
+ * 新一轮认领会把字节清零重传（bytes 比上次还小），据此重开窗口。
+ */
+const DL_SPEED_WINDOW_MS = 8_000;
+const DL_SPEED_STALE_MS = 15_000;
+type SpeedWindow = { t0: number; b0: number; last: number; lastAdv: number; speed: number };
+const speedWindows = new Map<number, SpeedWindow>();
+
+export function dlSpeedOf(
+  item: Pick<BotDlItem, "id" | "dl" | "dl_bytes">,
+  now = Date.now(),
+): number {
+  if (item.dl !== "busy") {
+    speedWindows.delete(item.id);
+    return 0;
+  }
+  const bytes = item.dl_bytes ?? 0;
+  let w = speedWindows.get(item.id);
+  if (!w || bytes < w.last) {
+    w = { t0: now, b0: bytes, last: bytes, lastAdv: now, speed: 0 };
+  } else {
+    if (bytes > w.last) w.lastAdv = now;
+    w.last = bytes;
+    const dt = (now - w.t0) / 1000;
+    if (dt >= DL_SPEED_WINDOW_MS / 1000) {
+      w.speed = (bytes - w.b0) / dt;
+      w.t0 = now;
+      w.b0 = bytes;
+    }
+  }
+  speedWindows.set(item.id, w);
+  if (now - w.lastAdv > DL_SPEED_STALE_MS || w.speed < 1) return 0;
+  return w.speed;
+}

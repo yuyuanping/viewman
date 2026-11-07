@@ -6,6 +6,7 @@ import {
   countByDlStatus,
   filterByDlStatus,
   dlItemLabel,
+  dlSpeedOf,
   dlStatusOf,
   DL_STATUS_LABEL,
   DL_STATUS_ORDER,
@@ -53,14 +54,22 @@ function progressPct(item: BotDlItem): string {
   return ` ${Math.min(100, Math.round((done / total) * 100))}%`;
 }
 
-/** 在传行的尺寸串：显示已落盘字节（转发父行=块内累计），下完翻回最终大小；
- * 其余行（含排队）直接显最终大小 */
+/** 在传行的尺寸串：总量已知显示「已下 / 总量」（迅雷式），未知只显已落盘字节
+ * （转发父行=块内累计）；其余行（含排队）直接显最终大小 */
 function sizeText(item: BotDlItem): string {
   if (item.dl === "busy") {
     const done = item.dl_bytes ?? 0;
+    const total = item.dl_total;
+    if (total != null && total > 0) return `${formatDlSize(done)} / ${formatDlSize(total)}`;
     return done > 0 ? formatDlSize(done) : "…";
   }
   return formatDlSize(item.size);
+}
+
+/** 速度串：dlSpeedOf 给字节/秒（8 秒窗口差分），>0 才显示 */
+function speedText(item: BotDlItem): string {
+  const s = dlSpeedOf(item);
+  return s > 0 ? ` · ${formatDlSize(s)}/s` : "";
 }
 
 /** 接收时间串：今天收到的只显 HH:MM 省宽度；跨日的（昨日消息今天复检转死等）补 MM-DD。
@@ -151,7 +160,7 @@ const DlRow = memo(function DlRow({ item, onRetried }: { item: BotDlItem; onRetr
       <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
       <td className="py-1.5 px-2">
         <span className={STATUS_CLASS[dlStatusOf(item)]}>
-          {statusLabel(item)}{progressPct(item)}{dedupSuffix}
+          {statusLabel(item)}{progressPct(item)}{speedText(item)}{dedupSuffix}
         </span>
         {dlStatusOf(item) === "dead" && (
           <button
