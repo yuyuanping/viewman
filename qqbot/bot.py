@@ -330,6 +330,10 @@ class Bot:
                 await self._run_event_safe(eid, data)
             except Exception as e:
                 logger.error("[WORKER] id=%s: %s", eid, e)
+            # 事件处理完媒体行已登记：立刻叫醒 sweeper 喂下载管道，
+            # 新到的媒体不必空等下一个 20s 班车（转发父行被喂起后，
+            # 明细行在父任务进程内即时登记，不经过这条路径）
+            self.registry_kick.set()
 
     async def _run_event_safe(self, eid: int, data: dict) -> None:
         if eid and not await self.db.claim_event(eid):
