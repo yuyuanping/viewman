@@ -276,7 +276,7 @@ export function QqBotPanel({
       )}
 
       {status && (scope === "history" || todayItems.length > 0 || status.summary.ok > 0) && (
-        <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-2 min-h-0" style={{ flex: "1 1 260px" }}>
+        <section className="bg-white/5 rounded-xl p-4 flex flex-col gap-2 min-h-0 overflow-hidden" style={{ flex: "1 1 260px" }}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium">
@@ -343,7 +343,9 @@ export function QqBotPanel({
               历史记录读取失败：{history.error}
             </div>
           )}
-          <div className="overflow-y-auto" style={{ maxHeight: "42vh" }}>
+          {/* flex-1 min-h-0 吃满卡片剩余高度：失败行常驻后列表动辄几百行，
+              固定 42vh 会把大半页面浪费成空白；表头 sticky 在本滚动容器上 */}
+          <div className="overflow-y-auto flex-1 min-h-0">
             {visibleItems.length === 0 ? (
               <p className="py-6 text-center text-xs text-gray-500">
                 {scope === "today"
