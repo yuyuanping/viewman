@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecursiveMode, Watcher};
@@ -250,6 +250,10 @@ fn refresh_watch_list(
 /// 全量轮询之上——进程/端口状态仍靠轮询，这里只管下载列表。
 /// 建不起来（notify 不可用/目录缺失）就静默不推，10s 轮询兜底。
 const BOT_DB_DEBOUNCE: Duration = Duration::from_millis(500);
+/// 防抖封顶窗：活动下载的进度写入（5 路并发、每行 ≤0.3s 一笔）从不断流，
+/// 纯静默防抖会被饿死——下载越忙越不推送，面板只剩 10s 轮询兜底。封顶保证
+/// 忙时也按秒级节奏发事件。
+const BOT_DB_DEBOUNCE_MAX: Duration = Duration::from_millis(1000);
 
 pub(crate) fn spawn_bot_db(app: tauri::AppHandle) {
     let db_path = {
@@ -301,10 +305,33 @@ fn bot_db_loop(
         if !is_bot_db(&first, &db_path) {
             continue;
         }
-        // 防抖：窗口内的连续写（WAL 刷盘常成串）吸收成一次事件
-        while rx.recv_timeout(BOT_DB_DEBOUNCE).is_ok() {}
+        // 防抖：500ms 静默合并一批（WAL 刷盘常成串）；持续写入由封顶窗兜住
+        if !debounce_collect(&rx, BOT_DB_DEBOUNCE, BOT_DB_DEBOUNCE_MAX) {
+            return; // watcher 已销毁，应用在退出
+        }
         if app.emit("bot-dl-changed", ()).is_err() {
             return; // 应用已退出
+        }
+    }
+}
+
+/// 防抖收集：静默 `quiet` 即发；持续写入最多等 `max_wait` 必发。
+/// channel 断开返回 false（watcher 已销毁，应用在退出）。
+fn debounce_collect(
+    rx: &Receiver<notify::Result<notify::Event>>,
+    quiet: Duration,
+    max_wait: Duration,
+) -> bool {
+    let deadline = Instant::now() + max_wait;
+    loop {
+        match rx.recv_timeout(quiet) {
+            Ok(_) => {
+                if Instant::now() >= deadline {
+                    return true;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
         }
     }
 }
@@ -319,5 +346,54 @@ fn is_bot_db(ev: &notify::Result<notify::Event>, db_path: &Path) -> bool {
                     .unwrap_or(false)
         }),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::thread;
+
+    fn ev() -> notify::Result<notify::Event> {
+        Ok(notify::Event::new(EventKind::Other))
+    }
+
+    #[test]
+    fn debounce_fires_on_quiet_gap() {
+        let (tx, rx) = channel();
+        tx.send(ev()).unwrap();
+        let t0 = Instant::now();
+        assert!(debounce_collect(&rx, Duration::from_millis(50), Duration::from_secs(5)));
+        assert!(t0.elapsed() < Duration::from_millis(300));
+        drop(tx);
+    }
+
+    #[test]
+    fn continuous_writes_cannot_starve_the_push() {
+        let (tx, rx) = channel();
+        let stop = thread::spawn(move || {
+            for _ in 0..100 {
+                if tx.send(ev()).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let t0 = Instant::now();
+        assert!(debounce_collect(&rx, Duration::from_millis(50), Duration::from_millis(300)));
+        assert!(
+            t0.elapsed() < Duration::from_millis(600),
+            "持续写入把推送饿死了：{:?}",
+            t0.elapsed()
+        );
+        stop.join().unwrap();
+    }
+
+    #[test]
+    fn disconnected_channel_returns_false() {
+        let (tx, rx) = channel::<notify::Result<notify::Event>>();
+        drop(tx);
+        assert!(!debounce_collect(&rx, Duration::from_millis(10), Duration::from_secs(1)));
     }
 }

@@ -329,10 +329,6 @@ class Bot:
                 await self._run_event_safe(eid, data)
             except Exception as e:
                 logger.error("[WORKER] id=%s: %s", eid, e)
-            # 事件处理完媒体行已登记：立刻叫醒 sweeper 喂下载管道，
-            # 新到的媒体不必空等下一个 20s 班车（转发父行被喂起后，
-            # 明细行在父任务进程内即时登记，不经过这条路径）
-            self.registry_kick.set()
 
     async def _run_event_safe(self, eid: int, data: dict) -> None:
         if eid and not await self.db.claim_event(eid):
@@ -456,8 +452,8 @@ class Bot:
                 await self._sweep_once()
             except Exception as e:
                 logger.error("[SWEEP] %s", e)
-            # 定时班车之外，磁力/网址链接（_kick_magnets）与任一下载尝试结束
-            # （_attempt_row，槽位空了立刻补位）都会提前叫醒。
+            # 定时班车只管退避重试/复检与回收——新行登记即 spawn 排槽，不坐班车。
+            # 班车之外收到磁力/网址链接会被 _kick_magnets 提前叫醒（同步登记表）。
             # clear 放在 wait 之后：唤醒期间到达的链接不会丢，最坏是多跑一轮。
             try:
                 await asyncio.wait_for(self.registry_kick.wait(), SWEEP_INTERVAL)
@@ -473,10 +469,10 @@ class Bot:
                 await self.db.fail_event(ev["id"], f"bad payload: {e}")
                 continue
             self._spawn(self._run_event_safe(ev["id"], data))
-        # 每轮喂够管道：并发上限只由 dl_gate 把守，这里若只放几行，死链行几秒
-        # 就跑完一轮，槽位要空等下一轮班车——「同时下载 N 个」永远跑不满。
-        # 50 个等待任务挤 4 个槽位，槽一空立刻有人补上；_dl_inflight 挡住
-        # 下一轮班车对未认领行的重复 spawn
+        # 新行不走这里：媒体/转发/回复行登记时即起任务排下载槽（闸门 FIFO =
+        # 登记顺序 = 转发块内解析顺序，先解析先下载），槽位一空立刻接续。
+        # 这里只喂退避到期的重试行与重启遗留的 pending——放 50 让大退避波次
+        # 一轮抽干；_dl_inflight 挡住对已在槽内排队行的重复 spawn
         for row in await self.db.fetch_due_dl(limit=50):
             self._spawn(self._attempt_row(row))
         # 卡「下载中」的行 sweeper 不认领（fetch_due_dl 只收 pending/dead），
@@ -827,10 +823,6 @@ class Bot:
             if acquired:
                 gate.release()
             self._dl_inflight.discard(mid)
-            # 尝试一结束就立刻叫醒 sweeper 补位喂新行，不等 20s 班车——
-            # 槽位空着的时候排队的行越早 spawn 越早开始传
-            # （磁力/网址链接的 _kick_magnets 用的是同一个事件）
-            self.registry_kick.set()
 
     async def _process_row(self, row: dict, mid: int, kind: str) -> None:
         scope = row.get("scope") or "private"
