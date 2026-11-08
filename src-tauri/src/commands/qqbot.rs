@@ -879,8 +879,11 @@ fn read_today_items(conn: &rusqlite::Connection) -> Result<Vec<BotDlItem>, Strin
 /// 列表排序（迅雷式）：**正在下载的组置顶**；其余按**完成时间**倒序——刚下完的
 /// 紧跟置顶区，救回的旧积压按完成时刻排队（不再按消息新旧散开）；没有完成时刻的
 /// 行（排队/失败）沉底、按消息序。「组」= 转发块，组完成时刻取组内最大 ok_at
-/// （看最后一块完成），块不拆散、块内按 id 正序铺开；busy 顶层行（复检中的旧
-/// 积压多属此类）自己置顶。下载一收敛，行按完成时刻落位——列表是活的。
+/// （看最后一块完成），块不拆散；**块内已完成的明细按各自完成时刻倒序**——并行
+/// 下载的完成序≠解析序，不按各自时刻排的话「完成」列顺着读是乱跳的（2026-11-08
+/// 实拍：块内 00:21:43 → 00:33:03 → 00:30:13）；未完成的明细（busy/pending/文本）
+/// 垫底、按解析序（id 正序）。busy 顶层行（复检中的旧积压多属此类）自己置顶。
+/// 下载一收敛，行按完成时刻落位——列表是活的。
 fn sort_dl_items(items: &mut [BotDlItem]) {
     let hot: std::collections::HashSet<i64> = items
         .iter()
@@ -906,6 +909,7 @@ fn sort_dl_items(items: &mut [BotDlItem]) {
             .cmp(&hot.contains(&ga))
             .then_with(|| db.cmp(&da))
             .then_with(|| gb.cmp(&ga))
+            .then_with(|| b.ok_at.unwrap_or(0).cmp(&a.ok_at.unwrap_or(0)))
             .then_with(|| a.id.cmp(&b.id))
     });
 }
@@ -1597,6 +1601,47 @@ mod tests {
         // 置顶两个 hot 组：顶层 busy 4（组键 4）在 busy 明细 3（组键 2）之前，
         // 转发壳 2 不进列表；其余按时间序 5、1
         assert_eq!(ids, vec![4, 3, 5, 1]);
+    }
+
+    /// 块内已完成的明细按各自完成时刻倒序：并行下载的完成序≠解析序（id 序），
+    /// 不按各自时刻排的话「完成」列顺着读是乱跳的；未完成的明细垫底按解析序，
+    /// 块的整体位置仍取组完成时刻（组内最大 ok_at），不拆块
+    #[test]
+    fn sort_orders_completed_details_by_completion_time_within_block() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, kind TEXT, dl TEXT, name TEXT,
+                                   text TEXT, bytes INTEGER, dedup INTEGER NOT NULL DEFAULT 0,
+                                   err TEXT, parent INTEGER, sender_nick TEXT, ts INTEGER,
+                                   dead_at INTEGER, ok_at INTEGER, tries INTEGER,
+                                   dl_bytes INTEGER NOT NULL DEFAULT 0, dl_total INTEGER);",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO messages(id,kind,dl,name,parent,ts,ok_at) VALUES
+             (10,'forward','ok',NULL,NULL,?1,?2),
+             (11,'image','ok','a.jpg',10,?1,?3),
+             (12,'video','ok','b.mp4',10,?1,?4),
+             (13,'image','ok','c.jpg',10,?1,?5),
+             (14,'image','pending','d.jpg',10,?1,NULL),
+             (15,'text','none',NULL,10,?1,NULL),
+             (20,'image','ok','single.jpg',NULL,?1,?6)",
+            rusqlite::params![now - 3600, now - 100, now - 300, now - 50, now - 200, now - 150],
+        )
+        .unwrap();
+        let ids: Vec<i64> = read_today_items(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|it| it.id)
+            .collect();
+        // 块（组完成时刻 now-50）在单行 20（now-150）前；块内按完成时刻倒序
+        // 12(now-50) → 13(now-200) → 11(now-300)，未完成的 14/15 垫底按 id 正序；
+        // 壳 10 完成于 now-100，按同键参与排序但不进列表
+        assert_eq!(ids, vec![12, 13, 11, 14, 15, 20]);
     }
 
     /// 正在处理中的行恒可见：旧 ts 的 busy 行、busy 转发壳连它的明细（哪怕明细
