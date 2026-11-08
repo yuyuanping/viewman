@@ -83,6 +83,10 @@ pub struct BotDlItem {
     pub kind: String,
     /// 文件原始名，没有则用文本前 80 字预览
     pub label: String,
+    /// 原始文件名（label 的第一级，无兜底）：同一内容的 QQ 媒体文件同名
+    /// （文件名即内容 md5），失败列表按 kind+name 把分散在各转发块下的
+    /// 副本聚合成一行。name 为空的行（无名图片等）没有内容判据，不聚合
+    pub name: Option<String>,
     pub size: Option<i64>,
     /// 媒体 1=重复跳过（复用现有文件）；转发行=内部跳过的重复媒体数
     pub dedup: i64,
@@ -103,6 +107,9 @@ pub struct BotDlItem {
     /// 下载完成时刻（Unix 秒），mark_dl_ok 落值。老库未迁移/历史 ok 行无值
     /// （当时没记）为 NULL，面板「完成」列显示 "-"
     pub ok_at: Option<i64>,
+    /// 首次转死时刻（Unix 秒），bump_dl 落值且复检失败不刷新。仅死行有值，
+    /// 聚合代表行按它取「最近失败的那份」，失败原因才显示得新鲜
+    pub dead_at: Option<i64>,
 }
 
 /// 一次状态快照：进程 + NapCat 端口 + bot.db（只读）下载积压计数与最近下载列表。
@@ -747,25 +754,30 @@ fn dl_item_cols(conn: &rusqlite::Connection) -> String {
     let has_prog = has_messages_col(conn, "dl_bytes");
     let has_ok_at = has_messages_col(conn, "ok_at");
     let has_path = has_messages_col(conn, "path");
+    let has_dead_at = has_messages_col(conn, "dead_at");
     // 接收时间统一走 LEFT JOIN 取 COALESCE(p.ts, m.ts)：顶层行父为空、落回自身 ts；
     // 转发明细行显示的是**父转发收到的时刻**（明细自身 ts 是内层消息的原始发送时间，
     // 可能是几个月前——那不是这条内容进入本机的时间）。LEFT JOIN 对驱动表扫描无影响
     // （顶层仍走 messages_ts，父行按 rowid 点查），老库也都有这两列，无需缺列兜底
     format!(
         "SELECT m.id, m.kind, m.name, m.text, m.bytes, m.dedup, \
-         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts){}{} \
+         m.err, m.dl, m.parent, m.sender_nick{}, COALESCE(p.ts, m.ts){}{}{} \
          FROM messages m LEFT JOIN messages p ON p.id = m.parent",
         if has_prog { ", m.dl_bytes, m.dl_total" } else { ", NULL, NULL" },
         if has_ok_at { ", m.ok_at" } else { ", NULL" },
-        if has_path { ", m.path" } else { ", NULL" }
+        if has_path { ", m.path" } else { ", NULL" },
+        // dead_at 是死行聚合代表行的选取依据；极老库可能没这列，缺了不影响列表本体
+        if has_dead_at { ", m.dead_at" } else { ", NULL" }
     )
 }
 
 /// 列清单（dl_item_cols）→ BotDlItem 的行映射，当日/历史两条查询共用，列序必须一致
 fn map_dl_item(r: &rusqlite::Row) -> rusqlite::Result<BotDlItem> {
     let kind: String = r.get(1)?;
+    let name: Option<String> = r.get(2)?;
     Ok(BotDlItem {
-        label: dl_label(r.get(2)?, r.get(3)?, r.get(14)?, &kind),
+        label: dl_label(name.clone(), r.get(3)?, r.get(14)?, &kind),
+        name,
         id: r.get(0)?,
         kind,
         size: r.get(4)?,
@@ -778,6 +790,7 @@ fn map_dl_item(r: &rusqlite::Row) -> rusqlite::Result<BotDlItem> {
         dl_total: r.get(11)?,
         ts: r.get(12)?,
         ok_at: r.get(13)?,
+        dead_at: r.get(15)?,
     })
 }
 
@@ -1359,6 +1372,14 @@ mod tests {
         assert_eq!(it1.ok_at, Some(now - 600));
         assert_eq!(items.iter().find(|it| it.id == 3).unwrap().ok_at, None);
         assert_eq!(items.iter().find(|it| it.id == 8).unwrap().ok_at, None);
+        // 原始文件名与转死时刻透传（前端失败聚合的键与代表行选取依据）：
+        // name 是 label 的第一级且无兜底，死行 5 的 dead_at 是它今天转死的时刻
+        assert_eq!(it1.name.as_deref(), Some("a.jpg"));
+        assert_eq!(items.iter().find(|it| it.id == 5).unwrap().name, None);
+        assert_eq!(
+            items.iter().find(|it| it.id == 5).unwrap().dead_at,
+            Some(now - 600)
+        );
         // 标签链：文件名 > 文本前 80 字 > 落盘文件名基名 > 类型中文名，
         // QQ 图片/视频多数没文件名，落盘 md5 名就是最具体的内容；
         // 壳行 2 已不进列表，文本回退由无 name 有 text 的明细 3 验证

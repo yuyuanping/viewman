@@ -4,6 +4,7 @@ import { api } from "../api";
 import { formatDlSize } from "../utils";
 import {
   countByDlStatus,
+  collapseDeadDuplicates,
   filterByDlStatus,
   dlForwardTaskText,
   dlItemLabel,
@@ -137,26 +138,36 @@ function FilterChip({
 const DlRow = memo(function DlRow({
   item,
   group,
+  dupIds,
   onRetried,
 }: {
   item: BotDlItem;
   /** 所属转发块的聚合进度（仅父行会拿到），busy 壳行据此显示 解析中/下载中 N/M 个 */
   group?: { total: number; done: number };
+  /** 同内容失败副本组（含自身，>1 说明聚合成行了）：状态带 ×N，重试一并拉起整组 */
+  dupIds?: number[];
   onRetried: () => void;
 }) {
   const kindLabel = KIND_LABEL[item.kind] ?? item.kind;
   const label = dlItemLabel(item);
   const task = taskText(item, group);
   const dedupSuffix = item.dl === "ok" && item.dedup > 1 ? `（${item.dedup} 个重复）` : "";
+  // 失败聚合角标：同一内容的副本合并成一行，×N 说明还有 N-1 份同命运的在册
+  const dupCount = dupIds?.length ?? 1;
+  const mergedSuffix = dlStatusOf(item) === "dead" && dupCount > 1 ? ` ×${dupCount}` : "";
   // 明细行缩进挂在所属转发行下面（后端已按 COALESCE(parent,id) 排好序）
   const isDetail = item.parent != null;
+  const rowTitle =
+    dupCount > 1
+      ? `同内容失败 ${dupCount} 份（挂在不同转发块下），已合并成一行；重试一并拉起全部副本，成功后整组转「已下载」${item.err ? `\n失败原因：${item.err}` : ""}`
+      : item.err ?? (isDetail ? `转发 #${item.parent} 的第 ${item.id} 段` : undefined);
   // 失败行的手动重试：重置回队列后轮询会自动刷出新状态，这里只管发起
   const [retryState, setRetryState] = useState<"idle" | "busy" | "error">("idle");
   const retry = () => {
     if (retryState === "busy") return;
     setRetryState("busy");
     api
-      .retryBotDl([item.id])
+      .retryBotDl(dupIds ?? [item.id])
       .then(() => {
         setRetryState("idle");
         onRetried();
@@ -166,7 +177,7 @@ const DlRow = memo(function DlRow({
   return (
     <tr
       className="border-t border-white/5 hover:bg-white/5 transition-colors duration-75"
-      title={item.err ?? (isDetail ? `转发 #${item.parent} 的第 ${item.id} 段` : undefined)}
+      title={rowTitle}
     >
       <td
         className={`py-1.5 px-2 text-gray-200 truncate max-w-[36ch] ${isDetail ? "pl-6 text-gray-300" : ""}`}
@@ -181,7 +192,7 @@ const DlRow = memo(function DlRow({
       <td className="py-1.5 px-2 text-gray-300">{kindLabel}</td>
       <td className="py-1.5 px-2">
         <span className={STATUS_CLASS[dlStatusOf(item)]}>
-          {(task ?? statusLabel(item))}{!task && progressPct(item)}{speedText(item)}{dedupSuffix}
+          {(task ?? statusLabel(item))}{!task && progressPct(item)}{speedText(item)}{dedupSuffix}{mergedSuffix}
         </span>
         {dlStatusOf(item) === "dead" && (
           <button
@@ -239,8 +250,14 @@ export function QqBotPanel({
   // 历史页签下列表是静态快照，status 轮询换新不会引发这里的重算
   const todayItems = status?.today_items ?? EMPTY_ITEMS;
   const scopeItems = scope === "today" ? todayItems : history.items;
-  const statusCounts = useMemo(() => countByDlStatus(scopeItems), [scopeItems]);
-  const visibleItems = useMemo(() => filterByDlStatus(scopeItems, dlFilter), [scopeItems, dlFilter]);
+  // 失败行内容聚合：列表、计数、筛选都吃聚合后的行——转发的同一文件被连发几遍
+  // 时只显示一行 ×N；转发块聚合统计除外，隐藏的副本仍占「下载中 N/M 个」的 M 位
+  const collapsed = useMemo(() => collapseDeadDuplicates(scopeItems), [scopeItems]);
+  const statusCounts = useMemo(() => countByDlStatus(collapsed.rows), [collapsed.rows]);
+  const visibleItems = useMemo(
+    () => filterByDlStatus(collapsed.rows, dlFilter),
+    [collapsed.rows, dlFilter],
+  );
   // 转发块聚合（迅雷式任务视角）：busy 壳行显示 解析中/下载中 N/M 个
   const groupStats = useMemo(() => forwardGroupStats(scopeItems), [scopeItems]);
 
@@ -280,7 +297,7 @@ export function QqBotPanel({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium">
-                下载列表（{scope === "today" ? "今日" : "历史"} {scopeItems.length} 条）
+                下载列表（{scope === "today" ? "今日" : "历史"} {collapsed.rows.length} 条）
               </span>
               <div className="flex rounded-full border border-white/10 text-[11px] overflow-hidden">
                 {(["today", "history"] as const).map((s) => (
@@ -317,7 +334,7 @@ export function QqBotPanel({
             <FilterChip
               active={dlFilter === "all"}
               label="全部"
-              count={todayItems.length}
+              count={collapsed.rows.length}
               onClick={() => setDlFilter("all")}
             />
             {DL_STATUS_ORDER.map((s) => (
@@ -377,6 +394,7 @@ export function QqBotPanel({
                       key={item.id}
                       item={item}
                       group={item.parent == null ? groupStats.get(item.id) : undefined}
+                      dupIds={collapsed.groups.get(item.id)}
                       onRetried={handleRowRetried}
                     />
                   ))}

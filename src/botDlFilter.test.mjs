@@ -4,6 +4,7 @@ import {
   dlStatusOf,
   countByDlStatus,
   filterByDlStatus,
+  collapseDeadDuplicates,
   dlItemLabel,
   dlSpeedOf,
   dlForwardTaskText,
@@ -82,4 +83,37 @@ test('转发任务态：busy 壳显 解析中/下载中 N/M 个；排队壳与�
   ]);
   assert.deepEqual(stats.get(1), { total: 4, done: 3 }, 'ok/重复跳过/归档都算完成，pending 不算');
   assert.equal(stats.get(2), undefined, '明细不再聚合');
+});
+
+test('失败聚合：同内容副本合并成一行 ×N，代表行取最近转死的', () => {
+  const dead = (id, name, dead_at, kind = 'video', parent = null) => ({
+    id, dl: 'dead', kind, name, dead_at, parent, dedup: 0, label: name, err: 'boom', size: null, sender: null,
+  });
+  const items = [
+    dead(1, 'a.mp4', 100, 'video', 10),
+    dead(2, 'a.mp4', 200, 'video', 20),
+    dead(3, 'a.mp4', 200, 'video', 30),
+    { ...dead(9, 'a.mp4', 300), dl: 'ok' },  // 同名但已成功：不进死行组
+    dead(4, 'b.jpg', 150, 'image', 40),      // 单份死行：不聚
+    dead(5, null, 160),                      // 无名死行：没有内容判据，不聚
+    dead(6, 'a.mp4', 50, 'image', 50),       // 同名不同类型：不聚
+  ];
+  const { rows, groups } = collapseDeadDuplicates(items);
+  // 代表行 = 组内最近转死的（dead_at 同为 200 时取 id 小的）→ id 2；副本 1/3 隐藏
+  assert.deepEqual(groups.get(2), [1, 2, 3]);
+  assert.equal(groups.size, 1, '单份与无名行不成组');
+  assert.deepEqual(rows.map(i => i.id), [2, 9, 4, 5, 6], '隐藏副本、其余行原序保留');
+  // 计数与筛选吃聚合后的行：失败角标数 = 看得见的行数，不是在册副本数
+  assert.equal(countByDlStatus(rows).dead, 4);
+  assert.deepEqual(filterByDlStatus(rows, 'dead').map(i => i.id), [2, 4, 5, 6]);
+});
+
+test('失败聚合：两份同刻转死取 id 小的；空列表不炸', () => {
+  const dead = (id, name, dead_at) => ({
+    id, dl: 'dead', kind: 'file', name, dead_at, parent: null, dedup: 0, label: name, err: null, size: null, sender: null,
+  });
+  const { rows, groups } = collapseDeadDuplicates([dead(7, 'r.pdf', 500), dead(3, 'r.pdf', 500)]);
+  assert.deepEqual(groups.get(3), [3, 7], '同刻取 id 小的当代表');
+  assert.deepEqual(rows.map(i => i.id), [3]);
+  assert.deepEqual(collapseDeadDuplicates([]), { rows: [], groups: new Map() });
 });

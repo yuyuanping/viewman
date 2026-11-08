@@ -82,6 +82,9 @@ export interface BotDlItem {
   kind: string;
   /** 文件原始名，没有则是文本前 80 字预览 */
   label: string;
+  /** 原始文件名（label 的第一级，无兜底）：QQ 媒体文件名即内容 md5，
+   * 同名=同内容，失败列表按它把各转发块下的副本聚合成一行 */
+  name: string | null;
   size: number | null;
   /** 媒体 1=重复跳过（复用现有文件）；转发行=内部跳过的重复媒体数 */
   dedup: number;
@@ -99,6 +102,8 @@ export interface BotDlItem {
   ts: number | null;
   /** 下载完成时刻（Unix 秒）。mark_dl_ok 落值；未完成/历史行（当时没记）为 null */
   ok_at: number | null;
+  /** 首次转死时刻（Unix 秒），仅死行有值；失败聚合的代表行按它取最近失败的那份 */
+  dead_at: number | null;
 }
 
 /** 下载汇总：媒体文件（image/video/file，dl='ok'）的累计与今日完成量 */

@@ -58,6 +58,45 @@ export function filterByDlStatus<T extends BotDlItem>(items: readonly T[], statu
   return items.filter((item) => dlStatusOf(item) === status);
 }
 
+/** 失败行的内容聚合：同一段转发被人连发几遍时，同一文件会在不同转发块下各挂
+ * 一行失败（各自计各自的复检），列表上一片重复红字。这里按 kind+name 把死行
+ * 归组——QQ 媒体文件名即内容 md5，同名就是同内容；name 为空的行（无名图片等）
+ * 没有内容判据，不聚合。返回代表行子集与 代表行id → 组内全部副本id 的映射：
+ * 代表行取最近转死的那份（失败原因最新鲜，同刻取 id 小的），其余副本从列表
+ * 隐藏；「重试」拿组内全部 id 一并拉回队列，任一份成功后 bot 的同名救回
+ * （mark_dl_ok）会把整组副本转「已下载」——组自然消失。
+ * 只动展示层：计数、筛选都吃聚合后的行，行数据与排序不改变 */
+export function collapseDeadDuplicates(items: readonly BotDlItem[]): {
+  rows: BotDlItem[];
+  /** 代表行 id → 组内全部副本 id（含自身，升序）；单份死行不在表里 */
+  groups: Map<number, number[]>;
+} {
+  const byContent = new Map<string, BotDlItem[]>();
+  for (const it of items) {
+    if (it.dl !== "dead" || !it.name) continue;
+    const key = `${it.kind}\n${it.name}`;
+    const g = byContent.get(key);
+    if (g) g.push(it);
+    else byContent.set(key, [it]);
+  }
+  const groups = new Map<number, number[]>();
+  const hidden = new Set<number>();
+  for (const g of byContent.values()) {
+    if (g.length < 2) continue;
+    const rep = g.reduce((best, it) => {
+      const bd = best.dead_at ?? 0;
+      const di = it.dead_at ?? 0;
+      return di > bd || (di === bd && it.id < best.id) ? it : best;
+    });
+    groups.set(
+      rep.id,
+      g.map((it) => it.id).sort((a, b) => a - b),
+    );
+    for (const it of g) if (it.id !== rep.id) hidden.add(it.id);
+  }
+  return { rows: items.filter((it) => !hidden.has(it.id)), groups };
+}
+
 /** 转发块聚合：parent 行 id → 明细总数与已收敛数（ok/重复跳过/归档都算完成）。
  * 面板据此给 busy 的转发壳显示「下载中 N/M 个」——壳行自己没有字节总量，
  * 聚合进度按个数计，这是迅雷式任务视角的「排序-下载」段 */
