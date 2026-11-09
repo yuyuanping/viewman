@@ -27,7 +27,7 @@ from db import DB
 from forward import card_text, render_node, seg_text
 from links import LinkRegistry
 from magnets import MagnetRegistry
-from storage import Storage, md5_hint
+from storage import Storage, is_hash_filename, md5_hint
 
 logger = logging.getLogger("saver.bot")
 
@@ -974,7 +974,11 @@ class Bot:
                 r = await self.storage.save_media(
                     src, kind, scope, expect_md5=md5_hint(row.get("ref")),
                     on_progress=_progress_self)
-            if r is None and row.get("ref"):
+            if r is None and row.get("ref") and not (
+                    # 转发明细行的 ref 只有哈希文件名，不是 file_id：拿它调
+                    # get_file 必 file not found（详见 storage.is_hash_filename），
+                    # 别再白占一次下载槽和 NapCat 往返。顶层消息仍保留兜底。
+                    row.get("parent") and is_hash_filename(row["ref"])):
                 # CDN url 可能已过期：改经 NapCat file_id 取本地原件重试
                 p = await self.get_file_url(row["ref"], kind)
                 if p:

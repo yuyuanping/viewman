@@ -40,6 +40,10 @@ _CONNECT_TIMEOUT = 15
 # video 不设总时限：只要还在来数据就继续下（大视频/慢 CDN 常被 30s 总时限误杀）。
 # 改防停滞：sock_read 连续这么久一个字节都没到才判超时。
 _STALL_READ_TIMEOUT = 60
+# 这些 HTTP 状态是"这条 url 本身已经不能用了"：rkey 过期（腾讯实测给 400）、
+# 文件已删（404）。同一条 url 立刻再试一次是同一个结局——2026-11-09 日志里
+# 400/404 共 4970 次，而第二次尝试成功率几乎为零，纯浪费 NapCat/CDN 预算。
+_NO_RETRY_HTTP = frozenset({400, 401, 403, 404, 405, 410, 451})
 
 
 def _ext_from_ct(ct: str, url: str, kind: str) -> str:
@@ -71,6 +75,18 @@ def md5_hint(ref: str | None) -> str | None:
     """从 file 字段名里提取原件 md5，供下载前查盘免重拉。"""
     stem = Path(ref or "").stem
     return stem.lower() if _MD5_RE.fullmatch(stem) else None
+
+
+_HASH_NAME_RE = re.compile(r"[0-9a-fA-F]{32}\.[A-Za-z0-9]{1,8}")
+
+
+def is_hash_filename(ref: str | None) -> bool:
+    """ref 是否只是 NapCat 的哈希文件名（形如 HASH.jpg），而不是可用的 file_id。
+
+    合并转发展开出来的媒体段只有 file（哈希名）+ url，没有 file_id；把哈希名
+    当 file_id 交给 get_file 必然 file not found（2026-11-09 日志 6131/6152 次），
+    所以转发路径不要再走这条兜底。"""
+    return bool(_HASH_NAME_RE.fullmatch(ref or ""))
 
 
 class Storage:
@@ -317,6 +333,11 @@ class Storage:
                                 except Exception as e:
                                     logger.debug("[PROGRESS] 写回失败 kind=%s: %s", kind, e)
                 return digest.hexdigest(), size, ct
+            except aiohttp.ClientResponseError as e:
+                logger.error("[ERROR] download %s attempt %d/2 failed: %s: %s",
+                             kind, attempt, type(e).__name__, e)
+                if e.status in _NO_RETRY_HTTP:
+                    break   # url 已失效：换地址由上层重试管线负责，别原地再撞
             except Exception as e:
                 logger.error("[ERROR] download %s attempt %d/2 failed: %s: %s",
                              kind, attempt, type(e).__name__, e)
