@@ -1032,15 +1032,22 @@ pub async fn bot_dl_history(app: tauri::AppHandle, limit: Option<i64>) -> Result
     .map_err_str()?
 }
 
-/// 手动重试：把失败行重置回队列头（dl='pending'、tries=0、next_try=0、清
-/// err/dead_at），与 `replay.py --retry` 同一口径——等于给那个命令一个按钮版。
+/// 手动重试：把失败行重置回队列头（dl='pending'、next_try=0、清 err/dead_at），
+/// 与 `replay.py --retry` 同一口径——等于给那个命令一个按钮版。
 /// 不必惊动 bot 进程：运行中的 bot 由 sweeper 在 SWEEP_INTERVAL（20s）内扫到
 /// next_try 到期的 pending 行，经 dl_gate 认领重下（claim_dl_row 收 pending）。
 /// 直接写 bot.db 是安全的：bot 以 WAL 模式并发写，短事务 + busy_timeout 足够。
 /// ids 为空/缺省 = 重置全部失败行（含历史积压，与 replay.py --retry 一致）。
+///
+/// 两处与旧口径不同（2026-11-09，修「重试按钮对旧死链一次就再死」）：
+/// - tries=1 而不是 0：bot._refresh_src 在 tries==0 时跳过换签，旧 rkey 首试
+///   必 400/404；置 1 让重试先走一遍 get_msg/重展开刷地址。
+/// - prog_at 置当下：bump_dl 拿几天前的旧停滞钟会把首个零字节失败直接判死，
+///   连刷新的机会都没有；清进度列，重试就是一次全新尝试。
 fn reset_dl_rows(conn: &rusqlite::Connection, ids: Option<&[i64]>) -> Result<usize, String> {
-    const RESET: &str = "UPDATE messages SET dl='pending', tries=0, next_try=0, \
-                         err=NULL, dead_at=NULL WHERE dl='dead'";
+    const RESET: &str = "UPDATE messages SET dl='pending', tries=1, next_try=0, \
+                         err=NULL, dead_at=NULL, prog_at=strftime('%s','now'), \
+                         dl_bytes=0, dl_total=NULL WHERE dl='dead'";
     match ids {
         Some(ids) if !ids.is_empty() => {
             let placeholders = std::iter::repeat("?")
@@ -1456,7 +1463,8 @@ mod tests {
     }
 
     /// 手动重试只动 dead 行：pending/busy/ok 不受影响；指定 ids 只重置那些；
-    /// 重置后 tries/next_try/err/dead_at 全清——bot 的认领与重试计数从零起
+    /// 重置后 tries=1（让 bot._refresh_src 先换签）、next_try/err/dead_at 清空、
+    /// prog_at 置当下（旧停滞钟会把首个零字节失败直接判死）
     #[test]
     fn reset_dl_rows_requeues_only_dead() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1464,27 +1472,43 @@ mod tests {
             "CREATE TABLE messages(id INTEGER PRIMARY KEY, dl TEXT,
                                    tries INTEGER NOT NULL DEFAULT 0,
                                    next_try REAL NOT NULL DEFAULT 0,
-                                   err TEXT, dead_at INTEGER);",
+                                   err TEXT, dead_at INTEGER, prog_at INTEGER,
+                                   dl_bytes INTEGER NOT NULL DEFAULT 0,
+                                   dl_total INTEGER);",
         )
         .unwrap();
         conn.execute_batch(
-            "INSERT INTO messages(id, dl, tries, next_try, err, dead_at) VALUES
-             (1,'dead',15,999,'boom',123), (2,'dead',15,999,'boom',123),
-             (3,'pending',1,50,NULL,NULL), (4,'ok',0,0,NULL,NULL), (5,'busy',2,10,NULL,NULL);",
+            "INSERT INTO messages(id, dl, tries, next_try, err, dead_at, prog_at, dl_bytes) VALUES
+             (1,'dead',15,999,'boom',123,111,55), (2,'dead',15,999,'boom',123,NULL,0),
+             (3,'pending',1,50,NULL,NULL,NULL,0), (4,'ok',0,0,NULL,NULL,NULL,0),
+             (5,'busy',2,10,NULL,NULL,NULL,0);",
         )
         .unwrap();
         // 全量：只有两条 dead 被重置
         assert_eq!(reset_dl_rows(&conn, None).unwrap(), 2);
-        let row = |id: i64| -> (String, i64, f64, Option<String>, Option<i64>) {
+        let row = |id: i64| -> (String, i64, f64, Option<String>, Option<i64>, Option<i64>) {
             conn.query_row(
-                "SELECT dl, tries, next_try, err, dead_at FROM messages WHERE id=?",
+                "SELECT dl, tries, next_try, err, dead_at, prog_at FROM messages WHERE id=?",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                },
             )
             .unwrap()
         };
-        // 重置后回队列头：pending / tries=0 / next_try=0 / 失败痕迹清空
-        assert_eq!(row(1), ("pending".into(), 0, 0.0, None, None));
+        // 重置后回队列头：pending / tries=1 / next_try=0 / 失败痕迹清空
+        let (dl1, tries1, nxt1, err1, dead1, prog1) = row(1);
+        assert_eq!((dl1.as_str(), tries1, nxt1, err1, dead1),
+                   ("pending", 1, 0.0, None, None));
+        let (_, _, _, _, _, prog2) = row(2);
+        // prog_at 置当下（停滞钟重起，重试有完整的 30 分钟窗口）
+        let (prog1, prog2) = (row(1).5.unwrap(), row(2).5.unwrap());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!((now - prog1).abs() < 60, "prog_at should be now, got {prog1}");
+        assert!((now - prog2).abs() < 60, "prog_at should be now, got {prog2}");
         // 非 dead 行原样：面板正在排队/下载/已成功的行不受重试影响
         assert_eq!(row(3).0, "pending");
         assert_eq!(row(3).1, 1);
