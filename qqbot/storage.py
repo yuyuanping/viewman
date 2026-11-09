@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable, Coroutine
+from typing import Any
 from uuid import uuid4
 
 import aiohttp
@@ -34,8 +35,10 @@ _VALID_FILE = _VALID_IMG + _VALID_VID + (
     "silk", "amr", "caf",
 )
 
-# 各类下载的总超时（秒）
-_TIMEOUT_BY_KIND = {"image": 15, "video": 30, "file": 60}
+# 各类下载的总超时（秒）。图片 15s 曾把 2~3MB 的慢图切进「下一点→失败→从零
+# 重来」的死循环（2026-11-09 实测 105591/105592/105599 反复 TimeoutError）；
+# 配合 Range 续传放宽到 60s：慢链路一次下完，死链依旧立即 4xx 出局、不多占槽。
+_TIMEOUT_BY_KIND = {"image": 60, "video": 30, "file": 60}
 _CONNECT_TIMEOUT = 15
 # video 不设总时限：只要还在来数据就继续下（大视频/慢 CDN 常被 30s 总时限误杀）。
 # 改防停滞：sock_read 连续这么久一个字节都没到才判超时。
@@ -64,6 +67,25 @@ def _hash_file(path: Path) -> tuple[str, int]:
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
+
+
+def _md5_prefix(path: Path) -> tuple[Any, int]:
+    """已有半成品的 md5 状态与字节数：续传时新数据接在它后面，凑出全文摘要。"""
+    digest = hashlib.md5()
+    read = 0
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+            read += len(chunk)
+    return digest, read
+
+
+def _full_size_from_content_range(v: str | None) -> int | None:
+    """Content-Range 里的全文长度："bytes 5-9/10" -> 10、"bytes */123" -> 123。"""
+    if not v or "/" not in v:
+        return None
+    tail = v.rsplit("/", 1)[1].strip()
+    return int(tail) if tail.isdigit() else None
 
 
 # NapCat 事件里图片/视频段的 file 字段形如 HASH.jpg，HASH 即原件 md5
@@ -300,8 +322,12 @@ class Storage:
                          on_progress: Callable[[int, int | None], Coroutine[None, None, None]] | None = None
                          ) -> tuple[str, int, str] | None:
         """流式下载 url 到 tmp：1MB 块边写边算 md5，内存占用与文件大小无关。
-        失败重试 1 次（并清掉残件）；成功返回 (md5hex, bytes, Content-Type)。
-        on_progress 在每块落盘后回报 (已传字节, Content-Length 或 None)：
+        失败重试 1 次；成功返回 (md5hex, bytes, Content-Type)。
+        断点续传：tmp 里已有半成品（本调用上一次尝试、或上层重试管线留下的
+        ~dl<行号>.part）就带 Range 接着下，md5 先把已有部分补算进来凑全文摘要；
+        服务端不认 Range（回 200 全文）就丢掉半成品从头重下。失败后半成品留在
+        盘上给下次接续，落定终态/启动清扫负责收尾。
+        on_progress 在每块落盘后回报 (累计字节, 全文长度或 None)：
         累计 ≥256KB 或距上次 ≥0.3 秒才触发一次（面板走 bot-dl-changed 事件推送，更密没有意义），
         回调异常只记日志，绝不拖垮下载本身。"""
         if kind == "video":
@@ -312,14 +338,35 @@ class Storage:
             timeout = aiohttp.ClientTimeout(total=_TIMEOUT_BY_KIND.get(kind, 30))
         for attempt in (1, 2):
             try:
-                digest = hashlib.md5()
-                size = 0
+                # 每次尝试都从盘上现状接续：上一次尝试可能又多写了几个 MB
+                digest, offset = hashlib.md5(), 0
+                if tmp.exists():
+                    digest, offset = await asyncio.to_thread(_md5_prefix, tmp)
+                size = offset
                 last_done, last_t = -1, 0.0
-                async with self.session.get(url, timeout=timeout) as resp:
+                headers = {"Range": f"bytes={offset}-"} if offset else {}
+                async with self.session.get(url, timeout=timeout,
+                                            headers=headers) as resp:
                     resp.raise_for_status()
+                    resumed = resp.status == 206 and offset > 0
+                    if offset and not resumed:
+                        # 服务端不认 Range，回的是 200 全文：丢掉半成品从头算
+                        size = 0
+                        digest = hashlib.md5()
                     ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-                    total = int(resp.headers.get("Content-Length") or 0) or None
-                    with open(tmp, "wb") as f:
+                    if resumed:
+                        total = (_full_size_from_content_range(
+                                     resp.headers.get("Content-Range"))
+                                 or (int(resp.headers.get("Content-Length") or 0)
+                                     + offset)
+                                 or None)
+                    else:
+                        total = int(resp.headers.get("Content-Length") or 0) or None
+                    if resp.headers.get("Content-Encoding"):
+                        # 压缩流：Content-Length 是压缩字节数，与解压后的 size 对不上，
+                        # 截断校验会误报——媒体不该有，有就退回旧行为不校验
+                        total = None
+                    with open(tmp, "ab" if resumed else "wb") as f:
                         async for chunk in resp.content.iter_chunked(1 << 20):
                             await asyncio.to_thread(f.write, chunk)
                             digest.update(chunk)
@@ -332,16 +379,23 @@ class Storage:
                                     await on_progress(size, total)
                                 except Exception as e:
                                     logger.debug("[PROGRESS] 写回失败 kind=%s: %s", kind, e)
+                if total is not None and size != total:
+                    # 连接提前收尾但没抛错：按截断处理。半文件绝不能顶着 md5 名
+                    # 落盘（会被 dup 检查复用、被 backfill_media 洗白成有效登记）
+                    raise ConnectionError(f"truncated: {size}/{total}")
                 return digest.hexdigest(), size, ct
             except aiohttp.ClientResponseError as e:
                 logger.error("[ERROR] download %s attempt %d/2 failed: %s: %s",
                              kind, attempt, type(e).__name__, e)
-                if e.status in _NO_RETRY_HTTP:
+                if e.status == 416:
+                    # 半成品已到全量长度（上次写完还没改名就断了）：删掉重来，
+                    # 下一次尝试不带 Range
+                    await asyncio.to_thread(tmp.unlink, True)
+                elif e.status in _NO_RETRY_HTTP:
                     break   # url 已失效：换地址由上层重试管线负责，别原地再撞
             except Exception as e:
                 logger.error("[ERROR] download %s attempt %d/2 failed: %s: %s",
                              kind, attempt, type(e).__name__, e)
-        tmp.unlink(missing_ok=True)
         return None
 
     async def _seen_hit(self, expect_md5: str, kind: str) -> tuple[str, int] | None:
@@ -372,7 +426,8 @@ class Storage:
 
     # ---- 图片/视频 ----
     async def save_media(self, url: str, kind: str, scope: str = "private",
-                         expect_md5: str | None = None, on_progress=None) -> dict | None:
+                         expect_md5: str | None = None, on_progress=None,
+                         resume_key: str | None = None) -> dict | None:
         """下载图片或视频，按 MD5 命名去重。图片按 scope 分流 private/group；
         视频统一入 videos/（scope 只对图片有意义）。
         支持两类来源：http(s) 直链；本地绝对路径（NapCat 有时直接给 nt_qq
@@ -380,6 +435,8 @@ class Storage:
         expect_md5 是事件自带的原件 md5（md5_hint）。命中即免拉、不复制，
         DB 行直接指向现有文件。判定来源有二：盘上目录里已有该 md5 的文件，
         或 media 登记表里有它（文件已被手工删除也算保存过）。
+        resume_key（通常给行 id）：下载半成品用固定名 ~dl<key>.part，重试
+        （乃至隔天复检）从断点续传；不传则一次性临时件，行为同旧版。
         成功返回 {"placeholder","md5","path","bytes"}，失败返回 None。"""
         if not url:
             logger.error("[ERROR] empty url for %s", kind)
@@ -397,7 +454,8 @@ class Storage:
         # 下载/读取：流式边写边算 md5，不再把整个文件读进内存
         tmp = None
         if url.startswith(("http://", "https://")):
-            tmp = self._media_base(kind, scope) / f"~dl{uuid4().hex}.part"
+            tmp = self._media_base(kind, scope) / (
+                f"~dl{resume_key}.part" if resume_key else f"~dl{uuid4().hex}.part")
             got = await self._stream_to(url, kind, tmp, on_progress)
             if got is None:
                 return None
@@ -441,11 +499,13 @@ class Storage:
     # ---- 文件 ----
     async def save_file(self, file_id_or_url: str, filename: str,
                         get_url: Callable[[str], Coroutine[None, None, str | None]],
-                        scope: str = "private", on_progress=None) -> dict | None:
+                        scope: str = "private", on_progress=None,
+                        resume_key: str | None = None) -> dict | None:
         """下载文件，按 MD5 命名去重。三种来源：http(s) 直链；本地绝对路径；
         文件 ID 经 get_url 解析（NapCat 通常给本地路径）——解析是慢 API 调用，
         在调用方持有的下载槽内做：NapCat 卡住时会占住槽位，但换来「排到槽位
         才显示下载中」的诚实状态。传输流式落盘，内存与文件大小无关。
+        resume_key 同 save_media：半成品固定名，重试从断点续传。
         成功返回 {"placeholder","md5","path","bytes"}，失败返回 None。
         """
         if not file_id_or_url:
@@ -469,7 +529,8 @@ class Storage:
         ct = ""
         try:
             if src.startswith(("http://", "https://")):
-                tmp = base / f"~dl{uuid4().hex}.part"
+                tmp = base / (
+                    f"~dl{resume_key}.part" if resume_key else f"~dl{uuid4().hex}.part")
                 got = await self._stream_to(src, "file", tmp, on_progress)
                 if got is None:
                     return None
