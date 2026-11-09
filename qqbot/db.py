@@ -14,6 +14,7 @@
 所有 sqlite3 操作经单锁在 to_thread 工作线程执行，asyncio 侧安全共享。
 """
 import asyncio
+import random
 import sqlite3
 import threading
 import time
@@ -23,9 +24,18 @@ MAX_EVENT_TRIES = 6   # 事件重试上限，穷尽转 dead
 MAX_DL_TRIES = 8     # （不再参与判死）仅老库 dead_at 反推迁移还在引用
 DL_LATE_TRIES = 15   # dead 行每日复检，失败计满这个总次数才不再碰
 DL_LATE_INTERVAL = 24 * 3600
+DL_RECHECK_BATCH = 10      # 每班车最多喂多少条 dead 复检：336 条死链同刻到期时
+                           # 别让复检风暴一次占满 50 行批次和全部下载槽
 DL_STALL_DEAD_S = 30 * 60  # 失败标准：下载进度停滞 30 分钟 = 失败（转 dead）
 DL_PROG_RETRY_S = 60       # 有字节进账的失败不算失败：60 秒后快试重续
 EVENT_RETENTION_DAYS = 30   # done 事件的 payload 只服务重试/回填，30 天后清掉
+
+
+def _next_recheck(now: float) -> float:
+    """下一次复检时刻：明天起 + 最多 4 小时抖动。死链的死亡本身成批发生
+    （同一次断链潮），不加抖动它们会每天同一时刻集体到期攒成复检风暴，
+    配合 fetch_due_dl 的 DL_RECHECK_BATCH 把风暴摊开。"""
+    return now + DL_LATE_INTERVAL + random.uniform(0, 4 * 3600)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events(
@@ -280,7 +290,11 @@ class DB:
 
         dl='dead' 且还没跑满复检轮次的行也算到期：快重试只有约 4 小时窗口，
         而 QQ 往往在那之后（用户点开播放过）才把原件下到本地。
-        两支都用 messages_due(dl, next_try) 索引，别写成跨 dl 的 OR。
+
+        dead 复检按班车限额走（DL_RECHECK_BATCH）：死链的 next_try 是各自死亡
+        时刻 +24h，而死亡本身就成批发生，不加限流会攒出「336 条同一时刻集体
+        到期」的复检风暴（2026-11-09 19:48 实测 127 条重试一次爆发），把下载
+        槽和 NapCat 全占了。pending（真重试）优先，dead 每班车最多喂 10 条。
 
         dead 复检资格：有 msg_id（get_msg 能刷地址）**或**有 parent（转发明细
         行，重新展开父转发能按文件名刷地址，见 bot._refresh_src_by_forward）。
@@ -290,13 +304,19 @@ class DB:
         now = time.time()
 
         def _do(c):
-            rows = c.execute(
-                "SELECT * FROM messages WHERE dl='pending' AND next_try<=?"
-                " UNION ALL "
-                "SELECT * FROM messages WHERE dl='dead' AND next_try<=? AND tries<? "
-                "AND ((msg_id IS NOT NULL AND msg_id<>'') OR parent IS NOT NULL) "
-                "ORDER BY id LIMIT ?",
-                (now, now, DL_LATE_TRIES, limit)).fetchall()
+            pend = c.execute(
+                "SELECT * FROM messages WHERE dl='pending' AND next_try<=? "
+                "ORDER BY id LIMIT ?", (now, limit)).fetchall()
+            dead_cap = min(DL_RECHECK_BATCH, limit - len(pend))
+            rows = list(pend)
+            if dead_cap > 0:
+                rows += c.execute(
+                    "SELECT * FROM messages WHERE dl='dead' AND next_try<=? "
+                    "AND tries<? "
+                    "AND ((msg_id IS NOT NULL AND msg_id<>'') OR parent IS NOT NULL) "
+                    "ORDER BY id LIMIT ?",
+                    (now, DL_LATE_TRIES, dead_cap)).fetchall()
+            rows.sort(key=lambda r: r["id"])
             return [dict(r) for r in rows]
         return await self._run(_do)
 
@@ -407,19 +427,19 @@ class DB:
                 return "pending"
             tries = (row["tries"] if row else 0) + 1
             # 复检失败（dead_at 在身 = 曾转死，认领后 dl 已是 busy 认不出）：
-            # 写回 dead、明天再来；dead_at 不动，旧积压不被天天重计。
+            # 写回 dead、明天再来（带抖动）；dead_at 不动，旧积压不被天天重计。
             # 必须显式落 dl——认领把它翻成了 busy，漏写会让行卡死在「下载中」
             if row and row["dead_at"] is not None:
                 c.execute(
                     "UPDATE messages SET dl='dead', tries=?, next_try=?, err=? WHERE id=?",
-                    (tries, now + DL_LATE_INTERVAL, err[:500], mid))
+                    (tries, _next_recheck(now), err[:500], mid))
                 return "dead"
             # 停滞转死：只有走到失败分支才看钟——排队等槽、等退避的行不算停滞
             prog_at = row["prog_at"] if row else None
             if prog_at is not None and now - prog_at >= DL_STALL_DEAD_S:
                 orphan = not (row["msg_id"] if row else "") \
                     and not (row["parent"] if row else None)
-                nxt = now + (365 * 86400 if orphan else DL_LATE_INTERVAL)
+                nxt = now + 365 * 86400 if orphan else _next_recheck(now)
                 c.execute(
                     "UPDATE messages SET dl='dead', tries=?, next_try=?, err=?, "
                     "dead_at=? WHERE id=?",
@@ -448,7 +468,7 @@ class DB:
                 "next_try=CASE WHEN (msg_id IS NULL OR msg_id='') AND parent IS NULL "
                 "THEN ? ELSE ? END, err=?, dead_at=COALESCE(dead_at, ?) "
                 "WHERE dl='busy' AND (prog_at IS NULL OR prog_at < ?)",
-                (now + 365 * 86400, now + DL_LATE_INTERVAL,
+                (now + 365 * 86400, _next_recheck(now),
                  "download stalled: attempt lost", now, now - stall_s))
             return cur.rowcount
         return await self._run(_do)
