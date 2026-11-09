@@ -116,21 +116,28 @@ def seg_text(seg: dict) -> str:
 
 
 
+def _rk(row_id: int | None) -> str | None:
+    """转发明细行的续传键：半成品按行号固定命名（~dl<行号>.part），本次下载
+    失败后由重试管线（乃至隔天复检）从断点接着下，不必每次从零重传。"""
+    return str(row_id) if row_id is not None else None
+
+
 async def _save_media_segment(data: dict, kind: str, storage,
                               get_file_url: Callable, scope: str,
-                              on_progress=None):
+                              on_progress=None, resume_key: str | None = None):
     file_id = data.get("file_id") or data.get("file") or ""
     expect_md5 = md5_hint(file_id)
     url = data.get("url", "")
     result = await storage.save_media(
-        url, kind, scope, expect_md5=expect_md5, on_progress=on_progress
+        url, kind, scope, expect_md5=expect_md5, on_progress=on_progress,
+        resume_key=resume_key
     ) if url else None
     if result is None and file_id and not is_hash_filename(file_id):
         fallback_url = await get_file_url(file_id, kind)
         if fallback_url:
             result = await storage.save_media(
                 fallback_url, kind, scope, expect_md5=expect_md5,
-                on_progress=on_progress
+                on_progress=on_progress, resume_key=resume_key
             )
     return result
 
@@ -207,10 +214,12 @@ async def render_node(msgs: list[dict], storage, expand_forward: Callable,
                 await report({"row_id": row_id, "start": True})
             if t in ("file", "record"):
                 r = await storage.save_file(src, name, get_file_url, scope,
-                                            on_progress=prog)
+                                            on_progress=prog,
+                                            resume_key=_rk(row_id))
             else:
                 r = await _save_media_segment(d, kind, storage, get_file_url,
-                                              scope, on_progress=prog)
+                                              scope, on_progress=prog,
+                                              resume_key=_rk(row_id))
         if r and stats is not None:
             stats["saved"] = stats.get("saved", 0) + 1
             if r.get("dedup"):

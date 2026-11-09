@@ -966,14 +966,15 @@ class Bot:
             arg = row.get("ref") or row.get("src") or ""
             r = await self.storage.save_file(arg, row.get("name") or "file",
                                              self.get_file_url, scope,
-                                             on_progress=_progress_self)
+                                             on_progress=_progress_self,
+                                             resume_key=str(mid))
         else:  # image / video
             r = None
             src = await self._refresh_src(row, kind, row.get("src", ""))
             if src:
                 r = await self.storage.save_media(
                     src, kind, scope, expect_md5=md5_hint(row.get("ref")),
-                    on_progress=_progress_self)
+                    on_progress=_progress_self, resume_key=str(mid))
             if r is None and row.get("ref") and not (
                     # 转发明细行的 ref 只有哈希文件名，不是 file_id：拿它调
                     # get_file 必 file not found（详见 storage.is_hash_filename），
@@ -984,7 +985,7 @@ class Bot:
                 if p:
                     r = await self.storage.save_media(
                         p, kind, scope, expect_md5=md5_hint(row["ref"]),
-                        on_progress=_progress_self)
+                        on_progress=_progress_self, resume_key=str(mid))
         if r is None:
             raise RuntimeError("download failed")
         saved = await self.db.mark_dl_ok(mid, r["md5"], r["path"], r["bytes"],
