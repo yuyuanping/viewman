@@ -136,9 +136,13 @@ export function dlForwardTaskText(
  * 15 秒没有进账（等 src 刷新 / 连接挂死）归零；行收敛（非 busy）清状态。
  * 窗口表按行 id 存模块级，由行组件渲染驱动推进（行每轮快照都重渲）；
  * 新一轮认领会把字节清零重传（bytes 比上次还小），据此重开窗口。
+ * 窗口未满但已开跑 ≥2s 时先给「开跑以来平均速度」顶上——普通图片几秒就
+ * 下完，等满 8s 窗口整行都见不到速度（2026-11-09 用户反馈「下载时不显示
+ * 速度」，实测就是差分窗口没等满）；窗口满后由差分值接管。
  */
 const DL_SPEED_WINDOW_MS = 8_000;
 const DL_SPEED_STALE_MS = 15_000;
+const DL_SPEED_EARLY_MS = 2_000;
 type SpeedWindow = { t0: number; b0: number; last: number; lastAdv: number; speed: number };
 const speedWindows = new Map<number, SpeedWindow>();
 
@@ -162,6 +166,8 @@ export function dlSpeedOf(
       w.speed = (bytes - w.b0) / dt;
       w.t0 = now;
       w.b0 = bytes;
+    } else if (dt >= DL_SPEED_EARLY_MS / 1000 && bytes > w.b0) {
+      w.speed = (bytes - w.b0) / dt;
     }
   }
   speedWindows.set(item.id, w);
