@@ -298,6 +298,10 @@ class Bot:
         return None
 
     async def expand_forward(self, fid: str) -> Any | None:
+        """get_forward_msg 也过 0.3s 串行闸：死链复检/大转发同刻展开时会并发
+        连打 NapCat（2026-11-09 日志 458 次 retcode 1200 集中爆发），消息类
+        API 的频率风控一视同仁（API_MIN_GAP_S）。"""
+        await self._api_gate()
         return await self.call_api("get_forward_msg", {"id": fid}, timeout=60)
 
     async def get_message(self, message_id: str) -> Any | None:
