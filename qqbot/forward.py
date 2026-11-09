@@ -125,7 +125,7 @@ async def _save_media_segment(data: dict, kind: str, storage,
     result = await storage.save_media(
         url, kind, scope, expect_md5=expect_md5, on_progress=on_progress
     ) if url else None
-    if result is None and file_id:
+    if result is None and file_id and not is_hash_filename(file_id):
         fallback_url = await get_file_url(file_id, kind)
         if fallback_url:
             result = await storage.save_media(
@@ -309,4 +309,4 @@ async def _expand(data: dict, storage, expand_forward: Callable,
     nl = chr(10)
     return f"[合并转发↓]{nl}{nested_text}{nl}{indent}[合并转发↑]"
 
-from storage import md5_hint
+from storage import is_hash_filename, md5_hint
