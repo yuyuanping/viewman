@@ -20,6 +20,12 @@ from pathlib import Path
 from config import load_config
 from db import DB
 
+# 重排 = 给一次全新尝试：tries 置 1 让 bot._refresh_src 先换签（tries==0 会跳过，
+# 旧 rkey 首试必 400/404）；prog_at 置当下，别让旧停滞钟把首个零字节失败直接
+# 判死。与面板 bot_dl_retry（qqbot.rs reset_dl_rows）同一口径。
+RESET_SQL = ("dl='pending', tries=1, next_try=0, err=NULL, dead_at=NULL, "
+             "prog_at=CAST(strftime('%s','now') AS INTEGER), dl_bytes=0, dl_total=NULL")
+
 
 async def backfill_ref(db) -> None:
     rows = await db._run(lambda c: c.execute(
@@ -49,7 +55,7 @@ async def backfill_ref(db) -> None:
     if not plan:
         return
     await db._run(lambda c: c.executemany(
-        "UPDATE messages SET ref=?, dl='pending', tries=0, next_try=0, err=NULL "
+        f"UPDATE messages SET ref=?, {RESET_SQL} "
         "WHERE id=?", [(fid, mid) for mid, fid in plan]))
     print(f"已回填 {len(plan)} 条并重排（运行中的 bot 约 20 秒内自动重做）")
 
@@ -71,7 +77,7 @@ async def retry_forward_media(db) -> None:
     if not ids:
         return
     await db._run(lambda c: c.executemany(
-        "UPDATE messages SET dl='pending', tries=0, next_try=0, err=NULL WHERE id=?",
+        f"UPDATE messages SET {RESET_SQL} WHERE id=?",
         [(mid,) for mid in ids],
     ))
     print("已重排这些合并转发行（运行中的 bot 约 20 秒内自动重做）")
@@ -89,7 +95,7 @@ async def run(args) -> None:
             "UPDATE events SET status='new', tries=0, next_try=0 "
             "WHERE status IN ('error','dead')").rowcount)
         n2 = await db._run(lambda c: c.execute(
-            "UPDATE messages SET dl='pending', tries=0, next_try=0 "
+            f"UPDATE messages SET {RESET_SQL} "
             "WHERE dl='dead'").rowcount)
         print(f"已重置：事件 {n1} 条、下载 {n2} 条"
               + ("（运行中的 bot 约 20 秒内自动重做）" if n1 or n2 else ""))
