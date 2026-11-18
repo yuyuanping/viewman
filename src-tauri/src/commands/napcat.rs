@@ -72,6 +72,10 @@ pub struct NapCatStatus {
     pub account: Option<String>,
     /// 二维码图片路径；处于 WaitingQr 时必定有，面板直接显示
     pub qr_image: Option<String>,
+    /// 二维码文件的修改时间（毫秒时间戳）。NapCat 换码时覆盖同一个路径，
+    /// 路径字符串不变 → 前端 <img src> 不变 → 一直显示旧（已过期）的码。
+    /// 面板把它拼进 URL 当缓存戳，换码就能真正刷新。
+    pub qr_version: Option<u64>,
     /// 面向用户的结论，一句话说清现在是什么情况
     pub summary: String,
     /// 内核版本（"NapCat.Core Version: x.y.z"）
@@ -288,6 +292,7 @@ pub fn summarize_log(text: &str, ports_up: bool) -> NapCatStatus {
         pid: None, // 由调用方用进程探测补上
         account,
         qr_image,
+        qr_version: None,
         summary,
         core_version,
         webui_url,
@@ -341,6 +346,15 @@ pub fn find_napcat_pid() -> Option<u32> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.trim().parse::<u32>().ok())
+}
+
+/// 二维码文件的 mtime（毫秒时间戳）。NapCat 换码时覆盖同一个路径，
+/// 路径字符串不变，前端只能靠它区分新旧码。
+fn qr_version_of(path: &Path) -> Option<u64> {
+    let m = std::fs::metadata(path).ok()?;
+    let t = m.modified().ok()?;
+    let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(d.as_millis() as u64)
 }
 
 pub(crate) fn read_to_string(path: &str) -> Option<String> {
@@ -614,6 +628,8 @@ pub async fn get_napcat_status(state: State<'_, AppState>) -> Result<NapCatStatu
             status.summary = "NapCat 未运行（检测到历史日志，但进程已退出）".to_string();
             status.qr_image = None;
         }
+        // 换码时 NapCat 覆盖同一个文件，路径不变；用 mtime 当缓存戳，让 <img> 真正重载
+        status.qr_version = status.qr_image.as_ref().and_then(|p| qr_version_of(Path::new(p)));
         Ok(status)
     })
     .await
@@ -770,5 +786,21 @@ mod tests {
     fn empty_log_is_not_running() {
         let s = summarize_log("", false);
         assert_eq!(s.stage, NapCatStage::NotRunning);
+    }
+
+    #[test]
+    fn qr_version_follows_file_mtime() {
+        // 换码 = 覆盖同一个文件，只有 mtime 变；缓存戳必须跟着变，否则面板永远是旧码
+        let dir = std::env::temp_dir().join(format!("viewman_qr_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("qrcode.png");
+        std::fs::write(&f, b"first").unwrap();
+        let v1 = qr_version_of(&f).expect("刚写的文件应有 mtime");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, b"second").unwrap();
+        let v2 = qr_version_of(&f).expect("覆盖后应有 mtime");
+        assert!(v2 > v1, "覆盖后缓存戳应变大：{v1} -> {v2}");
+        assert!(qr_version_of(&dir.join("missing.png")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

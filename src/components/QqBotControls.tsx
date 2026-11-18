@@ -136,7 +136,9 @@ export function QqBotControls({
           {napcat.status.stage === "waiting_qr" && napcat.status.qr_image && (
             <div className="flex flex-col gap-2 items-start">
               <img
-                src={convertFileSrc(napcat.status.qr_image)}
+                // NapCat 换码时覆盖同一路径，src 不变的话 webview 会一直用缓存里的旧图，
+                // 所以拼上文件 mtime 当缓存戳：码一换，URL 就变，图才会真正重新加载
+                src={`${convertFileSrc(napcat.status.qr_image)}?v=${napcat.status.qr_version ?? 0}`}
                 alt="NapCat 登录二维码"
                 className="w-40 h-40 object-contain bg-white rounded-lg p-1"
               />

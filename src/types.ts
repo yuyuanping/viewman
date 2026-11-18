@@ -160,6 +160,8 @@ export interface NapCatStatus {
   account: string | null;
   /** 二维码图片路径；waiting_qr 时有，面板直接渲染 */
   qr_image: string | null;
+  /** 二维码文件 mtime（毫秒）；NapCat 换码只覆盖同一文件，靠它做 <img> 缓存戳 */
+  qr_version: number | null;
   /** 一句话说清现在的情况 */
   summary: string;
   core_version: string | null;
