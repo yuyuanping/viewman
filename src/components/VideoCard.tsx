@@ -146,7 +146,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
           )}
         </div>
         <div className="p-3.5">
-          <p className="text-[13px] leading-5 line-clamp-2 min-h-10 text-gray-200 break-all" title={video.filename}>
+          <p className="text-[13px] leading-5 line-clamp-2 min-h-10 text-gray-200 break-all text-pretty" title={video.filename}>
             {video.filename}
           </p>
           <div className="flex justify-between text-[11px] text-gray-400 mt-3 gap-2 tabular-nums">
