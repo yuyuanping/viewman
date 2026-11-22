@@ -190,10 +190,14 @@ export interface TemplateMatch {
 }
 
 export interface TemplateMatchResult {
-  /** 按距离升序的全部命中（阈值过滤在前端做，改宽容度不必重跑） */
+  /** 局部命中在前、常规命中按距离升序（阈值过滤在前端做，改宽容度不必重跑）。tile_distance 字段已随分块方案撤除 */
+  // 历史：局部命中两段式曾在 PR #29 后短暂存在，真库校准（固定网格对不齐裁剪）否决
+
   matches: TemplateMatch[];
   /** 解不出指纹、因此没参与比对的张数 */
   skipped: number;
+  /** knee 自适应的滑杆建议起点：每个模板的相似带尾巴位置不同 */
+  suggested_threshold: number;
 }
 
 /** 后端 template-progress 事件负载：补算缺失指纹的进度 */

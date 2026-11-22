@@ -20,10 +20,36 @@ pub struct TemplateMatch {
 }
 
 /// 模板匹配结论：按距离升序的命中清单 + 解不出指纹而没参与比对的张数
+/// + 滑杆建议起点（knee 自适应：每个模板的相似带尾巴位置不同）
 #[derive(Clone, serde::Serialize)]
 pub struct TemplateMatchResult {
     pub matches: Vec<TemplateMatch>,
     pub skipped: usize,
+    pub suggested_threshold: u32,
+}
+
+/// knee 自适应阈值：命中距离排好序后找相邻距离间最大的断裂口，建议起点卡在
+/// 口子前。口子太小（<6 位，说明洪峰是平滑过渡、没有天然分界）就退回历史
+/// 默认 32——比盲目给上限更稳。
+const KNEE_MIN_GAP: u32 = 6;
+const KNEE_FALLBACK: u32 = 32;
+
+fn knee_threshold(sorted_distances: &[u32]) -> u32 {
+    if sorted_distances.len() < 8 {
+        return KNEE_FALLBACK;
+    }
+    let (mut best_gap, mut at) = (0u32, KNEE_FALLBACK);
+    for pair in sorted_distances.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > best_gap {
+            best_gap = gap;
+            at = pair[0];
+        }
+    }
+    if best_gap < KNEE_MIN_GAP {
+        return KNEE_FALLBACK;
+    }
+    at.clamp(8, TEMPLATE_DISTANCE_MAX)
 }
 
 /// 命中距离上限：与前端滑杆上限一致（48）。曾经想放到 64"让前端自己收"，
@@ -132,7 +158,12 @@ pub async fn find_images_like_template(
                 }
             }
             matches.sort_by(|a, b| a.distance.cmp(&b.distance).then_with(|| a.id.cmp(&b.id)));
-            Ok(TemplateMatchResult { matches, skipped })
+            let suggested = knee_threshold(&matches.iter().map(|m| m.distance).collect::<Vec<_>>());
+            Ok(TemplateMatchResult {
+                matches,
+                skipped,
+                suggested_threshold: suggested,
+            })
         })
         .await
         .map_err_str()??;

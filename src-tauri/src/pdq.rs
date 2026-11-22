@@ -14,6 +14,10 @@
 // vendor 保真：DCT/滤波循环与除法公式按参考实现逐行保留（有逐位对拍测试背书），
 // clippy 的改写建议会破坏「与参考实现一眼可比对」这个性质
 #![allow(clippy::needless_range_loop, clippy::manual_div_ceil)]
+// 现状休眠：PDQ 对「宽松版式相似」区分度不足（真库实测，见 git log），以图搜图
+// 排序已回调旧口径；但 8.9 万枚指纹已回填入库，模块（含与参考实现的逐位对拍
+// 测试）保留待用——它的强项是确凿副本检测，将来可给重复判定做第二候选通道
+#![allow(dead_code)]
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 // 最小可哈希尺寸（参考实现同款：任一边不足 5 像素没有结构可言）
@@ -534,7 +538,9 @@ mod tests {
         let mut s = seed;
         (0..rows * cols)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (s >> 33) as u8
             })
             .collect()
@@ -587,12 +593,9 @@ mod tests {
     #[test]
     fn too_small_images_are_rejected() {
         let tiny = vec![64u8; 4 * 4];
-        assert!(pdq_from_luma(
-            &tiny.into_iter().map(f32::from).collect::<Vec<_>>(),
-            4,
-            4
-        )
-        .is_none());
+        assert!(
+            pdq_from_luma(&tiny.into_iter().map(f32::from).collect::<Vec<_>>(), 4, 4).is_none()
+        );
     }
 
     /// 与参考 crate（pdqhash 0.1.1）逐位对拍：同一份 luma 缓冲，两边哈希必须完全一致。
