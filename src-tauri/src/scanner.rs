@@ -431,6 +431,29 @@ pub fn image_hashes(path: &str) -> Option<(u64, u64)> {
     Some(gray_hashes(&pixels))
 }
 
+/// 图片三枚指纹：32×32 双哈希 + 64×64 PDQ（Meta 开源 256 位感知哈希，见 pdq.rs）。
+/// 两条 ffmpeg 各一趟——spawn 是主要成本，量级与单趟补算相当，解完落库。
+/// 32×32 这条与 image_hashes 完全同参（同 scale 口径），指纹才能对得上已缓存的老行
+pub struct ImageFingerprints {
+    pub phash: u64,
+    pub dhash: u64,
+    pub pdq: [u8; crate::pdq::HASH_LENGTH],
+}
+
+pub fn image_fingerprints(path: &str) -> Option<ImageFingerprints> {
+    let pixels32 = gray32(path, None)?;
+    let pixels64 = gray_grid(path, 64, None)?;
+    let pdq = crate::pdq::pdq_from_gray64(pixels64.as_slice().try_into().ok()?).0;
+    let (phash, dhash) = gray_hashes(&pixels32);
+    Some(ImageFingerprints { phash, dhash, pdq })
+}
+
+/// 只补 PDQ：老行已有 32×32 双哈希缓存时走这条，省掉那次 32×32 的 ffmpeg
+pub fn image_pdq(path: &str) -> Option<[u8; crate::pdq::HASH_LENGTH]> {
+    let pixels64 = gray_grid(path, 64, None)?;
+    Some(crate::pdq::pdq_from_gray64(pixels64.as_slice().try_into().ok()?).0)
+}
+
 /// 缩到 32×32 的灰度像素。图片、视频抽帧、缩略图三条路都从这里出发，
 /// 保证比对双方看到的是同一套降采样口径（换了口径，指纹就对不上了）。
 /// `seek` 放在 `-i` 之前：那是输入侧的快进定位，40 分钟的片子也是几十毫秒。

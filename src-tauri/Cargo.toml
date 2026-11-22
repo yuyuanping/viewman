@@ -39,3 +39,8 @@ winreg = "0.52"
 trash = "3"
 notify = "6"
 wait-timeout = "0.2"
+
+[dev-dependencies]
+# PDQ vendor 对拍：只在测试里引用参考实现，不进产物
+pdqhash = "0.1.1"
+image = "0.23.14"

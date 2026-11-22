@@ -261,6 +261,9 @@ pub struct ImageSig {
     pub sig_pixels: Option<Vec<u8>>,
     /// 算这组指纹时文件的修改时间，跟当前对不上就说明图改过、缓存过期
     pub sig_modified_at: Option<String>,
+    /// PDQ 感知哈希（Meta 开源 256 位，32 字节）：以图搜图的排序通道。
+    /// 晚于双指纹加入，老行大面积为 NULL，模板匹配首次运行时按需补算
+    pub pdq: Option<Vec<u8>>,
 }
 
 impl ImageSig {
@@ -273,6 +276,18 @@ impl ImageSig {
     pub fn cached_sigs(&self) -> Option<(u64, u64)> {
         match (self.phash, self.dhash, self.fresh()) {
             (Some(p), Some(d), true) => Some((p as u64, d as u64)),
+            _ => None,
+        }
+    }
+
+    /// 以图搜图用的 PDQ 指纹；过期判定随双指纹走（同一批 ffmpeg 产物）
+    pub fn cached_pdq(&self) -> Option<[u8; 32]> {
+        match (self.cached_sigs(), self.pdq.as_deref()) {
+            (Some(_), Some(bytes)) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(bytes);
+                Some(arr)
+            }
             _ => None,
         }
     }
@@ -292,7 +307,7 @@ fn get_image_sigs_where(
     values: &[String],
 ) -> Result<Vec<ImageSig>> {
     let sql = format!(
-        "SELECT id, path, created_at, modified_at, phash, dhash, sig_pixels, sig_modified_at FROM images {where_clause} ORDER BY created_at, id"
+        "SELECT id, path, created_at, modified_at, phash, dhash, sig_pixels, sig_modified_at, pdq FROM images {where_clause} ORDER BY created_at, id"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -306,6 +321,7 @@ fn get_image_sigs_where(
                 dhash: row.get(5)?,
                 sig_pixels: row.get(6)?,
                 sig_modified_at: row.get(7)?,
+                pdq: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -340,6 +356,23 @@ pub fn save_image_sigs(
         )?;
         for (id, phash, dhash, modified_at) in updates {
             stmt.execute(rusqlite::params![phash, dhash, modified_at, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// 一批 PDQ 指纹写回库（一次事务）：(image_id, 32 字节哈希)。
+/// 不动 sig_modified_at：那是双指纹的账本，PDQ 的补算不翻新它
+pub fn save_image_pdq(conn: &Connection, updates: &[(String, Vec<u8>)]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare("UPDATE images SET pdq = ?1 WHERE id = ?2")?;
+        for (id, pdq) in updates {
+            stmt.execute(rusqlite::params![pdq, id])?;
         }
     }
     tx.commit()?;
