@@ -187,11 +187,11 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
     }
     if !image_columns.is_empty() && !has_column("dhash") {
         conn.execute("ALTER TABLE images ADD COLUMN dhash INTEGER", [])?;
-        // PDQ：Meta 开源的 256 位感知哈希（见 pdq.rs），以图搜图的排序通道；
-        // 老行缺列由模板匹配首次运行时按需补算
-        if !image_columns.is_empty() && !has_column("pdq") {
-            conn.execute("ALTER TABLE images ADD COLUMN pdq BLOB", [])?;
-        }
+    }
+    // PDQ：Meta 开源的 256 位感知哈希（见 pdq.rs），以图搜图的排序通道；
+    // 老行缺列由模板匹配首次运行时按需补算
+    if !image_columns.is_empty() && !has_column("pdq") {
+        conn.execute("ALTER TABLE images ADD COLUMN pdq BLOB", [])?;
     }
     // 重复判定的最后一道看这 1KB 缩略像素：只有哈希撞车的候选才有，允许为空
     if !image_columns.is_empty() && !has_column("sig_pixels") {
@@ -451,6 +451,32 @@ mod tests {
         assert_eq!(row.dhash, None);
         assert_eq!(row.cached_sigs(), None);
         // 幂等：再跑一次不该报"列已存在"
+        ensure_columns(&conn).unwrap();
+    }
+
+    /// 上线 PDQ 时的真实老库形状：dhash 等各列俱全，唯独没有 pdq——
+    /// 迁移必须照样把 pdq 补上（回归：曾把 pdq 迁移嵌进 dhash 块里被整体跳过，
+    /// get_image_sigs 的 SELECT 直接 no such column，模板匹配全挂）
+    #[test]
+    fn test_ensure_columns_adds_pdq_to_dhash_era_library() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        conn.execute("ALTER TABLE images DROP COLUMN pdq", []).unwrap();
+        conn.execute(
+            "INSERT INTO images (id, path, filename, file_size, phash, dhash, sig_modified_at)
+             VALUES ('i1', 'C:/pics/a.png', 'a.png', 10, 7, 9, '1700')",
+            [],
+        )
+        .unwrap();
+
+        ensure_columns(&conn).unwrap();
+
+        // SELECT 带 pdq 列不再报 no such column；旧行 PDQ 为空等模板匹配补算
+        let row = get_image_sigs(&conn).unwrap().remove(0);
+        assert_eq!(row.phash, Some(7));
+        assert_eq!(row.dhash, Some(9));
+        assert_eq!(row.pdq, None);
+        // 幂等
         ensure_columns(&conn).unwrap();
     }
 
