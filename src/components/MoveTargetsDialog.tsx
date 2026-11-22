@@ -5,6 +5,7 @@ import type { MediaKind } from "../types";
 import { dedupeKey } from "../scanRoots";
 import { setMovePromptFlag } from "../hooks/useDeleteShortcut";
 import { useMoveTargets } from "../hooks/useMoveTargets";
+import { IconX } from "./icons";
 
 /** 发起一次移动的待办：谁触发移动谁填 onPick，确认与真正的移动都在父层做 */
 export interface MovePrompt {
@@ -189,7 +190,7 @@ export function MoveTargetsDialog({ kind, noun, count, onPick, onClose }: MoveTa
                 title="从清单里移除这个目录（不动磁盘上的文件）"
                 aria-label={`从清单移除 ${dir}`}
               >
-                ✕
+                <IconX />
               </button>
             </li>
           ))}

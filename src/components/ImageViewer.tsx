@@ -5,6 +5,7 @@ import type { Image } from "../types";
 import { formatFileSize, formatResolution } from "../utils";
 import { isMovePromptOpen } from "../hooks/useDeleteShortcut";
 import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
+import { IconArrowLeft, IconArrowRight, IconX } from "./icons";
 
 interface ImageViewerProps {
   images: Image[];
@@ -275,7 +276,7 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
           删除
         </button>
         <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc）" aria-label="关闭查看器">
-          ✕
+          <IconX />
         </button>
       </div>
 
@@ -318,10 +319,10 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
 
       <div className="flex items-center justify-center gap-4 py-3 shrink-0">
         <button type="button" className="toolbar-chip" disabled={index === 0} onClick={() => go(-1)} aria-label="上一张（←）">
-          ← 上一张
+          <IconArrowLeft /> 上一张
         </button>
         <button type="button" className="toolbar-chip" disabled={index >= images.length - 1} onClick={() => go(1)} aria-label="下一张（→）">
-          下一张 →
+          下一张 <IconArrowRight />
         </button>
       </div>
       {menu && (

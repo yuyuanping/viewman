@@ -5,6 +5,7 @@ import type { TemplateMatch } from "../api";
 import { formatFileSize, formatResolution } from "../utils";
 import { JustifiedGrid } from "./JustifiedGrid";
 import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
+import { IconCheck } from "./icons";
 import { TEMPLATE_THRESHOLD_MAX } from "../hooks/useTemplateSearch";
 
 /** JustifiedGrid 的稳定回调：内联箭头函数每次渲染都换引用，会把布局缓存全部打穿 */
@@ -223,7 +224,7 @@ export function TemplateMatchPanel({
                           className="w-full h-full object-contain"
                         />
                         {selected && (
-                          <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true">✓</span>
+                          <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true"><IconCheck /></span>
                         )}
                       </span>
                       <span className="block px-1.5 pt-1.5 pb-1.5 overflow-hidden" style={{ height: 46 }}>

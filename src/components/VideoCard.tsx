@@ -7,6 +7,7 @@ import type { Video } from "../types";
 import { copyToClipboard, formatDuration, formatFileSize } from "../utils";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
+import { IconCheck, IconX } from "./icons";
 
 interface VideoCardProps {
   video: Video;
@@ -105,7 +106,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
           {duplicate && !fake && <span className="dup-flag">重复副本</span>}
           {selectMode && (
             <span className={`select-check${selected ? " select-checked" : ""}`} aria-hidden="true">
-              {selected ? "✓" : ""}
+              {selected && <IconCheck />}
             </span>
           )}
           {/* 封面：假视频直接显示图片本体，其余用抽帧缓存 */}
@@ -162,7 +163,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
           title="删除到回收站"
           aria-label={`删除 ${video.filename} 到回收站`}
         >
-          {deleting ? "…" : "×"}
+          {deleting ? "…" : <IconX />}
         </button>
       )}
       {movePromptOpen && (
@@ -194,7 +195,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
       {actionError && (
         <div className="mx-3 mb-3 rounded-lg bg-red-950/90 px-2 py-1.5 text-[11px] leading-4 text-red-200 flex justify-between gap-2">
           <span className="break-all">{actionError}</span>
-          <button onClick={() => setActionError(null)} aria-label="关闭错误" className="shrink-0 hover:text-white">✕</button>
+          <button onClick={() => setActionError(null)} aria-label="关闭错误" className="shrink-0 hover:text-white"><IconX /></button>
         </div>
       )}
     </article>

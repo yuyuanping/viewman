@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { RecentlyPlayed } from "../types";
 import { formatDuration, formatTime } from "../utils";
 import { FINISHED_RATIO } from "../libraryFilter";
+import { IconX } from "./icons";
 
 interface PlayHistoryPanelProps {
   onClose: () => void;
@@ -67,7 +68,7 @@ export function PlayHistoryPanel({ onClose, onPlay }: PlayHistoryPanelProps) {
         <span className="text-xs text-gray-400 tabular-nums">{history ? `${history.length} 条` : "…"}</span>
         <span className="toolbar-spacer" />
         <button type="button" className="toolbar-chip" onClick={onClose} title="关闭（Esc）" aria-label="关闭播放历史">
-          ✕
+          <IconX />
         </button>
       </div>
 
