@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
 import { flushSync } from "react-dom";
+import { morphFromOverlay, morphToOverlay } from "./mediaMorph";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { QqBotPanel } from "./components/QqBotPanel";
@@ -90,6 +91,13 @@ function App() {
   // QQ Bot 状态常驻轮询：侧栏 tab 徽标在任何标签页下都实时，不等面板打开
   const { status: botStatus, error: botError, refresh: refreshBot } = useBotStatus();
   const napcat = useNapcatStatus();
+  // 预热播放器懒块：点卡片开播放器走共享元素过渡，过渡回调里 flushSync 渲染时块必须已在缓存，
+  // 否则快照拍到的是 Suspense 占位。空闲时预载，首开即时且过渡能拍到 <video>
+  useEffect(() => {
+    const warm = () => { void import("./components/PlayerView"); };
+    if ("requestIdleCallback" in window) requestIdleCallback(warm);
+    else setTimeout(warm, 1500);
+  }, []);
   const qqQueueCount = botStatus ? botStatus.dl.pending + botStatus.dl.busy + botStatus.dl.dead : 0;
 
   useEffect(() => {
@@ -341,9 +349,11 @@ function App() {
   }, [progressMap]);
 
   const handleClosePlayer = useCallback(() => {
-    setPlaylist(null);
-    closePlayer();
-  }, [closePlayer]);
+    morphFromOverlay(() => {
+      setPlaylist(null);
+      closePlayer();
+    }, currentVideo?.id ?? null);
+  }, [closePlayer, currentVideo]);
 
   const handleFallbackToPotPlayer = useCallback((video: Video, position: number) => {
     handleClosePlayer();
@@ -421,11 +431,13 @@ function App() {
     openPlayer(video, position ?? progressMap[video.id] ?? 0);
   }, [filteredVideos, openPlayer, progressMap]);
 
-  const handlePlayVideo = useCallback((video: Video) => {
+  // sourceEl：被点的卡片预览元素，共享元素过渡从卡片飞到播放器（mediaMorph.ts）；
+  // 外部播放器走系统进程没有全屏层，不做过渡
+  const handlePlayVideo = useCallback((video: Video, sourceEl?: HTMLElement) => {
     if (useExternalPlayer) {
       launchInPotPlayer(video, seekFor(video));
     } else {
-      openFromLibrary(video);
+      morphToOverlay(sourceEl, () => openFromLibrary(video));
     }
   }, [useExternalPlayer, openFromLibrary, launchInPotPlayer, seekFor]);
 

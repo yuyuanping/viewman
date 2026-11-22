@@ -29,7 +29,7 @@ export function EmptyState({
           </div>
         </div>
         <p className="text-base font-medium text-gray-100 tracking-tight">{title}</p>
-        <p className="text-[13px] mt-1.5 text-gray-500 leading-5">{hint}</p>
+        <p className="text-[13px] mt-1.5 text-gray-500 leading-5 text-pretty">{hint}</p>
         {action && <div className="mt-5">{action}</div>}
       </div>
     </div>

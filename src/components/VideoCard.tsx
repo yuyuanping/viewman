@@ -19,7 +19,8 @@ interface VideoCardProps {
   selectMode?: boolean;
   selected?: boolean;
   onToggleSelect?: (shiftKey: boolean) => void;
-  onPlay: (video: Video) => void;
+  /** sourceEl：被点的预览元素，供共享元素过渡从卡片飞到播放器 */
+  onPlay: (video: Video, sourceEl?: HTMLElement) => void;
   onDeleted: (videoId: string) => void;
   onMoved: (videoId: string, newPath: string) => void;
 }
@@ -90,12 +91,13 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
 
   return (
     <article
+      data-media-id={video.id}
       className={`media-card${missing ? " media-missing" : ""}${fake ? " media-fake" : ""}${selected ? " media-selected" : ""}`}
       title={fake ? "文件内容实为图片，并非视频（可通过工具栏转换为图片文件）" : missing ? "文件当前不可读取（可能已被移动、删除或磁盘未连接）" : duplicate ? "与库内其他文件内容相同（多余副本，可通过工具栏删除）" : undefined}
       onContextMenu={(e) => openMenu(e, undefined)}
     >
       <button
-        onClick={selectMode ? (e) => onToggleSelect?.(e.shiftKey) : (fake ? undefined : () => onPlay(video))}
+        onClick={selectMode ? (e) => onToggleSelect?.(e.shiftKey) : (fake ? undefined : (e) => onPlay(video, e.currentTarget.querySelector<HTMLElement>(".media-preview") ?? e.currentTarget))}
         disabled={deleting || (!selectMode && fake)}
         className="block w-full text-left"
         aria-label={selectMode ? (selected ? `取消选择 ${video.filename}` : `选择 ${video.filename}`) : fake ? `${video.filename}（图片，无法播放）` : `播放 ${video.filename}`}
@@ -115,6 +117,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
               src={convertFileSrc(video.path)}
               alt={video.filename}
               loading="lazy"
+              decoding="async"
               className="media-thumbnail"
             />
           ) : thumbnailPath ? (
@@ -122,6 +125,7 @@ export const VideoCard = memo(function VideoCard({ video, progress, missing = fa
               src={convertFileSrc(thumbnailPath)}
               alt={video.filename}
               loading="lazy"
+              decoding="async"
               className="media-thumbnail"
               onError={() => setDeadThumb(thumbnailPath)}
             />

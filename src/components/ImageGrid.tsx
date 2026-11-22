@@ -16,7 +16,7 @@ interface ImageGridProps {
   selectMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (index: number, shiftKey: boolean) => void;
-  onOpen: (image: Image) => void;
+  onOpen: (image: Image, sourceEl?: HTMLElement) => void;
   onScanDirectory: () => void;
   onDeleted: (imageId: string) => void;
   onMoved: (imageId: string, newPath: string) => void;
