@@ -130,13 +130,15 @@ h1, h2, h3 { text-wrap: balance; }
 /* 视频库 / 图片库切换：选中页签用主按钮同款渐变，语言统一 */
 .media-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #182231b3; border: 1px solid #ffffff10; }
 .media-tab {
-  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 6px 8px; border-radius: 9px; font-size: 13px; color: #9baac0;
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
+  /* nowrap：CJK 任意字符间可断行，窄侧栏装不下时「视频/图片」会被逐字竖排 */
+  white-space: nowrap;
+  padding: 6px 5px; border-radius: 9px; font-size: 13px; color: #9baac0;
   background: none; border: 0; transition: background .15s, color .15s, box-shadow .15s;
 }
 .media-tab:hover { color: #e6ecf5; background: #ffffff0d; }
 .media-tab-active, .media-tab-active:hover { background: linear-gradient(135deg, #6276e8, #4659c9); color: #fff; box-shadow: 0 4px 14px -6px #4356bda6, inset 0 1px 0 #ffffff2e; }
-.media-tab-count { font-size: 11px; opacity: .75; font-variant-numeric: tabular-nums; }
+.media-tab-count { font-size: 10px; opacity: .75; font-variant-numeric: tabular-nums; }
 
 /* 图片磁贴：正方形密集排布，缩略图缺失时直接引用原图 */
 .image-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; padding: 3px 3px 20px; }

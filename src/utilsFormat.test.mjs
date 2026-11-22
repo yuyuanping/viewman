@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatBytes, formatDlSize, formatFileSize } from './utils.ts';
+import { formatBytes, formatCompactCount, formatDlSize, formatFileSize } from './utils.ts';
 
 const KB = 1024;
 const MB = KB * 1024;
@@ -26,6 +26,18 @@ test('formatDlSize keeps the QQ panel rounding (whole KB shows as "1.0 KB")', ()
   assert.equal(formatDlSize(100 * MB), '100 MB');
   assert.equal(formatDlSize(1023), '1023 B');
   assert.notEqual(formatDlSize(KB), formatBytes(KB));
+});
+
+test('formatCompactCount compacts 万-scale counts so tab pills never wrap', () => {
+  assert.equal(formatCompactCount(0), '0');
+  assert.equal(formatCompactCount(296), '296');
+  assert.equal(formatCompactCount(9999), '9999');
+  assert.equal(formatCompactCount(10000), '1万');
+  assert.equal(formatCompactCount(2615), '2615');
+  assert.equal(formatCompactCount(89357), '8.9万');
+  assert.equal(formatCompactCount(20500), '2万');
+  assert.equal(formatCompactCount(999999), '99.9万');
+  assert.equal(formatCompactCount(1234567), '123万');
 });
 
 test('formatDlSize placeholder', () => {
