@@ -11,6 +11,7 @@ import type { Notify } from "../hooks/useToasts";
 import type { BotStatus, MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
 import { QqBotControls } from "./QqBotControls";
 import { IconCheck, IconX } from "./icons";
+import { formatCompactCount } from "../utils";
 
 interface SidebarProps {
   tab: MediaKind;
@@ -122,13 +123,13 @@ export function Sidebar({
       <div className="flex items-center gap-3 mb-5 mt-1"><span className="brand-mark w-9 h-9 rounded-xl grid place-items-center"><svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l14-8z"/></svg></span><div><h1 className="brand-name text-lg font-semibold tracking-tight">ViewMan</h1><p className="text-[10px] text-gray-400 tracking-wider">本地媒体管理</p></div></div>
       <div className="media-tabs" role="tablist" aria-label="媒体库切换">
         <button role="tab" type="button" aria-selected={!isImageTab && !isQqTab} className={`media-tab${!isImageTab && !isQqTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("video")}>
-          视频 <span className="media-tab-count">{videos.length}</span>
+          视频 <span className="media-tab-count">{formatCompactCount(videos.length)}</span>
         </button>
         <button role="tab" type="button" aria-selected={isImageTab} className={`media-tab${isImageTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("image")}>
-          图片 <span className="media-tab-count">{images?.total ?? 0}</span>
+          图片 <span className="media-tab-count">{formatCompactCount(images?.total ?? 0)}</span>
         </button>
         <button role="tab" type="button" aria-selected={isQqTab} className={`media-tab${isQqTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("qq")}>
-          QQ <span className="media-tab-count">{qqQueueCount}</span>
+          QQ <span className="media-tab-count">{formatCompactCount(qqQueueCount)}</span>
         </button>
       </div>
       {!isQqTab && <>

@@ -50,6 +50,17 @@ export function formatDlSize(bytes: number | null | undefined): string {
   return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
+/** 页签计数紧凑显示：≥1万 → 「8.9万」一位小数、≥100万整数千位。侧栏页签胶囊宽度有限，
+ *  5 位原始数字装不下会把「视频/图片」挤成逐字竖排；精确总数在库标题里有，这里只当导航提示 */
+export function formatCompactCount(n: number): string {
+  if (n < 10000) return String(n);
+  if (n < 1000000) {
+    const w = Math.floor(n / 1000) / 10;
+    return `${Number.isInteger(w) ? w : w.toFixed(1)}万`;
+  }
+  return `${Math.floor(n / 10000)}万`;
+}
+
 // 系统装了 HEVC 视频扩展时 WebView2 能原生解码，无需转码兜底
 export const hevcNativeSupported: boolean = (() => {
   try {
