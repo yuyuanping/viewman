@@ -106,6 +106,7 @@ mod tests {
                 dhash: None,
                 sig_pixels: None,
                 sig_modified_at: None,
+                pdq: None,
             })
             .collect()
     }
@@ -344,6 +345,7 @@ mod tests {
                 dhash: None,
                 sig_pixels: None,
                 sig_modified_at: None,
+                pdq: None,
             },
             db::ImageSig {
                 id: "b".into(),
@@ -354,6 +356,7 @@ mod tests {
                 dhash: None,
                 sig_pixels: None,
                 sig_modified_at: None,
+                pdq: None,
             },
             db::ImageSig {
                 id: "c".into(),
@@ -364,6 +367,7 @@ mod tests {
                 dhash: None,
                 sig_pixels: None,
                 sig_modified_at: None,
+                pdq: None,
             },
         ];
         let candidate = |index: usize, path: &str| Candidate {
@@ -425,6 +429,7 @@ mod tests {
             dhash: None,
             sig_pixels: None,
             sig_modified_at: None,
+            pdq: None,
         };
         let rows = vec![
             row("late", "2026-03-01"),
@@ -509,17 +514,16 @@ mod tests {
         pools.into_values().filter(|pool| pool.len() > 1).collect()
     }
 
-    /// 模板匹配的求和口径：一路指纹漂很远、另一路很近的副本要能进清单——
-    /// 这正是"取大"规则匹配不到的那类图
+    /// PDQ 256 位距离口径：全反两枚差满 256，同枚为 0，单 bit 翻动只差 1
     #[test]
-    fn test_template_distance_sums_both_hashes() {
-        // dHash 漂 30 位、pHash 只差 2：取大是 30（被否），求和 32（进清单）
-        assert_eq!(template_distance(0b11, (1u64 << 30) - 1, 0, 0), 30 + 2);
-        // 两路都远的真不同图，求和照样把它挡在外面
-        assert!(
-            template_distance(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0, 0)
-                > TEMPLATE_DISTANCE_MAX
-        );
+    fn test_pdq_distance_counts_256_bits() {
+        let zeros = [0u8; 32];
+        let ones = [0xFFu8; 32];
+        assert_eq!(crate::pdq::pdq_distance(&zeros, &ones), 256);
+        assert_eq!(crate::pdq::pdq_distance(&zeros, &zeros), 0);
+        let mut single = ones;
+        single[0] = 0xFE;
+        assert_eq!(crate::pdq::pdq_distance(&zeros, &single), 255);
     }
 
     /// 分组清单归一化（组内组间都排序），供新旧实现比对等价性

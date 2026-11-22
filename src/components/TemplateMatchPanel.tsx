@@ -105,7 +105,7 @@ export function TemplateMatchPanel({
         </span>
         <label
           className="flex items-center gap-1.5 text-xs text-gray-400"
-          title="汉明距离阈值（两枚指纹的距离之和）：只显示与模板差这么多位以内的图。往右更宽松，找得多、撞车也多。命中清单已整份返回，改这里只是前端过滤"
+          title="汉明距离阈值（PDQ 256 位指纹）：只显示与模板差这么多位以内的图。往右更宽松，找得多、撞车也多。命中清单已整份返回，改这里只是前端过滤"
         >
           宽容度
           <button

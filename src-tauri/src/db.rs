@@ -86,7 +86,8 @@ pub(crate) fn create_tables(conn: &Connection) -> Result<()> {
             dhash INTEGER,
             sig_pixels BLOB,
             sig_modified_at TEXT,
-            is_animated INTEGER
+            is_animated INTEGER,
+            pdq BLOB
         );
         -- 全文索引：文件名/路径 FTS5，前缀搜索从 O(N) LIKE 到毫秒级 MATCH；
         -- content 同步由触发器维护，老库 ensure_fts 回填
@@ -186,6 +187,11 @@ pub(crate) fn ensure_columns(conn: &Connection) -> Result<()> {
     }
     if !image_columns.is_empty() && !has_column("dhash") {
         conn.execute("ALTER TABLE images ADD COLUMN dhash INTEGER", [])?;
+        // PDQ：Meta 开源的 256 位感知哈希（见 pdq.rs），以图搜图的排序通道；
+        // 老行缺列由模板匹配首次运行时按需补算
+        if !image_columns.is_empty() && !has_column("pdq") {
+            conn.execute("ALTER TABLE images ADD COLUMN pdq BLOB", [])?;
+        }
     }
     // 重复判定的最后一道看这 1KB 缩略像素：只有哈希撞车的候选才有，允许为空
     if !image_columns.is_empty() && !has_column("sig_pixels") {

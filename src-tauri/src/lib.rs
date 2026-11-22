@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod models;
+mod pdq;
 mod potplayer;
 mod scanner;
 mod watcher;
