@@ -11,7 +11,8 @@ use crate::scanner;
 use super::SigUpdate;
 use super::{AppState, MapErrStr};
 
-/// 模板匹配的一条命中：图片 id + 与模板的 PDQ 距离（256 位汉明距离，见 pdq.rs）
+/// 模板匹配的一条命中：图片 id + 与模板的指纹距离
+/// （两枚感知哈希的距离**求和**，见 template_distance）
 #[derive(Clone, serde::Serialize)]
 pub struct TemplateMatch {
     pub id: String,
@@ -25,17 +26,19 @@ pub struct TemplateMatchResult {
     pub skipped: usize,
 }
 
-/// 命中距离上限（PDQ 256 位口径）：与前端滑杆上限一致（96）。
-/// 256 位随机对的距离期望在 128 上下、几乎不会低于 96——上限卡在随机洪峰之前，
-/// 与老 128 位求和口径的 48（也是随机带前沿）同一个卡法；滑杆之外的命中本来
-/// 就显示不出来，不传。
-pub(crate) const TEMPLATE_DISTANCE_MAX: u32 = 96;
+/// 命中距离上限：与前端滑杆上限一致（48）。曾经想放到 64"让前端自己收"，
+/// 实测 sum≤64 有 11.4 万条命中——返回值白扛 6 MB、元数据再现查 45 MB，
+/// 纯属把洪峰搬过 IPC；滑杆之外的命中本来就显示不出来，不传。
+pub(crate) const TEMPLATE_DISTANCE_MAX: u32 = 48;
 
-/// 模板匹配的距离：PDQ 感知哈希的 256 位汉明距离（单一通道、粒度 0–256）。
-/// 取代旧的"两枚 64 位哈希距离求和"——求和把两路等权混在一起，排序口径不单调；
-/// PDQ 对重编码/缩放的稳健性是业界实测过的（Meta 威胁情报系统同款），
-/// 裁剪/位移场景的召回也更好。收不收由人拖滑杆。
-use crate::pdq::pdq_distance as template_pdq_distance;
+/// 模板匹配的距离：两枚感知哈希的汉明距离**求和**，不取大。
+/// 取大是相似分组那边的从严口径——分组宁可漏不掉；以图搜图要的是召回，
+/// 一路指纹漂远（缩放/裁剪/重编码专门动 dHash 的相邻梯度）不该把整对否掉：
+/// 实测重存副本 dHash 就能漂 5~10 位，极端缩略图到 10+，取大时模板只认出
+/// pHash 也近的那一小半，求和后另一路够近就还有机会进清单，收不收由人拖滑杆。
+pub(crate) fn template_distance(phash: u64, dhash: u64, t_phash: u64, t_dhash: u64) -> u32 {
+    (phash ^ t_phash).count_ones() + (dhash ^ t_dhash).count_ones()
+}
 
 /// 模板匹配的进度事件负载（事件名 template-progress）：只报补算指纹的张数
 #[derive(Clone, serde::Serialize)]
@@ -75,44 +78,30 @@ pub async fn find_images_like_template(
                 .ok_or_else(|| "模板图已不在库里（可能刚被删除或移出扫描范围）。".to_string())?;
             let mut pairs: Vec<Option<(u64, u64)>> =
                 rows.iter().map(|row| row.cached_sigs()).collect();
-            // 模板缺什么补什么：双指纹（32×32）与 PDQ（64×64）各一趟 ffmpeg，解完落库。
-            // 缺 dhash 的旧行 cached_sigs 会整体当没有
-            let mut t_phash_dhash = pairs[template_at];
-            let mut t_pdq = rows[template_at].cached_pdq();
-            if t_phash_dhash.is_none() || t_pdq.is_none() {
-                let fp = scanner::image_fingerprints(&rows[template_at].path)
+            // 模板没缓存指纹就先给自己算一份；缺 dhash 的旧行 cached_sigs 会整体当没有
+            if pairs[template_at].is_none() {
+                let (phash, dhash) = scanner::image_hashes(&rows[template_at].path)
                     .ok_or_else(|| "模板图解不出画面，没法当模板。".to_string())?;
-                if t_phash_dhash.is_none() {
-                    t_phash_dhash = Some((fp.phash, fp.dhash));
-                    pairs[template_at] = t_phash_dhash;
-                }
-                t_pdq = Some(fp.pdq);
+                pairs[template_at] = Some((phash, dhash));
                 let row = &rows[template_at];
                 if let Ok(conn) = app.state::<AppState>().db.lock() {
-                    if let Some((phash, dhash)) = t_phash_dhash {
-                        let _ = db::save_image_sigs(
-                            &conn,
-                            &[(
-                                row.id.clone(),
-                                phash as i64,
-                                dhash as i64,
-                                row.modified_at.clone(),
-                            )],
-                        );
-                    }
-                    let _ = db::save_image_pdq(&conn, &[(row.id.clone(), fp.pdq.to_vec())]);
+                    let _ = db::save_image_sigs(
+                        &conn,
+                        &[(
+                            row.id.clone(),
+                            phash as i64,
+                            dhash as i64,
+                            row.modified_at.clone(),
+                        )],
+                    );
                 }
             }
-            // 双指纹留作 pairs 缓存的一部分；比对只用 PDQ
-            let _ = t_phash_dhash;
-            let t_pdq = t_pdq.expect("上面刚补过");
+            let (t_phash, t_dhash) = pairs[template_at].unwrap();
 
             // 缺指纹的现补：复用重复检测那套按线程分片的补算（进度推到 template-progress 频道），
             // 补出来的直接拿进比对，落库留给下一趟当缓存
             let need: Vec<usize> = (0..rows.len())
-                .filter(|&i| {
-                    i != template_at && (pairs[i].is_none() || rows[i].cached_pdq().is_none())
-                })
+                .filter(|&i| i != template_at && pairs[i].is_none())
                 .collect();
             let _ = app.emit(
                 "template-progress",
@@ -122,21 +111,18 @@ pub async fn find_images_like_template(
                 },
             );
             let (fresh, skipped) = ensure_sigs_for_template(&app, &rows, &need);
-            let mut fresh_pdq_by_id: HashMap<String, [u8; 32]> = fresh
-                .into_iter()
-                .map(|(id, _sigs, pdq)| (id, pdq))
-                .collect();
+            let mut fresh_by_id: HashMap<String, (u64, u64)> =
+                fresh.into_iter().map(|(id, p, d)| (id, (p, d))).collect();
 
             let mut matches: Vec<TemplateMatch> = Vec::new();
             for (index, row) in rows.iter().enumerate() {
                 if index == template_at {
                     continue;
                 }
-                // 补算刚出来的优先；没补的（本轮已有缓存）从行上取
-                let pdq = fresh_pdq_by_id.remove(&row.id).or_else(|| row.cached_pdq());
+                let sigs = fresh_by_id.remove(&row.id).or_else(|| pairs[index]);
                 // 解不出画面的进不了比对：返回值里带上张数，别让"没匹配"被当成定论
-                if let Some(pdq) = pdq {
-                    let dd = template_pdq_distance(&pdq, &t_pdq);
+                if let Some((phash, dhash)) = sigs {
+                    let dd = template_distance(phash, dhash, t_phash, t_dhash);
                     if dd <= TEMPLATE_DISTANCE_MAX {
                         matches.push(TemplateMatch {
                             id: row.id.clone(),
@@ -156,20 +142,15 @@ pub async fn find_images_like_template(
 
 /// 模板匹配里补缺失指纹：与 ensure_sigs 同一套线程分片和落库节奏，
 /// 但不回填 pairs（调用方只需要"这次算出了什么"），返回 (新指纹清单, 解不出图的张数)。
-/// 双指纹缺的补全套（32×32 + 64×64 两趟 ffmpeg），只缺 PDQ 的补 64×64 一趟。
-/// fresh 里 Option 为 None 的行 = 双指纹本就有缓存、这次只算了 PDQ。
-/// 单条补算结果：图片 id + 双指纹（本轮已缓存不重算的为 None）+ PDQ
-type FreshSig = (String, Option<(u64, u64)>, [u8; 32]);
-
 fn ensure_sigs_for_template(
     app: &tauri::AppHandle,
     rows: &[db::ImageSig],
     indexes: &[usize],
-) -> (Vec<FreshSig>, usize) {
+) -> (Vec<(String, u64, u64)>, usize) {
     const EMIT_EVERY: usize = 256;
     const FLUSH_EVERY: usize = 64;
     let total = indexes.len();
-    let mut fresh = std::sync::Mutex::new(Vec::<FreshSig>::new());
+    let mut fresh = std::sync::Mutex::new(Vec::<(String, u64, u64)>::new());
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let threads = workers(total);
@@ -179,41 +160,24 @@ fn ensure_sigs_for_template(
             let (fresh, done, failed) = (&fresh, &done, &failed);
             s.spawn(move || {
                 let mut batch: Vec<SigUpdate> = Vec::with_capacity(FLUSH_EVERY);
-                let mut pdq_batch: Vec<(String, Vec<u8>)> = Vec::with_capacity(FLUSH_EVERY);
                 for (n, &index) in indexes.iter().enumerate() {
                     if n % threads != slot {
                         continue;
                     }
                     let row = &rows[index];
-                    // 已有双指纹缓存的只补 PDQ（一趟 ffmpeg）；都没有的补全套
-                    let outcome = if row.cached_sigs().is_some() {
-                        scanner::image_pdq(&row.path).map(|pdq| (None, pdq))
+                    if let Some((phash, dhash)) = scanner::image_hashes(&row.path) {
+                        lock_ignoring_poison(fresh).push((row.id.clone(), phash, dhash));
+                        batch.push((
+                            row.id.clone(),
+                            phash as i64,
+                            dhash as i64,
+                            row.modified_at.clone(),
+                        ));
                     } else {
-                        scanner::image_fingerprints(&row.path)
-                            .map(|fp| (Some((fp.phash, fp.dhash)), fp.pdq))
-                    };
-                    match outcome {
-                        Some((sigs, pdq)) => {
-                            if let Some((phash, dhash)) = sigs {
-                                batch.push((
-                                    row.id.clone(),
-                                    phash as i64,
-                                    dhash as i64,
-                                    row.modified_at.clone(),
-                                ));
-                            }
-                            pdq_batch.push((row.id.clone(), pdq.to_vec()));
-                            lock_ignoring_poison(fresh).push((row.id.clone(), sigs, pdq));
-                        }
-                        None => {
-                            failed.fetch_add(1, Ordering::Relaxed);
-                        }
+                        failed.fetch_add(1, Ordering::Relaxed);
                     }
                     if batch.len() >= FLUSH_EVERY {
                         let _ = flush(app, &mut batch, db::save_image_sigs);
-                    }
-                    if pdq_batch.len() >= FLUSH_EVERY {
-                        let _ = flush(app, &mut pdq_batch, db::save_image_pdq);
                     }
                     let processed = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if processed % EMIT_EVERY == 0 || processed == total {
@@ -223,9 +187,6 @@ fn ensure_sigs_for_template(
                 }
                 if !batch.is_empty() {
                     let _ = flush(app, &mut batch, db::save_image_sigs);
-                }
-                if !pdq_batch.is_empty() {
-                    let _ = flush(app, &mut pdq_batch, db::save_image_pdq);
                 }
             });
         }
