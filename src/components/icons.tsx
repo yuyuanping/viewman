@@ -24,8 +24,10 @@ function Icon({ size = "1em", children, ...rest }: IconProps & { children: React
       strokeLinejoin="round"
       aria-hidden="true"
       focusable="false"
-      // 文字流里的图标默认沉在基线上（x-height 偏下），抬回视觉居中；flex 容器里此样式无副作用
-      style={{ verticalAlign: "-0.125em" }}
+      // Tailwind preflight 把 svg 设为 display: block——文字流按钮（toolbar-chip 这类非 flex 容器）
+      // 里会独占一行，把文字挤到下一行叠起来。统一压回 inline-block 参与 inline 布局；
+      // 基线沉在 x-height 偏下，抬回视觉居中。flex 容器里这两条都无副作用
+      style={{ display: "inline-block", verticalAlign: "-0.125em" }}
       {...rest}
     >
       {children}
