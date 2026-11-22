@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
+import { flushSync } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
 import { QqBotPanel } from "./components/QqBotPanel";
@@ -76,9 +77,15 @@ function App() {
     return saved === "image" || saved === "qq" ? saved : "video";
   });
   const changeTab = useCallback((next: MediaKind) => {
-    setTab(next);
+    // 页签切换整块换主区内容，用视图过渡交叉淡出比硬切连贯；库/图片库懒加载块也能接住。
+    // 不支持 View Transitions 就直接落回原 setState；支持时 flushSync 保证过渡快照拍到新 DOM
+    if (next !== tab && document.startViewTransition) {
+      document.startViewTransition(() => flushSync(() => setTab(next)));
+    } else {
+      setTab(next);
+    }
     localStorage.setItem(TAB_PREF_KEY, next);
-  }, []);
+  }, [tab]);
   const [selectedImageDir, setSelectedImageDir] = useState<string | null>(null);
   // QQ Bot 状态常驻轮询：侧栏 tab 徽标在任何标签页下都实时，不等面板打开
   const { status: botStatus, error: botError, refresh: refreshBot } = useBotStatus();

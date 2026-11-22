@@ -212,3 +212,5 @@ button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-
 .player-progress .player-fill { transition: width .12s linear; }
 @media (max-width: 900px) { .library-sidebar { width: 220px; } .library-main { padding: 18px; } .video-tiles { gap: 14px; grid-template-columns: repeat(auto-fill,minmax(170px,1fr)); } .image-tiles { gap: 10px; grid-template-columns: repeat(auto-fill,minmax(120px,1fr)); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+/* 页签切换的视图过渡快照走伪元素，不吃上面的 * 降级，要单独关 */
+@media (prefers-reduced-motion: reduce) { ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; } }

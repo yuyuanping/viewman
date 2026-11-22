@@ -109,5 +109,5 @@ export function sortMedia<T extends SortableVideo>(items: T[], field: SortField,
     if (right === null) return -1;
     return factor * (left - right);
   };
-  return [...items].sort(compare);
+  return items.toSorted(compare);
 }
