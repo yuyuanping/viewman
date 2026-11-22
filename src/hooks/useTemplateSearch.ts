@@ -60,6 +60,10 @@ export function useTemplateSearch({ fetchImagesByIds, libraryVersion, setSelectM
       const result = await api.findImagesLikeTemplate(tpl.id);
       setMatches(result.matches);
       setSkipped(result.skipped);
+      // knee 自适应：每个模板的相似带尾巴位置不同，滑杆起点跟着后端建议走
+      setThreshold(Math.min(result.suggested_threshold, TEMPLATE_THRESHOLD_MAX));
+      // knee 自适应：每个模板的相似带尾巴位置不同，滑杆起点跟着后端建议走
+      setThreshold(Math.min(result.suggested_threshold, TEMPLATE_THRESHOLD_MAX));
       // 元数据现查：命中可能散在全库，不为它建整库索引。
       // 模板不覆盖——传进来的 tpl 本来就是全量元数据，再覆盖只会白查一趟
       const rows = await fetchImagesByIds(result.matches.map(m => m.id));

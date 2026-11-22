@@ -1,11 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Image } from "../types";
 import type { TemplateMatch } from "../api";
 import { formatFileSize, formatResolution } from "../utils";
 import { JustifiedGrid } from "./JustifiedGrid";
 import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
-import { IconCheck } from "./icons";
+import { IconCheck, IconMaximize } from "./icons";
 import { TEMPLATE_THRESHOLD_MAX } from "../hooks/useTemplateSearch";
 
 /** JustifiedGrid 的稳定回调：内联箭头函数每次渲染都换引用，会把布局缓存全部打穿 */
@@ -82,6 +82,62 @@ export function TemplateMatchPanel({
   // 命中右键菜单：与网格卡片同一套（打开所在位置 / 复制文件名 / 移动到… / 删除到回收站）
   const { menu, openMenu, closeMenu } = useContextMenu<Image>();
   const { reveal, copyName } = useFileMenuActions(onError);
+
+  // 命中卡片渲染器：局部/常规两段共用（内联箭头函数每次渲染都换引用，会把布局缓存全部打穿）
+  const renderCard = useCallback((
+    { hit, image }: { hit: TemplateMatch; image: Image },
+    imageH: number,
+  ) => {
+    const selected = selectedIds.has(image.id);
+    return (
+      <div className="relative min-w-0" onContextMenu={(e) => openMenu(e, image)}>
+        <div className={`rounded-lg overflow-hidden border border-white/10 bg-[#151f2e]${selected ? " media-selected" : ""}`}>
+          <button
+            type="button"
+            onClick={() => onToggle(image)}
+            aria-pressed={selected}
+            className="block w-full text-left"
+            title={selected ? `取消勾选 ${image.filename}` : `勾选 ${image.filename}`}
+          >
+            <span className="relative block bg-[#0f1723] overflow-hidden" style={{ height: imageH }}>
+              <img
+                src={convertFileSrc(image.thumbnail_path ?? image.path)}
+                alt={image.filename}
+                loading="lazy"
+                className="w-full h-full object-contain"
+              />
+              {selected && (
+                <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true"><IconCheck /></span>
+              )}
+            </span>
+            <span className="block px-1.5 pt-1.5 pb-1.5 overflow-hidden" style={{ height: 46 }}>
+              <span className="block text-[11px] leading-4 text-gray-200 truncate" title={image.filename}>
+                {image.filename}
+              </span>
+              <span className="block text-[10px] leading-4 text-gray-500 mt-0.5 tabular-nums">
+                {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
+                {` · `}
+                <span className={hit.distance === 0 ? "text-emerald-400" : hit.distance <= 24 ? "text-sky-300" : undefined}>
+                  距 {hit.distance}
+                </span>
+              </span>
+            </span>
+          </button>
+        </div>
+        <span className="absolute top-1.5 right-1.5">
+          <button
+            type="button"
+            onClick={() => onOpenImage(image, visibleIds)}
+            className="w-6 h-6 grid place-items-center rounded bg-gray-950/80 hover:bg-gray-700 text-gray-200"
+            title="看大图"
+            aria-label={`放大 ${image.filename}`}
+          >
+            <IconMaximize size={11} />
+          </button>
+        </span>
+      </div>
+    );
+  }, [selectedIds, openMenu, onToggle, onOpenImage, visibleIds]);
 
   return (
     <div className="image-viewer fixed inset-0 z-40 flex flex-col" role="dialog" aria-modal="true" aria-label="模板匹配结果">
@@ -204,57 +260,7 @@ export function TemplateMatchPanel({
             keyOf={keyOfEntry}
             textH={46}
             targetImageH={200}
-            renderItem={({ hit, image }, imageH) => {
-              const selected = selectedIds.has(image.id);
-              return (
-                <div className="relative min-w-0" onContextMenu={(e) => openMenu(e, image)}>
-                  <div className={`rounded-lg overflow-hidden border border-white/10 bg-[#151f2e]${selected ? " media-selected" : ""}`}>
-                    <button
-                      type="button"
-                      onClick={() => onToggle(image)}
-                      aria-pressed={selected}
-                      className="block w-full text-left"
-                      title={selected ? `取消勾选 ${image.filename}` : `勾选 ${image.filename}`}
-                    >
-                      <span className="relative block bg-[#0f1723] overflow-hidden" style={{ height: imageH }}>
-                        <img
-                          src={convertFileSrc(image.thumbnail_path ?? image.path)}
-                          alt={image.filename}
-                          loading="lazy"
-                          className="w-full h-full object-contain"
-                        />
-                        {selected && (
-                          <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true"><IconCheck /></span>
-                        )}
-                      </span>
-                      <span className="block px-1.5 pt-1.5 pb-1.5 overflow-hidden" style={{ height: 46 }}>
-                        <span className="block text-[11px] leading-4 text-gray-200 truncate" title={image.filename}>
-                          {image.filename}
-                        </span>
-                        <span className="block text-[10px] leading-4 text-gray-500 mt-0.5 tabular-nums">
-                          {formatFileSize(image.file_size)} · {formatResolution(image.width, image.height)}
-                          {` · `}
-                          <span className={hit.distance === 0 ? "text-emerald-400" : hit.distance <= 24 ? "text-sky-300" : undefined}>
-                            距 {hit.distance}
-                          </span>
-                        </span>
-                      </span>
-                    </button>
-                  </div>
-                  <span className="absolute top-1.5 right-1.5">
-                    <button
-                      type="button"
-                      onClick={() => onOpenImage(image, visibleIds)}
-                      className="w-6 h-6 grid place-items-center rounded bg-gray-950/80 hover:bg-gray-700 text-[11px] text-gray-200"
-                      title="看大图"
-                      aria-label={`放大 ${image.filename}`}
-                    >
-                      ⤢
-                    </button>
-                  </span>
-                </div>
-              );
-            }}
+            renderItem={renderCard}
           />
         )}
       </div>

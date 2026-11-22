@@ -461,7 +461,8 @@ mod tests {
     fn test_ensure_columns_adds_pdq_to_dhash_era_library() {
         let conn = Connection::open_in_memory().unwrap();
         create_tables(&conn).unwrap();
-        conn.execute("ALTER TABLE images DROP COLUMN pdq", []).unwrap();
+        conn.execute("ALTER TABLE images DROP COLUMN pdq", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO images (id, path, filename, file_size, phash, dhash, sig_modified_at)
              VALUES ('i1', 'C:/pics/a.png', 'a.png', 10, 7, 9, '1700')",

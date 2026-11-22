@@ -177,9 +177,8 @@ pub fn get_image_stats(conn: &Connection, roots: &[String]) -> Result<ImageStats
 
 /// 有封面路径的 (id, 封面路径)：启动体检拿这份清单核对缓存文件还在不在盘上
 pub fn list_image_thumbnail_paths(conn: &Connection) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, thumbnail_path FROM images WHERE thumbnail_path IS NOT NULL",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, thumbnail_path FROM images WHERE thumbnail_path IS NOT NULL")?;
     let rows = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>>>()?;
@@ -263,6 +262,8 @@ pub struct ImageSig {
     pub sig_modified_at: Option<String>,
     /// PDQ 感知哈希（Meta 开源 256 位，32 字节）：以图搜图的排序通道。
     /// 晚于双指纹加入，老行大面积为 NULL，模板匹配首次运行时按需补算
+    /// （休眠：PDQ 实测不适配模板排序，列与指纹保留待用，见 pdq.rs 头注）
+    #[allow(dead_code)]
     pub pdq: Option<Vec<u8>>,
 }
 
@@ -281,6 +282,7 @@ impl ImageSig {
     }
 
     /// 以图搜图用的 PDQ 指纹；过期判定随双指纹走（同一批 ffmpeg 产物）
+    #[allow(dead_code)]
     pub fn cached_pdq(&self) -> Option<[u8; 32]> {
         match (self.cached_sigs(), self.pdq.as_deref()) {
             (Some(_), Some(bytes)) if bytes.len() == 32 => {
@@ -364,6 +366,7 @@ pub fn save_image_sigs(
 
 /// 一批 PDQ 指纹写回库（一次事务）：(image_id, 32 字节哈希)。
 /// 不动 sig_modified_at：那是双指纹的账本，PDQ 的补算不翻新它
+#[allow(dead_code)]
 pub fn save_image_pdq(conn: &Connection, updates: &[(String, Vec<u8>)]) -> Result<()> {
     if updates.is_empty() {
         return Ok(());
