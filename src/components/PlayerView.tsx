@@ -88,6 +88,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
                 className="player-video max-h-full max-w-full bg-black object-contain transition-transform duration-200"
                 controls={false}
                 playsInline
+                data-morph-hero=""
               />
             ) : (
               <p className="text-sm text-white/70">

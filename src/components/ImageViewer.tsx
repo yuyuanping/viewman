@@ -300,6 +300,8 @@ export function ImageViewer({ images, index, onNavigate, onClose, onDelete, onMo
               src={convertFileSrc(image.path)}
               alt={image.filename}
               draggable={false}
+              data-morph-hero=""
+              decoding="async"
               style={{ transform: `translate(-50%, -50%) rotate(${rotation}deg) scale(${scale})` }}
               onDoubleClick={toggleActualSize}
               onLoad={(e) => {

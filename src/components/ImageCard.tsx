@@ -24,7 +24,8 @@ interface ImageCardProps {
   /** 只给 id：网格把「第几张 + shift」绑定的闭包收在自己手里（见 ImageGrid），
    *  卡片这边保持稳定引用，memo 才不会被每次渲染的新箭头打穿 */
   onToggleSelect?: (shiftKey: boolean) => void;
-  onOpen: (image: Image) => void;
+  /** sourceEl：被点的预览元素，供共享元素过渡从卡片飞到查看器 */
+  onOpen: (image: Image, sourceEl?: HTMLElement) => void;
   /** 删除成功后回报 id，父层据此就地剔除，不再重拉整库 */
   onDeleted: (imageId: string) => void;
   onMoved: (imageId: string, newPath: string) => void;
@@ -99,6 +100,7 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
 
   return (
     <article
+      data-media-id={image.id}
       className={`image-card${selected ? " media-selected" : ""}${duplicate ? " image-duplicate" : ""}${animated ? " image-animated" : ""}`}
       title={duplicate ? "与库内其他图片内容相同（多余副本，可在工具栏「重复图片分组」里审阅后删除）" : animated ? "多帧动图（GIF/APNG/动态 WebP），勾选后可批量清理" : undefined}
       onContextMenu={(e) => openMenu(e, undefined)}
@@ -108,7 +110,7 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
           // 多选模式里点击切换勾选；没进多选时 Shift 点也按选择算（连选入口，资源管理器式），
           // 普通点击仍是打开查看器
           if (selectMode || e.shiftKey) onToggleSelect?.(e.shiftKey);
-          else onOpen(image);
+          else onOpen(image, e.currentTarget.querySelector<HTMLElement>(".image-preview") ?? e.currentTarget);
         }}
         disabled={deleting}
         className="block w-full text-left"
@@ -126,6 +128,7 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
             src={convertFileSrc(preview)}
             alt={image.filename}
             loading="lazy"
+            decoding="async"
             className="media-thumbnail"
             onError={() => { if (thumb) setDeadThumb(thumb); }}
           />

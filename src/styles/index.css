@@ -19,6 +19,11 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 button:focus-visible, input:focus-visible { outline: 2px solid #96a6ff; outline-offset: 3px; }
 ::selection { background: #5268dc70; }
+/* 标题按 text-wrap: balance 均衡断行（modern-web-guidance：balance 只给标题这类短文本块，别全局套） */
+h1, h2, h3 { text-wrap: balance; }
+/* 卡片 → 全屏层（查看器/播放器）共享元素过渡：全屏侧媒体元素静态持有名字，
+   卡片侧由 mediaMorph.ts 在过渡期间以内联样式临时持有同一个名字 */
+[data-morph-hero] { view-transition-name: media-hero; }
 * { scrollbar-width: thin; scrollbar-color: #34425a transparent; }
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-thumb { background: #34425a; border-radius: 10px; }

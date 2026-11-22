@@ -14,7 +14,7 @@ interface VideoGridProps {
   selectMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (index: number, shiftKey: boolean) => void;
-  onPlay: (video: Video) => void;
+  onPlay: (video: Video, sourceEl?: HTMLElement) => void;
   onDeleted: (videoId: string) => void;
   onMoved: (videoId: string, newPath: string) => void;
   /** 目录/过滤切换时滚动归零并重测网格几何 */

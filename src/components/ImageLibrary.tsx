@@ -4,6 +4,7 @@ import { ImageGrid } from "./ImageGrid";
 import { ImageToolbar } from "./ImageToolbar";
 import type { ImageSortField } from "./ImageToolbar";
 import { ImageViewer } from "./ImageViewer";
+import { morphFromOverlay, morphToOverlay } from "../mediaMorph";
 import { GroupReviewPanel } from "./GroupReviewPanel";
 import { TemplateMatchPanel } from "./TemplateMatchPanel";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
@@ -312,10 +313,13 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
     void moveSelectedTo(dir);
   }, selectedIds.size > 0 && viewerIndex === null && !movingSelected && movePrompt === null);
 
-  const openViewer = useCallback((image: Image) => {
+  // sourceEl：被点的卡片预览元素，共享元素过渡从卡片飞到查看器（mediaMorph.ts）
+  const openViewer = useCallback((image: Image, sourceEl?: HTMLElement) => {
     const index = filteredImages.findIndex(i => i.id === image.id);
-    setViewerList(filteredImages);
-    setViewerIndex(index >= 0 ? index : 0);
+    morphToOverlay(sourceEl, () => {
+      setViewerList(filteredImages);
+      setViewerIndex(index >= 0 ? index : 0);
+    });
   }, [filteredImages]);
 
   /** 从分组面板放大：翻页范围就是这一组，逐张比对着决定删谁 */
@@ -339,9 +343,12 @@ export function ImageLibrary({ libraryVersion, stats, refreshLibrary, selectedDi
   }, [filteredImages]);
 
   const closeViewer = useCallback(() => {
-    setViewerIndex(null);
-    setViewerList([]);
-  }, []);
+    // 退场同样走共享元素过渡：当前这张的卡片还在虚拟窗口里就从它收回去，不在就普通关闭
+    morphFromOverlay(() => {
+      setViewerIndex(null);
+      setViewerList([]);
+    }, viewerList[viewerIndex ?? -1]?.id ?? null);
+  }, [viewerList, viewerIndex]);
 
   // 单张删除（面板/查看器右键共用）：返回值表示是否真删掉了，调用方据此决定翻页
   const handleSingleDelete = useCallback(async (image: Image): Promise<boolean> => {
