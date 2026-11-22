@@ -39,8 +39,6 @@ interface SidebarProps {
   onRemoveRoot: (dir: string) => Promise<void>;
   /** 取消当前扫描：后端 cancel_task(scan-video/scan-image)，已扫部分保留 */
   onCancelScan?: (task: string) => void;
-  /** QQ 存档 tab 徽标：下载队列里未完成的条数（pending + busy + dead） */
-  qqQueueCount: number;
   /** NapCat 状态由 App 上的 useNapcatStatus 常驻提供，QQ tab 时侧栏底部显示精简状态条 */
   napcat: ReturnType<typeof useNapcatStatus>;
   /** QQ tab 下移到侧栏的控制面：标题行 + NapCat 配置卡。主面板只剩下载列表 */
@@ -57,7 +55,7 @@ export function Sidebar({
   loading, scanProgress, rescanStatus, usePotPlayer, onTogglePotPlayer,
   images, selectedImageDir, onSelectImageDir, onScanImageDirectory,
   imageLoading, imageScanProgress, imageRescanStatus,
-  roots, removingRoot, onRemoveRoot, onCancelScan, qqQueueCount, napcat,
+  roots, removingRoot, onRemoveRoot, onCancelScan, napcat,
   botStatus, notify, refreshBot,
 }: SidebarProps) {
   const [potplayerOk, setPotplayerOk] = useState<boolean | null>(null);
@@ -129,7 +127,7 @@ export function Sidebar({
           图片 <span className="media-tab-count">{formatCompactCount(images?.total ?? 0)}</span>
         </button>
         <button role="tab" type="button" aria-selected={isQqTab} className={`media-tab${isQqTab ? " media-tab-active" : ""}`} onClick={() => onTabChange("qq")}>
-          QQ <span className="media-tab-count">{formatCompactCount(qqQueueCount)}</span>
+          QQ
         </button>
       </div>
       {!isQqTab && <>
