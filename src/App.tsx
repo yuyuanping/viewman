@@ -88,7 +88,7 @@ function App() {
     localStorage.setItem(TAB_PREF_KEY, next);
   }, [tab]);
   const [selectedImageDir, setSelectedImageDir] = useState<string | null>(null);
-  // QQ Bot 状态常驻轮询：侧栏 tab 徽标在任何标签页下都实时，不等面板打开
+  // QQ Bot 状态常驻轮询：面板数据在任何标签页下都实时，不等面板打开
   const { status: botStatus, error: botError, refresh: refreshBot } = useBotStatus();
   const napcat = useNapcatStatus();
   // 预热播放器懒块：点卡片开播放器走共享元素过渡，过渡回调里 flushSync 渲染时块必须已在缓存，
@@ -98,7 +98,6 @@ function App() {
     if ("requestIdleCallback" in window) requestIdleCallback(warm);
     else setTimeout(warm, 1500);
   }, []);
-  const qqQueueCount = botStatus ? botStatus.dl.pending + botStatus.dl.busy + botStatus.dl.dead : 0;
 
   useEffect(() => {
     void loadImageLibrary();
@@ -565,7 +564,6 @@ function App() {
         onCancelScan={(task) => {
           api.cancelTask(task).catch((e) => notify(`取消失败：${String(e)}`, "error"));
         }}
-        qqQueueCount={qqQueueCount}
         napcat={napcat}
         botStatus={botStatus}
         notify={notify}
