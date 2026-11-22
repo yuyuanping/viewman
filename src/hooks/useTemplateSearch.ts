@@ -17,13 +17,13 @@ interface TemplateSearchOptions {
 }
 
 /**
- * 命中过滤的默认宽容度（PDQ 256 位汉明距离口径，见 src-tauri/src/pdq.rs）。
- * 随机对的距离期望在 128 上下、几乎不会低于 96，真正的相似图远低于此；
- * 默认 40 覆盖近重复（Meta 经验阈值 31）到"同版式相似"的主带，
- * 滑杆只在前端过滤，改了不用重跑。
+ * 命中过滤的默认宽容度（求和口径：两枚指纹的距离之和）。
+ * 实测（18 万张库、以一张评论区文字截图为模板）：真正的"同版式"近邻落在 28–34，
+ * 撞车洪峰从 40 出头才起（≤36 只有 34 条，≤40 就有 202 条，≤48 有 4564 条）——
+ * 默认 32 卡在平台区和洪峰之间；滑杆只在前端过滤，改了不用重跑。
  */
-export const TEMPLATE_THRESHOLD_DEFAULT = 40;
-export const TEMPLATE_THRESHOLD_MAX = 96;
+export const TEMPLATE_THRESHOLD_DEFAULT = 32;
+export const TEMPLATE_THRESHOLD_MAX = 48;
 
 const NO_INDEX = new Map<string, Image>();
 const NO_MATCHES: TemplateMatch[] = [];
