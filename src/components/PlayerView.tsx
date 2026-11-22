@@ -6,6 +6,7 @@ import { usePlayerPlayback, RATES } from "../hooks/usePlayerPlayback";
 import { usePlayerShortcuts } from "../hooks/usePlayerShortcuts";
 import { useFullscreen } from "../hooks/useFullscreen";
 import { useVideoRotation } from "../hooks/useVideoRotation";
+import { IconMaximize, IconMinimize, IconSkipBack, IconSkipForward, IconX } from "./icons";
 
 interface PlayerViewProps {
   video: Video;
@@ -142,7 +143,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
                 className="shrink-0 text-red-300 hover:text-white transition"
                 aria-label="关闭提示"
               >
-                ✕
+                <IconX />
               </button>
             </div>
             {playback.fileReadable && onFallback && (
@@ -196,7 +197,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
               className="inline-flex items-center gap-1.5 rounded-full bg-white/10 hover:bg-white/15 px-3 py-1.5 text-xs text-white/90 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
               title="上一个视频"
             >
-              ⏮ 上一个
+              <IconSkipBack /> 上一个
             </button>
             <button
               onClick={() => playback.stepVideo(1)}
@@ -204,7 +205,7 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
               className="inline-flex items-center gap-1.5 rounded-full bg-white/10 hover:bg-white/15 px-3 py-1.5 text-xs text-white/90 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
               title="下一个视频"
             >
-              下一个 ⏭
+              下一个 <IconSkipForward />
             </button>
             <select
               value={playback.rate}
@@ -236,7 +237,10 @@ export function PlayerView({ video, initialPosition, onClose, onProgress, onFall
               aria-label={isFullscreen ? "退出全屏" : "全屏"}
               title={isFullscreen ? "退出全屏（Esc）" : "全屏播放（也可双击画面）"}
             >
-              <span>{isFullscreen ? "⛶ 退出" : "⛶ 全屏"}</span>
+              <span className="inline-flex items-center gap-1.5">
+                {isFullscreen ? <IconMinimize /> : <IconMaximize />}
+                {isFullscreen ? "退出" : "全屏"}
+              </span>
             </button>
             {playback.autoMuted && (
               <button

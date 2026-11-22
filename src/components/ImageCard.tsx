@@ -8,6 +8,7 @@ import { CARD_TEXT_H } from "../justifiedLayout";
 import { copyToClipboard, formatFileSize, formatResolution } from "../utils";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { MoveTargetsDialog } from "./MoveTargetsDialog";
+import { IconCheck, IconX } from "./icons";
 
 interface ImageCardProps {
   image: Image;
@@ -118,7 +119,7 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
           {animated && <span className="anim-flag">动图</span>}
           {selectMode && (
             <span className={`select-check${selected ? " select-checked" : ""}`} aria-hidden="true">
-              {selected ? "✓" : ""}
+              {selected && <IconCheck />}
             </span>
           )}
           <img
@@ -145,7 +146,7 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
           title="删除到回收站"
           aria-label={`删除 ${image.filename} 到回收站`}
         >
-          {deleting ? "…" : "×"}
+          {deleting ? "…" : <IconX />}
         </button>
       )}
       {movePromptOpen && (
@@ -177,7 +178,7 @@ export const ImageCard = memo(function ImageCard({ image, imageHeight, selectMod
       {actionError && (
         <div className="mx-2 mb-2 rounded-lg bg-red-950/90 px-2 py-1.5 text-[11px] leading-4 text-red-200 flex justify-between gap-2">
           <span className="break-all">{actionError}</span>
-          <button onClick={() => setActionError(null)} aria-label="关闭错误" className="shrink-0 hover:text-white">✕</button>
+          <button onClick={() => setActionError(null)} aria-label="关闭错误" className="shrink-0 hover:text-white"><IconX /></button>
         </div>
       )}
     </article>

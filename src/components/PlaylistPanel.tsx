@@ -5,6 +5,7 @@ import { logger } from "../logger";
 import type { Video } from "../types";
 import { copyToClipboard, formatTime } from "../utils";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { IconX } from "./icons";
 
 interface PlaylistPanelProps {
   playlist: Video[];
@@ -71,7 +72,7 @@ export function PlaylistPanel({ playlist, currentId, progress, onSelect, onDelet
                 title="删除到回收站"
                 aria-label={`删除 ${item.filename}`}
               >
-                ✕
+                <IconX />
               </button>
             )}
           </div>

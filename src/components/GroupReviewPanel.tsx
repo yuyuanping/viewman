@@ -6,6 +6,7 @@ import { groupsMatching } from "../similarGroups";
 import { formatFileSize, formatResolution } from "../utils";
 import { JustifiedGrid } from "./JustifiedGrid";
 import { ContextMenu, useContextMenu, useFileMenuActions } from "./ContextMenu";
+import { IconCheck } from "./icons";
 
 /** 一组超过这个张数就先折起来：几百张一次铺出来既卡又没法逐张比对 */
 const COLLAPSE_AT = 24;
@@ -292,7 +293,7 @@ export function GroupReviewPanel({
                               className="w-full h-full object-contain"
                             />
                             {selected && (
-                              <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true">✓</span>
+                              <span className="absolute top-1 left-1 w-5 h-5 grid place-items-center rounded-full bg-blue-600 text-white text-[12px] font-bold" aria-hidden="true"><IconCheck /></span>
                             )}
                             {isKeep && (
                               <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-gray-950/85 text-[10px] text-emerald-300">保留</span>

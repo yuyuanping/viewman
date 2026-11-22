@@ -1,5 +1,6 @@
 import type { SortField, SortDirection, WatchState } from "../libraryFilter";
 import { hevcNativeSupported } from "../utils";
+import { IconArrowDown, IconArrowUp, IconX } from "./icons";
 
 interface LibraryToolbarProps {
   sortField: SortField;
@@ -181,7 +182,7 @@ export function LibraryToolbar({
         aria-label={sortDirection === "asc" ? "当前升序，点击切换为降序" : "当前降序，点击切换为升序"}
         title={sortDirection === "asc" ? "升序" : "降序"}
       >
-        {sortDirection === "asc" ? "↑ 升序" : "↓ 降序"}
+        {sortDirection === "asc" ? <><IconArrowUp /> 升序</> : <><IconArrowDown /> 降序</>}
       </button>
       <button
         type="button"
@@ -270,8 +271,8 @@ export function LibraryToolbar({
           >
             {convertingFakes ? "转换中…" : `${fakeCount} 个假视频（图片） · 转换为图片`}
           </button>
-          <button type="button" className="toolbar-chip" onClick={onClearFakes} disabled={convertingFakes} title="清除假视频标记">
-            ✕
+          <button type="button" className="toolbar-chip" onClick={onClearFakes} disabled={convertingFakes} title="清除假视频标记" aria-label="清除假视频标记">
+            <IconX />
           </button>
         </>
       )}
@@ -297,8 +298,8 @@ export function LibraryToolbar({
           >
             {convertingShorts ? "转换中…" : `${shortCount} 个静图短视频 · 抽帧转图片`}
           </button>
-          <button type="button" className="toolbar-chip" onClick={onClearShorts} disabled={convertingShorts} title="清除检测结果">
-            ✕
+          <button type="button" className="toolbar-chip" onClick={onClearShorts} disabled={convertingShorts} title="清除检测结果" aria-label="清除检测结果">
+            <IconX />
           </button>
         </>
       )}
@@ -329,8 +330,8 @@ export function LibraryToolbar({
           {duplicateCaveat && (
             <span className="text-xs text-gray-400" title={duplicateCaveat}>{duplicateCaveat}</span>
           )}
-          <button type="button" className="toolbar-chip" onClick={onClearDuplicates} disabled={deletingDuplicates} title="清除检测结果">
-            ✕
+          <button type="button" className="toolbar-chip" onClick={onClearDuplicates} disabled={deletingDuplicates} title="清除检测结果" aria-label="清除检测结果">
+            <IconX />
           </button>
         </>
       )}
@@ -360,8 +361,8 @@ export function LibraryToolbar({
               ? `转码中 ${hevcProgress ? `${hevcProgress.processed}/${hevcProgress.total}` : ""}`
               : `${hevcCount} 个 HEVC · 永久转码 H.264`}
           </button>
-          <button type="button" className="toolbar-chip" onClick={onClearHevc} disabled={convertingHevc} title="清除检测结果">
-            ✕
+          <button type="button" className="toolbar-chip" onClick={onClearHevc} disabled={convertingHevc} title="清除检测结果" aria-label="清除检测结果">
+            <IconX />
           </button>
         </>
       )}

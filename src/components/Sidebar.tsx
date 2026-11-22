@@ -10,6 +10,7 @@ import { useNapcatStatus } from "../hooks/useNapcatStatus";
 import type { Notify } from "../hooks/useToasts";
 import type { BotStatus, MediaKind, Video, RecentlyPlayed as RecentlyPlayedType } from "../types";
 import { QqBotControls } from "./QqBotControls";
+import { IconCheck, IconX } from "./icons";
 
 interface SidebarProps {
   tab: MediaKind;
@@ -176,13 +177,13 @@ export function Sidebar({
           onClick={handleTogglePotPlayer}
           className={`py-1.5 px-4 rounded text-xs ${usePotPlayer ? "bg-green-700 hover:bg-green-600" : "bg-gray-700 hover:bg-gray-600"}`}
         >
-          {usePotPlayer ? "PotPlayer ✓" : "外部播放器"}
+          {usePotPlayer ? <>PotPlayer <IconCheck /></> : "外部播放器"}
         </button>
       )}
       {operationError && <span role="alert" className="text-red-300 text-xs">{operationError}</span>}
       {!isImageTab && usePotPlayer && <span className="text-gray-400 text-xs">进度同步需要 PotPlayer 标题栏显示当前时间；读取不到时会保留原进度，不自动修改播放器配置。</span>}
-      {!isImageTab && potplayerOk === false && <span className="text-red-400 text-xs">✗ 未找到 PotPlayer</span>}
-      {ffprobeOk === false && <span className="text-yellow-500 text-xs">✗ 未检测到 ffprobe，将无法获取时长、图片尺寸和封面</span>}
+      {!isImageTab && potplayerOk === false && <span className="text-red-400 text-xs inline-flex items-center gap-1"><IconX />未找到 PotPlayer</span>}
+      {ffprobeOk === false && <span className="text-yellow-500 text-xs inline-flex items-center gap-1"><IconX />未检测到 ffprobe，将无法获取时长、图片尺寸和封面</span>}
       <div className="border-t border-gray-700 my-1" />
       {roots.length > 0 && (
         <div className="flex flex-col gap-1">
@@ -202,7 +203,7 @@ export function Sidebar({
                     aria-label={`移除目录 ${dir}`}
                     className="shrink-0 w-5 h-5 grid place-items-center rounded text-gray-500 hover:text-red-300 hover:bg-gray-700 disabled:opacity-40"
                   >
-                    ✕
+                    <IconX />
                   </button>
                 </li>
               );

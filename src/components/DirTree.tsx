@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { buildDirTree, buildDirTreeFromCounts } from "../dirTree";
 import type { DirNode, MediaItem } from "../dirTree";
+import { IconChevronDown, IconChevronRight, IconFile, IconFolder } from "./icons";
 
 interface DirTreeProps {
   /** 全量清单建树（视频库还在用） */
@@ -31,7 +32,7 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
           onClick={() => onSelectDir(null)}
           className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center gap-2 transition-colors ${isSelected ? "bg-blue-600 text-white" : "text-gray-200 hover:bg-white/5"}`}
         >
-          <span>📁 {node.name}</span>
+          <span className="inline-flex items-center gap-1.5"><IconFolder />{node.name}</span>
           <span className="ml-auto text-xs text-gray-400">{node.itemCount}</span>
         </button>
         {node.children.map(child => (
@@ -55,9 +56,9 @@ function DirNodeView({ node, depth, selectedDir, onSelectDir }: {
         style={{ paddingLeft: `${10 + depth * 16}px` }}
       >
         {hasChildren ? (
-          <span className="text-xs w-4">{expanded ? "▼" : "▶"}</span>
+          <span className="text-xs w-4">{expanded ? <IconChevronDown /> : <IconChevronRight />}</span>
         ) : (
-          <span className="text-xs w-4">📄</span>
+          <span className="text-xs w-4"><IconFile /></span>
         )}
         <span className="truncate flex-1">{node.name}</span>
         <span className="text-xs text-gray-400">{node.itemCount}</span>

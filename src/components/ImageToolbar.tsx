@@ -1,4 +1,5 @@
 import type { SortDirection } from "../libraryFilter";
+import { IconArrowDown, IconArrowUp, IconX } from "./icons";
 
 /** 图片库没有时长，排序字段比视频库少一项 */
 export type ImageSortField = "filename" | "file_size" | "created_at" | "modified_at";
@@ -106,7 +107,7 @@ export function ImageToolbar({
         aria-label={sortDirection === "asc" ? "当前升序，点击切换为降序" : "当前降序，点击切换为升序"}
         title={sortDirection === "asc" ? "升序" : "降序"}
       >
-        {sortDirection === "asc" ? "↑ 升序" : "↓ 降序"}
+        {sortDirection === "asc" ? <><IconArrowUp /> 升序</> : <><IconArrowDown /> 降序</>}
       </button>
       <button
         type="button"
@@ -152,8 +153,8 @@ export function ImageToolbar({
           >
             {duplicateGroupCount} 组重复 · 查看
           </button>
-          <button type="button" className="toolbar-chip" onClick={onClearDuplicates} title="清除重复检测结果">
-            ✕
+          <button type="button" className="toolbar-chip" onClick={onClearDuplicates} title="清除重复检测结果" aria-label="清除重复检测结果">
+            <IconX />
           </button>
         </>
       )}
@@ -189,8 +190,8 @@ export function ImageToolbar({
               未检出动图
             </span>
           )}
-          <button type="button" className="toolbar-chip" onClick={onClearAnimated} title="清除动图检测结果">
-            ✕
+          <button type="button" className="toolbar-chip" onClick={onClearAnimated} title="清除动图检测结果" aria-label="清除动图检测结果">
+            <IconX />
           </button>
         </>
       )}
